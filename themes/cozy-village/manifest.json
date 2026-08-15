@@ -1,0 +1,14 @@
+{
+  "id": "cozy-village",
+  "name": "Cozy Village",
+  "version": "0.4.0",
+  "contractVersion": "0.4.0",
+  "tier": "render+actions",
+  "adapter": "webgl",
+  "entry": "entry.mjs",
+  "description": "A functional seven-station village where real work moves through Atelier's lifecycle.",
+  "author": "atelier",
+  "vendored": [
+    "three.js r170 (MIT)"
+  ]
+}

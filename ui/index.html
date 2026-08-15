@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- Atelier deliberately has no service worker: offline is meaningless for a loopback tool. -->
+    <title>Atelier</title>
+    <link rel="stylesheet" href="/atelier.css" />
+  </head>
+  <body>
+    <header class="mobile-topbar">
+      <button
+        id="sidebar-menu-toggle"
+        class="icon-button menu-button"
+        type="button"
+        aria-controls="atelier-sidebar"
+        aria-expanded="false"
+        aria-label="Open navigation"
+      >
+        <span aria-hidden="true">☰</span>
+      </button>
+      <a class="mobile-wordmark" href="#/dispatches">Atelier</a>
+      <span class="loopback-status">
+        <span class="status-dot" aria-hidden="true"></span>
+        Local
+      </span>
+    </header>
+
+    <button
+      id="sidebar-backdrop"
+      class="sidebar-backdrop"
+      type="button"
+      aria-label="Close navigation"
+      tabindex="-1"
+    ></button>
+
+    <div class="atelier-shell">
+      <aside id="atelier-sidebar" class="sidebar" aria-label="Atelier navigation">
+        <a class="wordmark" href="#/dispatches" aria-label="Atelier home">
+          <span class="wordmark-mark" aria-hidden="true">R</span>
+          <span>
+            <strong>Atelier</strong>
+            <small>Agent cockpit</small>
+          </span>
+        </a>
+
+        <nav id="sidebar-nav" class="sidebar-nav" aria-label="Projects and dispatches">
+          <p class="sidebar-loading">Loading projects…</p>
+        </nav>
+
+        <div class="sidebar-footer">
+          <span
+            class="loopback-status"
+            title="Bound to 127.0.0.1 - only this machine can connect. No LAN or internet exposure, by design."
+          >
+            <span class="status-dot" aria-hidden="true"></span>
+            Local only
+          </span>
+          <a id="styleguide-link" class="sidebar-footer-link" href="#/styleguide">Styleguide</a>
+          <label class="sidebar-world-theme">
+            <span>World</span>
+            <select
+              id="world-theme-toggle"
+              class="sidebar-toggle theme-select"
+              aria-label="Atelier world"
+              title="Atelier world"
+            >
+              <option value="dashboard">Dashboard (built-in)</option>
+            </select>
+          </label>
+          <div class="sidebar-controls">
+            <select
+              id="appearance-toggle"
+              class="sidebar-toggle theme-select"
+              aria-label="Appearance"
+              title="Appearance"
+            ></select>
+            <button
+              id="notification-toggle"
+              class="sidebar-toggle notification-toggle"
+              type="button"
+              role="switch"
+              aria-checked="false"
+              aria-label="Enable desktop notifications"
+            >
+              <span aria-hidden="true">🔔</span>
+              <span id="notification-label">Off</span>
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      <main id="app" class="content" tabindex="-1">
+        <div class="loading-state" role="status">Opening Atelier…</div>
+      </main>
+    </div>
+
+    <section id="theme-host" class="theme-host" aria-label="Atelier theme" hidden>
+      <header class="theme-top-strip">
+        <button
+          id="theme-dashboard-return"
+          class="theme-dashboard-return"
+          type="button"
+        >
+          <span aria-hidden="true">⌂</span>
+          Dashboard
+        </button>
+        <strong id="active-theme-name">Atelier theme</strong>
+        <select
+          id="theme-host-switcher"
+          class="theme-host-switcher"
+          aria-label="Atelier world"
+        >
+          <option value="dashboard">Dashboard (built-in)</option>
+        </select>
+        <button
+          id="theme-command-trigger"
+          class="theme-command-trigger"
+          type="button"
+          aria-label="Open command palette"
+          title="Open command palette"
+        >
+          <span aria-hidden="true">⌘</span>
+        </button>
+      </header>
+      <div id="theme-mount" class="theme-mount"></div>
+    </section>
+
+    <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+    <dialog id="modal-root" class="modal-root" aria-labelledby="modal-title">
+      <div id="modal-content"></div>
+    </dialog>
+
+    <template id="loading-template">
+      <div class="loading-state" role="status">
+        <span class="running-pulse" aria-hidden="true"></span>
+        Loading…
+      </div>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

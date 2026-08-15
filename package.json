@@ -1,0 +1,11 @@
+{
+  "name": "atelier",
+  "version": "0.3.0",
+  "description": "Local-first cockpit for supervising coding agents across projects: board, dispatcher, verification gates, live steering",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "bin": { "atelier": "bin/atelier.mjs" },
+  "files": ["bin", "server", "shared", "ui", "themes", "docs", "README.md", "LICENSE"],
+  "keywords": ["agents", "coding-agents", "claude-code", "codex", "kanban", "git-worktree", "local-first"],
+  "license": "MIT"
+}

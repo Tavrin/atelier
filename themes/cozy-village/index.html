@@ -1,0 +1,39 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cozy Village — Atelier</title>
+<!--
+  The lit lantern, in the one accent this design reserves for a decision you
+  owe. Inline so the bundle stays self-contained and the tab needs no request.
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23201a12'/%3E%3Cpath d='M16 4v3' stroke='%239a7746' stroke-width='2' stroke-linecap='round'/%3E%3Crect x='9' y='7' width='14' height='3' rx='1.2' fill='%239a7746'/%3E%3Cpath d='M11 10h10l1.5 11a2 2 0 0 1-2 2.3h-9A2 2 0 0 1 9.5 21z' fill='%23d9932a'/%3E%3Cpath d='M12.6 12.2h6.8l1.1 8.4h-9z' fill='%23f7dca6'/%3E%3Crect x='9' y='23' width='14' height='2.6' rx='1.1' fill='%236e5030'/%3E%3C/svg%3E">
+<!-- The body face is used by the very first paint, so it is fetched early. -->
+<link rel="preload" href="./vendor/fonts/village-humanist.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  html, body { margin: 0; height: 100%; background: #cbd6d2; }
+  #strip {
+    position: fixed; inset: 0 0 auto 0; height: 34px; z-index: 100;
+    display: flex; align-items: center; gap: 0.75rem; padding: 0 0.85rem;
+    background: #201a12; color: #e8dcc4;
+    font: 12px/1 "Ubuntu Sans derivative Cozy Village", Optima, Candara, "Gill Sans", "Trebuchet MS", system-ui, sans-serif;
+    letter-spacing: 0.04em; border-bottom: 1px solid #000;
+  }
+  #strip b { font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
+  #strip span { opacity: 0.6; }
+  #strip code { font-family: ui-monospace, monospace; opacity: 0.75; }
+  #mount { position: fixed; inset: 34px 0 0 0; }
+</style>
+<div id="strip">
+  <b>Cozy Village</b>
+  <span>standalone harness — the core UI supplies this strip when mounted</span>
+  <code id="mode"></code>
+</div>
+<div id="mount"></div>
+<script type="module">
+  import theme from "./entry.mjs";
+  const params = new URLSearchParams(location.search);
+  document.getElementById("mode").textContent = `?data=${params.get("data") ?? "live"}`;
+  theme.mount(document.getElementById("mount"), {
+    mode: params.get("data") ?? undefined,
+    project: params.get("project") ?? undefined,
+  });
+</script>

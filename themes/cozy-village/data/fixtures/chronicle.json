@@ -1,0 +1,3845 @@
+{
+  "project": "atelier",
+  "generatedAt": "2026-07-30T19:41:02.833Z",
+  "provenance": "derived from 47 real 'merge:' commits in the atelier repository",
+  "records": [
+    {
+      "id": "fcdb311a",
+      "project": "atelier",
+      "ticketId": null,
+      "title": "theme substrate S3 - theme-lib aliases, empty gate word, chronicle diff stats",
+      "branch": "atelier/theme-substrate-s3-theme-lib",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-30T16:46:20.940Z",
+      "endedAt": "2026-07-30T20:57:57+02:00",
+      "mergedAt": "2026-07-30T20:57:57+02:00",
+      "merged": {
+        "commit": "fcdb311",
+        "mergedAt": "2026-07-30T20:57:57+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.73,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "fcdb311",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 48598,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T20:57:57+02:00",
+        "startedAt": "2026-07-30T20:57:57+02:00",
+        "endedAt": "2026-07-30T20:57:57+02:00",
+        "testedTree": "fcdb311"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 326,
+        "deletions": 22,
+        "files": 7
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "50e42d26",
+      "project": "atelier",
+      "ticketId": null,
+      "title": "theme substrate hardening (S2) - audit gaps closed + author handbook",
+      "branch": "atelier/theme-substrate-hardening-s2-audit",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-30T17:14:54.160Z",
+      "endedAt": "2026-07-30T20:40:31+02:00",
+      "mergedAt": "2026-07-30T20:40:31+02:00",
+      "merged": {
+        "commit": "50e42d2",
+        "mergedAt": "2026-07-30T20:40:31+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 6.64,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "50e42d2",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 41750,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T20:40:31+02:00",
+        "startedAt": "2026-07-30T20:40:31+02:00",
+        "endedAt": "2026-07-30T20:40:31+02:00",
+        "testedTree": "50e42d2"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 1271,
+        "deletions": 43,
+        "files": 18
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "9c696943",
+      "project": "atelier",
+      "ticketId": null,
+      "title": "theme substrate (slice S) - loader, gatesFor, chronicle, actor attribution",
+      "branch": "atelier/theme-substrate-slice-s-loader",
+      "lane": "claude",
+      "model": "haiku",
+      "villager": "pell",
+      "state": "completed",
+      "startedAt": "2026-07-30T17:30:40.340Z",
+      "endedAt": "2026-07-30T20:07:50+02:00",
+      "mergedAt": "2026-07-30T20:07:50+02:00",
+      "merged": {
+        "commit": "9c69694",
+        "mergedAt": "2026-07-30T20:07:50+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 7.7,
+      "verify": {
+        "state": "passed",
+        "attempts": 2
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "9c69694",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 66004,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T20:07:50+02:00",
+        "startedAt": "2026-07-30T20:07:50+02:00",
+        "endedAt": "2026-07-30T20:07:50+02:00",
+        "testedTree": "9c69694"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 1556,
+        "deletions": 74,
+        "files": 21
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "b3a04e38",
+      "project": "atelier",
+      "ticketId": "atelier-2q6",
+      "title": "atelier-2q6 review round history + trajectory parking",
+      "branch": "atelier/atelier-2q6-review-round-history",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-30T15:20:24.170Z",
+      "endedAt": "2026-07-30T19:03:26+02:00",
+      "mergedAt": "2026-07-30T19:03:26+02:00",
+      "merged": {
+        "commit": "b3a04e3",
+        "mergedAt": "2026-07-30T19:03:26+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 7.18,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "b3a04e3",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 49665,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T19:03:26+02:00",
+        "startedAt": "2026-07-30T19:03:26+02:00",
+        "endedAt": "2026-07-30T19:03:26+02:00",
+        "testedTree": "b3a04e3"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 2088,
+        "deletions": 133,
+        "files": 16
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "d28f473b",
+      "project": "atelier",
+      "ticketId": "atelier-e5x",
+      "title": "atelier-e5x observability backbone - structured event log, drain tracing, spend readout",
+      "branch": "atelier/atelier-e5x-observability-backbone-structured",
+      "lane": "claude",
+      "model": "haiku",
+      "villager": "pell",
+      "state": "completed",
+      "startedAt": "2026-07-30T13:27:14.480Z",
+      "endedAt": "2026-07-30T15:51:26+02:00",
+      "mergedAt": "2026-07-30T15:51:26+02:00",
+      "merged": {
+        "commit": "d28f473",
+        "mergedAt": "2026-07-30T15:51:26+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 12.59,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 3
+        },
+        "rounds": 3
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "d28f473",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 63923,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T15:51:26+02:00",
+        "startedAt": "2026-07-30T15:51:26+02:00",
+        "endedAt": "2026-07-30T15:51:26+02:00",
+        "testedTree": "d28f473"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 4004,
+        "deletions": 44,
+        "files": 27
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "98e1537b",
+      "project": "atelier",
+      "ticketId": "atelier-yqk",
+      "title": "main into atelier-arch/event-log (atelier-yqk verifier-fencing + tracker/docs)",
+      "branch": "atelier-arch/event-log",
+      "lane": "claude",
+      "model": "sonnet[1m]",
+      "villager": "juniper",
+      "state": "completed",
+      "startedAt": "2026-07-30T12:21:19.220Z",
+      "endedAt": "2026-07-30T15:43:53+02:00",
+      "mergedAt": "2026-07-30T15:43:53+02:00",
+      "merged": {
+        "commit": "98e1537",
+        "mergedAt": "2026-07-30T15:43:53+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 5.27,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "98e1537",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 45567,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T15:43:53+02:00",
+        "startedAt": "2026-07-30T15:43:53+02:00",
+        "endedAt": "2026-07-30T15:43:53+02:00",
+        "testedTree": "98e1537"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 2085,
+        "deletions": 245,
+        "files": 14
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "e3093edd",
+      "project": "atelier",
+      "ticketId": "atelier-yqk",
+      "title": "atelier-yqk+kaz verifier-runner fencing - one death-decision vocabulary for every runner",
+      "branch": "atelier/atelier-yqk-kaz-verifier-runner",
+      "lane": "codex",
+      "model": "gpt-5.4-codex",
+      "villager": "alder",
+      "state": "completed",
+      "startedAt": "2026-07-30T11:40:15.180Z",
+      "endedAt": "2026-07-30T15:21:39+02:00",
+      "mergedAt": "2026-07-30T15:21:39+02:00",
+      "merged": {
+        "commit": "e3093ed",
+        "mergedAt": "2026-07-30T15:21:39+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": null,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "e3093ed",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 53445,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T15:21:39+02:00",
+        "startedAt": "2026-07-30T15:21:39+02:00",
+        "endedAt": "2026-07-30T15:21:39+02:00",
+        "testedTree": "e3093ed"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 2080,
+        "deletions": 241,
+        "files": 13
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "bc68fcdc",
+      "project": "atelier",
+      "ticketId": "atelier-def",
+      "title": "MCP parity batch - settings schema drift guard, queue un-park + main-health tools, project-less dismissal (atelier-def, atelier-vke, atelier-2nx)",
+      "branch": "atelier/mcp-parity-batch-settings-schema",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-30T07:29:04.450Z",
+      "endedAt": "2026-07-30T10:17:31+02:00",
+      "mergedAt": "2026-07-30T10:17:31+02:00",
+      "merged": {
+        "commit": "bc68fcd",
+        "mergedAt": "2026-07-30T10:17:31+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.06,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "bc68fcd",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 56614,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T10:17:31+02:00",
+        "startedAt": "2026-07-30T10:17:31+02:00",
+        "endedAt": "2026-07-30T10:17:31+02:00",
+        "testedTree": "bc68fcd"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 353,
+        "deletions": 15,
+        "files": 7
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "47d48d08",
+      "project": "atelier",
+      "ticketId": "atelier-za6",
+      "title": "main (atelier-za6 codex reaper) into atelier-arch/mcp-parity",
+      "branch": "atelier-arch/mcp-parity",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-30T06:26:17.180Z",
+      "endedAt": "2026-07-30T10:14:17+02:00",
+      "mergedAt": "2026-07-30T10:14:17+02:00",
+      "merged": {
+        "commit": "47d48d0",
+        "mergedAt": "2026-07-30T10:14:17+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 13.96,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 3
+        },
+        "rounds": 3
+      },
+      "postMerge": {
+        "state": "failed",
+        "commit": "47d48d0",
+        "steps": [
+          {
+            "command": "node --test server/lib/dispatch.test.mjs",
+            "exitCode": 1,
+            "durationMs": 38400,
+            "tail": "not ok 41"
+          }
+        ],
+        "evidenceTail": "not ok 41 - reaper leaves a live observer alone\n  # identity mismatch: pid 481203 recycled",
+        "testedTree": "47d48d0",
+        "queuedAt": "2026-07-30T10:14:17+02:00",
+        "startedAt": "2026-07-30T10:14:17+02:00",
+        "endedAt": "2026-07-30T10:14:17+02:00",
+        "acknowledgedAt": null,
+        "resolvedAt": null
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 3299,
+        "deletions": 30,
+        "files": 16
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "failed"
+        }
+      ]
+    },
+    {
+      "id": "a0c53c59",
+      "project": "atelier",
+      "ticketId": "atelier-za6",
+      "title": "atelier-za6 codex app-server reaper - identity-only kill set, observer-safe gc (P0)",
+      "branch": "atelier/atelier-za6-codex-app-server",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-30T06:23:30.340Z",
+      "endedAt": "2026-07-30T09:49:52+02:00",
+      "mergedAt": "2026-07-30T09:49:52+02:00",
+      "merged": {
+        "commit": "a0c53c5",
+        "mergedAt": "2026-07-30T09:49:52+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 10.86,
+      "verify": {
+        "state": "passed",
+        "attempts": 2
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "a0c53c5",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 47962,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T09:49:52+02:00",
+        "startedAt": "2026-07-30T09:49:52+02:00",
+        "endedAt": "2026-07-30T09:49:52+02:00",
+        "testedTree": "a0c53c5"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 3291,
+        "deletions": 28,
+        "files": 15
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "e0b84fdd",
+      "project": "atelier",
+      "ticketId": "atelier-9dt",
+      "title": "atelier-9dt verify re-run - attempt history, race-safe capacity, boot repair",
+      "branch": "atelier/atelier-9dt-verify-re-run",
+      "lane": "codex",
+      "model": "gpt-5.4-codex",
+      "villager": "alder",
+      "state": "completed",
+      "startedAt": "2026-07-30T05:34:32.880Z",
+      "endedAt": "2026-07-30T09:04:12+02:00",
+      "mergedAt": "2026-07-30T09:04:12+02:00",
+      "merged": {
+        "commit": "e0b84fd",
+        "mergedAt": "2026-07-30T09:04:12+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": null,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "e0b84fd",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 51003,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T09:04:12+02:00",
+        "startedAt": "2026-07-30T09:04:12+02:00",
+        "endedAt": "2026-07-30T09:04:12+02:00",
+        "testedTree": "e0b84fd"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 1719,
+        "deletions": 33,
+        "files": 14
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "e01208d7",
+      "project": "atelier",
+      "ticketId": "atelier-8r6",
+      "title": "atelier-8r6 needs_input outcome detection - fail-closed classification, new terminal states",
+      "branch": "atelier/atelier-8r6-needs-input-outcome",
+      "lane": "claude",
+      "model": "opus",
+      "villager": "wren",
+      "state": "completed",
+      "startedAt": "2026-07-30T04:11:31.890Z",
+      "endedAt": "2026-07-30T07:53:39+02:00",
+      "mergedAt": "2026-07-30T07:53:39+02:00",
+      "merged": {
+        "commit": "e01208d",
+        "mergedAt": "2026-07-30T07:53:39+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 8.97,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "e01208d",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 50174,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T07:53:39+02:00",
+        "startedAt": "2026-07-30T07:53:39+02:00",
+        "endedAt": "2026-07-30T07:53:39+02:00",
+        "testedTree": "e01208d"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 2414,
+        "deletions": 58,
+        "files": 20
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "4bad8490",
+      "project": "atelier",
+      "ticketId": "atelier-arch",
+      "title": "main into atelier-arch/needs-input (tracker-only commit)",
+      "branch": "atelier-arch/needs-input",
+      "lane": "claude",
+      "model": "haiku",
+      "villager": "pell",
+      "state": "completed",
+      "startedAt": "2026-07-30T04:53:39.270Z",
+      "endedAt": "2026-07-30T07:35:12+02:00",
+      "mergedAt": "2026-07-30T07:35:12+02:00",
+      "merged": {
+        "commit": "4bad849",
+        "mergedAt": "2026-07-30T07:35:12+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 0.57,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "skipped",
+        "commit": "4bad849",
+        "steps": [],
+        "queuedAt": "2026-07-30T07:35:12+02:00",
+        "startedAt": "2026-07-30T07:35:12+02:00",
+        "endedAt": "2026-07-30T07:35:12+02:00"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 1,
+        "deletions": 1,
+        "files": 1
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "skipped"
+        }
+      ]
+    },
+    {
+      "id": "1bf94084",
+      "project": "atelier",
+      "ticketId": "atelier-tzw",
+      "title": "atelier-tzw restart survival - lane-asymmetric shutdown, fencing, unresolved-orphan machinery",
+      "branch": "atelier/atelier-tzw-restart-survival-lane",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-30T03:13:22.340Z",
+      "endedAt": "2026-07-30T06:23:14+02:00",
+      "mergedAt": "2026-07-30T06:23:14+02:00",
+      "merged": {
+        "commit": "1bf9408",
+        "mergedAt": "2026-07-30T06:23:14+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 23.66,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 3
+        },
+        "rounds": 3
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "1bf9408",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 68533,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T06:23:14+02:00",
+        "startedAt": "2026-07-30T06:23:14+02:00",
+        "endedAt": "2026-07-30T06:23:14+02:00",
+        "testedTree": "1bf9408"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 6474,
+        "deletions": 1372,
+        "files": 17
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "07094eab",
+      "project": "atelier",
+      "ticketId": "atelier-arch",
+      "title": "main into atelier-arch/restart-survival (constraint-1 amendment + tracker)",
+      "branch": "atelier-arch/restart-survival",
+      "lane": "codex",
+      "model": "gpt-5.4-codex",
+      "villager": "alder",
+      "state": "completed",
+      "startedAt": "2026-07-30T03:21:48.630Z",
+      "endedAt": "2026-07-30T05:59:00+02:00",
+      "mergedAt": "2026-07-30T05:59:00+02:00",
+      "merged": {
+        "commit": "07094ea",
+        "mergedAt": "2026-07-30T05:59:00+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": null,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "skipped",
+        "commit": "07094ea",
+        "steps": [],
+        "queuedAt": "2026-07-30T05:59:00+02:00",
+        "startedAt": "2026-07-30T05:59:00+02:00",
+        "endedAt": "2026-07-30T05:59:00+02:00"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 6,
+        "deletions": 3,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "skipped"
+        }
+      ]
+    },
+    {
+      "id": "32f3f3b2",
+      "project": "atelier",
+      "ticketId": "atelier-arch",
+      "title": "main into atelier-arch/restart-survival (spec amendment + tracker)",
+      "branch": "atelier-arch/restart-survival",
+      "lane": "codex",
+      "model": "gpt-5.4-codex",
+      "villager": "alder",
+      "state": "completed",
+      "startedAt": "2026-07-30T01:34:38.170Z",
+      "endedAt": "2026-07-30T05:23:31+02:00",
+      "mergedAt": "2026-07-30T05:23:31+02:00",
+      "merged": {
+        "commit": "32f3f3b",
+        "mergedAt": "2026-07-30T05:23:31+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": null,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "skipped",
+        "commit": "32f3f3b",
+        "steps": [],
+        "queuedAt": "2026-07-30T05:23:31+02:00",
+        "startedAt": "2026-07-30T05:23:31+02:00",
+        "endedAt": "2026-07-30T05:23:31+02:00"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 11,
+        "deletions": 4,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "skipped"
+        }
+      ]
+    },
+    {
+      "id": "3d3084cb",
+      "project": "atelier",
+      "ticketId": "atelier-rio",
+      "title": "atelier-rio fo5 residuals - resume-path hygiene tests, pattern pinning, redaction parity",
+      "branch": "atelier/atelier-rio-fo5-residuals-resume",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-30T00:30:37.590Z",
+      "endedAt": "2026-07-30T03:01:09+02:00",
+      "mergedAt": "2026-07-30T03:01:09+02:00",
+      "merged": {
+        "commit": "3d3084c",
+        "mergedAt": "2026-07-30T03:01:09+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.44,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "3d3084c",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 41253,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T03:01:09+02:00",
+        "startedAt": "2026-07-30T03:01:09+02:00",
+        "endedAt": "2026-07-30T03:01:09+02:00",
+        "testedTree": "3d3084c"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 386,
+        "deletions": 1,
+        "files": 5
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "a3f14e7f",
+      "project": "atelier",
+      "ticketId": "atelier-fo5",
+      "title": "atelier-fo5",
+      "branch": "atelier/atelier-fo5",
+      "lane": "claude",
+      "model": "sonnet[1m]",
+      "villager": "juniper",
+      "state": "completed",
+      "startedAt": "2026-07-29T23:58:58.270Z",
+      "endedAt": "2026-07-30T02:19:22+02:00",
+      "mergedAt": "2026-07-30T02:19:22+02:00",
+      "merged": {
+        "commit": "f9a0459",
+        "mergedAt": "2026-07-30T02:19:22+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 0.96,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "f9a0459",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 66198,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T02:19:22+02:00",
+        "startedAt": "2026-07-30T02:19:22+02:00",
+        "endedAt": "2026-07-30T02:19:22+02:00",
+        "testedTree": "f9a0459"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 69,
+        "deletions": 17,
+        "files": 7
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "9e7ba0d1",
+      "project": "atelier",
+      "ticketId": "atelier-ha8",
+      "title": "atelier-ha8",
+      "branch": "atelier/atelier-ha8",
+      "lane": "claude",
+      "model": "opus",
+      "villager": "wren",
+      "state": "completed",
+      "startedAt": "2026-07-29T22:02:36.030Z",
+      "endedAt": "2026-07-30T02:19:18+02:00",
+      "mergedAt": "2026-07-30T02:19:18+02:00",
+      "merged": {
+        "commit": "d77e516",
+        "mergedAt": "2026-07-30T02:19:18+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.05,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "d77e516",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 51836,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T02:19:18+02:00",
+        "startedAt": "2026-07-30T02:19:18+02:00",
+        "endedAt": "2026-07-30T02:19:18+02:00",
+        "testedTree": "d77e516"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 24,
+        "deletions": 1,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "e7570d26",
+      "project": "atelier",
+      "ticketId": "atelier-zv0",
+      "title": "atelier-zv0",
+      "branch": "atelier/atelier-zv0",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-29T23:02:51.290Z",
+      "endedAt": "2026-07-30T02:19:14+02:00",
+      "mergedAt": "2026-07-30T02:19:14+02:00",
+      "merged": {
+        "commit": "15202de",
+        "mergedAt": "2026-07-30T02:19:14+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.17,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "15202de",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 51321,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-30T02:19:14+02:00",
+        "startedAt": "2026-07-30T02:19:14+02:00",
+        "endedAt": "2026-07-30T02:19:14+02:00",
+        "testedTree": "15202de"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 48,
+        "deletions": 6,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "3958b062",
+      "project": "atelier",
+      "ticketId": "atelier-sg2",
+      "title": "atelier-sg2",
+      "branch": "atelier/atelier-sg2",
+      "lane": "claude",
+      "model": "haiku",
+      "villager": "pell",
+      "state": "completed",
+      "startedAt": "2026-07-22T22:30:56.110Z",
+      "endedAt": "2026-07-23T01:05:10+02:00",
+      "mergedAt": "2026-07-23T01:05:10+02:00",
+      "merged": {
+        "commit": "d337ea5",
+        "mergedAt": "2026-07-23T01:05:10+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 0.74,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "d337ea5",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 71032,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-23T01:05:10+02:00",
+        "startedAt": "2026-07-23T01:05:10+02:00",
+        "endedAt": "2026-07-23T01:05:10+02:00",
+        "testedTree": "d337ea5"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 26,
+        "deletions": 6,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "0b01e78a",
+      "project": "atelier",
+      "ticketId": "atelier-4f4",
+      "title": "atelier-4f4",
+      "branch": "atelier/atelier-4f4",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T19:35:56.340Z",
+      "endedAt": "2026-07-22T23:04:15+02:00",
+      "mergedAt": "2026-07-22T23:04:15+02:00",
+      "merged": {
+        "commit": "14b5464",
+        "mergedAt": "2026-07-22T23:04:15+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.66,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "14b5464",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 60025,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T23:04:15+02:00",
+        "startedAt": "2026-07-22T23:04:15+02:00",
+        "endedAt": "2026-07-22T23:04:15+02:00",
+        "testedTree": "14b5464"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 276,
+        "deletions": 15,
+        "files": 4
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "ec6924b2",
+      "project": "atelier",
+      "ticketId": "atelier-nez",
+      "title": "atelier-nez",
+      "branch": "atelier/atelier-nez",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-22T19:31:20.860Z",
+      "endedAt": "2026-07-22T23:03:49+02:00",
+      "mergedAt": "2026-07-22T23:03:49+02:00",
+      "merged": {
+        "commit": "4ddfc21",
+        "mergedAt": "2026-07-22T23:03:49+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.16,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "4ddfc21",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 57786,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T23:03:49+02:00",
+        "startedAt": "2026-07-22T23:03:49+02:00",
+        "endedAt": "2026-07-22T23:03:49+02:00",
+        "testedTree": "4ddfc21"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 525,
+        "deletions": 60,
+        "files": 9
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "2044dbfe",
+      "project": "atelier",
+      "ticketId": "atelier-n1g",
+      "title": "atelier-n1g",
+      "branch": "atelier/atelier-n1g",
+      "lane": "claude",
+      "model": "opus",
+      "villager": "wren",
+      "state": "completed",
+      "startedAt": "2026-07-22T20:10:38.240Z",
+      "endedAt": "2026-07-22T22:36:14+02:00",
+      "mergedAt": "2026-07-22T22:36:14+02:00",
+      "merged": {
+        "commit": "ca283f4",
+        "mergedAt": "2026-07-22T22:36:14+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.22,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "ca283f4",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 48924,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T22:36:14+02:00",
+        "startedAt": "2026-07-22T22:36:14+02:00",
+        "endedAt": "2026-07-22T22:36:14+02:00",
+        "testedTree": "ca283f4"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 368,
+        "deletions": 37,
+        "files": 6
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "a5ba4112",
+      "project": "atelier",
+      "ticketId": "atelier-fk0",
+      "title": "atelier-fk0",
+      "branch": "atelier/atelier-fk0",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T18:23:25.990Z",
+      "endedAt": "2026-07-22T21:21:19+02:00",
+      "mergedAt": "2026-07-22T21:21:19+02:00",
+      "merged": {
+        "commit": "4eaf79d",
+        "mergedAt": "2026-07-22T21:21:19+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.07,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "4eaf79d",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 61469,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T21:21:19+02:00",
+        "startedAt": "2026-07-22T21:21:19+02:00",
+        "endedAt": "2026-07-22T21:21:19+02:00",
+        "testedTree": "4eaf79d"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 338,
+        "deletions": 91,
+        "files": 5
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "bee04bf3",
+      "project": "atelier",
+      "ticketId": "atelier-zun",
+      "title": "atelier-zun",
+      "branch": "atelier/atelier-zun",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T18:25:10.480Z",
+      "endedAt": "2026-07-22T21:09:46+02:00",
+      "mergedAt": "2026-07-22T21:09:46+02:00",
+      "merged": {
+        "commit": "4d84c52",
+        "mergedAt": "2026-07-22T21:09:46+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.31,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "4d84c52",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 57817,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T21:09:46+02:00",
+        "startedAt": "2026-07-22T21:09:46+02:00",
+        "endedAt": "2026-07-22T21:09:46+02:00",
+        "testedTree": "4d84c52"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 123,
+        "deletions": 14,
+        "files": 5
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "a7734d63",
+      "project": "atelier",
+      "ticketId": "atelier-ww0",
+      "title": "atelier-ww0",
+      "branch": "atelier/atelier-ww0",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T16:54:46.720Z",
+      "endedAt": "2026-07-22T21:09:46+02:00",
+      "mergedAt": "2026-07-22T21:09:46+02:00",
+      "merged": {
+        "commit": "a4812ec",
+        "mergedAt": "2026-07-22T21:09:46+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.77,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "a4812ec",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 55231,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T21:09:46+02:00",
+        "startedAt": "2026-07-22T21:09:46+02:00",
+        "endedAt": "2026-07-22T21:09:46+02:00",
+        "testedTree": "a4812ec"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 176,
+        "deletions": 3,
+        "files": 6
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "eb652606",
+      "project": "atelier",
+      "ticketId": "atelier-a6v",
+      "title": "atelier-a6v",
+      "branch": "atelier/atelier-a6v",
+      "lane": "codex",
+      "model": "gpt-5.4-codex",
+      "villager": "alder",
+      "state": "completed",
+      "startedAt": "2026-07-22T16:17:32.040Z",
+      "endedAt": "2026-07-22T19:08:18+02:00",
+      "mergedAt": "2026-07-22T19:08:18+02:00",
+      "merged": {
+        "commit": "7d2207f",
+        "mergedAt": "2026-07-22T19:08:18+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": null,
+      "verify": {
+        "state": "passed",
+        "attempts": 2
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "7d2207f",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 57680,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T19:08:18+02:00",
+        "startedAt": "2026-07-22T19:08:18+02:00",
+        "endedAt": "2026-07-22T19:08:18+02:00",
+        "testedTree": "7d2207f"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 1721,
+        "deletions": 25,
+        "files": 11
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "2ba95572",
+      "project": "atelier",
+      "ticketId": "atelier-1a7",
+      "title": "atelier-1a7",
+      "branch": "atelier/atelier-1a7",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T15:49:02.850Z",
+      "endedAt": "2026-07-22T18:47:18+02:00",
+      "mergedAt": "2026-07-22T18:47:18+02:00",
+      "merged": {
+        "commit": "ba4cd46",
+        "mergedAt": "2026-07-22T18:47:18+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.03,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "ba4cd46",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 71193,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T18:47:18+02:00",
+        "startedAt": "2026-07-22T18:47:18+02:00",
+        "endedAt": "2026-07-22T18:47:18+02:00",
+        "testedTree": "ba4cd46"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 95,
+        "deletions": 63,
+        "files": 3
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "a2141ea4",
+      "project": "atelier",
+      "ticketId": "atelier-wv3",
+      "title": "atelier-wv3",
+      "branch": "atelier/atelier-wv3",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T15:31:04.030Z",
+      "endedAt": "2026-07-22T18:33:13+02:00",
+      "mergedAt": "2026-07-22T18:33:13+02:00",
+      "merged": {
+        "commit": "b67de42",
+        "mergedAt": "2026-07-22T18:33:13+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 3.42,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "b67de42",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 66780,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T18:33:13+02:00",
+        "startedAt": "2026-07-22T18:33:13+02:00",
+        "endedAt": "2026-07-22T18:33:13+02:00",
+        "testedTree": "b67de42"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 551,
+        "deletions": 37,
+        "files": 13
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "2f106519",
+      "project": "atelier",
+      "ticketId": "atelier-b24",
+      "title": "atelier-b24",
+      "branch": "atelier/atelier-b24",
+      "lane": "claude",
+      "model": "opus",
+      "villager": "wren",
+      "state": "completed",
+      "startedAt": "2026-07-22T13:50:08.470Z",
+      "endedAt": "2026-07-22T18:33:13+02:00",
+      "mergedAt": "2026-07-22T18:33:13+02:00",
+      "merged": {
+        "commit": "9a55df1",
+        "mergedAt": "2026-07-22T18:33:13+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.26,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "9a55df1",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 59825,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T18:33:13+02:00",
+        "startedAt": "2026-07-22T18:33:13+02:00",
+        "endedAt": "2026-07-22T18:33:13+02:00",
+        "testedTree": "9a55df1"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 251,
+        "deletions": 2,
+        "files": 3
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "90eac651",
+      "project": "atelier",
+      "ticketId": "atelier-be8",
+      "title": "atelier-be8",
+      "branch": "atelier/atelier-be8",
+      "lane": "codex",
+      "model": "gpt-5.4-codex",
+      "villager": "alder",
+      "state": "completed",
+      "startedAt": "2026-07-22T12:20:03.730Z",
+      "endedAt": "2026-07-22T16:31:19+02:00",
+      "mergedAt": "2026-07-22T16:31:19+02:00",
+      "merged": {
+        "commit": "38b7821",
+        "mergedAt": "2026-07-22T16:31:19+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": null,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "38b7821",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 67653,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T16:31:19+02:00",
+        "startedAt": "2026-07-22T16:31:19+02:00",
+        "endedAt": "2026-07-22T16:31:19+02:00",
+        "testedTree": "38b7821"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 949,
+        "deletions": 50,
+        "files": 10
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "b4f173ed",
+      "project": "atelier",
+      "ticketId": "atelier-3gs",
+      "title": "atelier-3gs",
+      "branch": "atelier/atelier-3gs",
+      "lane": "claude",
+      "model": "sonnet[1m]",
+      "villager": "juniper",
+      "state": "completed",
+      "startedAt": "2026-07-22T12:49:28.030Z",
+      "endedAt": "2026-07-22T16:31:04+02:00",
+      "mergedAt": "2026-07-22T16:31:04+02:00",
+      "merged": {
+        "commit": "8acb0a7",
+        "mergedAt": "2026-07-22T16:31:04+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.25,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "skipped",
+        "commit": "8acb0a7",
+        "steps": [],
+        "queuedAt": "2026-07-22T16:31:04+02:00",
+        "startedAt": "2026-07-22T16:31:04+02:00",
+        "endedAt": "2026-07-22T16:31:04+02:00"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 9,
+        "deletions": 6,
+        "files": 1
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "skipped"
+        }
+      ]
+    },
+    {
+      "id": "aa831071",
+      "project": "atelier",
+      "ticketId": "atelier-emv",
+      "title": "atelier-emv",
+      "branch": "atelier/atelier-emv",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T11:35:59.670Z",
+      "endedAt": "2026-07-22T14:53:09+02:00",
+      "mergedAt": "2026-07-22T14:53:09+02:00",
+      "merged": {
+        "commit": "c0dc718",
+        "mergedAt": "2026-07-22T14:53:09+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 8.22,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "c0dc718",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 46427,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T14:53:09+02:00",
+        "startedAt": "2026-07-22T14:53:09+02:00",
+        "endedAt": "2026-07-22T14:53:09+02:00",
+        "testedTree": "c0dc718"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 1522,
+        "deletions": 140,
+        "files": 6
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "915d5ed1",
+      "project": "atelier",
+      "ticketId": "atelier-423",
+      "title": "atelier-423",
+      "branch": "atelier/atelier-423",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T11:05:37.710Z",
+      "endedAt": "2026-07-22T14:06:48+02:00",
+      "mergedAt": "2026-07-22T14:06:48+02:00",
+      "merged": {
+        "commit": "5be2751",
+        "mergedAt": "2026-07-22T14:06:48+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 6.5,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "5be2751",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 46956,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T14:06:48+02:00",
+        "startedAt": "2026-07-22T14:06:48+02:00",
+        "endedAt": "2026-07-22T14:06:48+02:00",
+        "testedTree": "5be2751"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 1949,
+        "deletions": 70,
+        "files": 13
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "5cc2dfc5",
+      "project": "atelier",
+      "ticketId": "atelier-k2u",
+      "title": "atelier-k2u",
+      "branch": "atelier/atelier-k2u",
+      "lane": "claude",
+      "model": "opus",
+      "villager": "wren",
+      "state": "completed",
+      "startedAt": "2026-07-22T09:59:40.770Z",
+      "endedAt": "2026-07-22T13:49:42+02:00",
+      "mergedAt": "2026-07-22T13:49:42+02:00",
+      "merged": {
+        "commit": "338dc0d",
+        "mergedAt": "2026-07-22T13:49:42+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.23,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "338dc0d",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 51251,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T13:49:42+02:00",
+        "startedAt": "2026-07-22T13:49:42+02:00",
+        "endedAt": "2026-07-22T13:49:42+02:00",
+        "testedTree": "338dc0d"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 105,
+        "deletions": 4,
+        "files": 3
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "32becaa5",
+      "project": "atelier",
+      "ticketId": "atelier-ewa",
+      "title": "atelier-ewa",
+      "branch": "atelier/atelier-ewa",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-22T01:06:37.660Z",
+      "endedAt": "2026-07-22T04:30:13+02:00",
+      "mergedAt": "2026-07-22T04:30:13+02:00",
+      "merged": {
+        "commit": "a53a1c0",
+        "mergedAt": "2026-07-22T04:30:13+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.09,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "a53a1c0",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 58230,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T04:30:13+02:00",
+        "startedAt": "2026-07-22T04:30:13+02:00",
+        "endedAt": "2026-07-22T04:30:13+02:00",
+        "testedTree": "a53a1c0"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 265,
+        "deletions": 24,
+        "files": 10
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "35bf79a1",
+      "project": "atelier",
+      "ticketId": "atelier-d8j",
+      "title": "atelier-d8j",
+      "branch": "atelier/atelier-d8j",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-21T23:32:07.790Z",
+      "endedAt": "2026-07-22T04:03:53+02:00",
+      "mergedAt": "2026-07-22T04:03:53+02:00",
+      "merged": {
+        "commit": "b8fea04",
+        "mergedAt": "2026-07-22T04:03:53+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.04,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "b8fea04",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 44285,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T04:03:53+02:00",
+        "startedAt": "2026-07-22T04:03:53+02:00",
+        "endedAt": "2026-07-22T04:03:53+02:00",
+        "testedTree": "b8fea04"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 162,
+        "deletions": 25,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "6ff9deff",
+      "project": "atelier",
+      "ticketId": "atelier-9i2",
+      "title": "atelier-9i2",
+      "branch": "atelier/atelier-9i2",
+      "lane": "claude",
+      "model": "sonnet[1m]",
+      "villager": "juniper",
+      "state": "completed",
+      "startedAt": "2026-07-21T23:48:36.810Z",
+      "endedAt": "2026-07-22T03:35:51+02:00",
+      "mergedAt": "2026-07-22T03:35:51+02:00",
+      "merged": {
+        "commit": "e0ed589",
+        "mergedAt": "2026-07-22T03:35:51+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 3.87,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "e0ed589",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 49417,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T03:35:51+02:00",
+        "startedAt": "2026-07-22T03:35:51+02:00",
+        "endedAt": "2026-07-22T03:35:51+02:00",
+        "testedTree": "e0ed589"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 764,
+        "deletions": 36,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "50f459c8",
+      "project": "atelier",
+      "ticketId": "atelier-54u",
+      "title": "atelier-54u",
+      "branch": "atelier/atelier-54u",
+      "lane": "claude",
+      "model": "sonnet[1m]",
+      "villager": "juniper",
+      "state": "completed",
+      "startedAt": "2026-07-21T22:24:51.170Z",
+      "endedAt": "2026-07-22T02:29:56+02:00",
+      "mergedAt": "2026-07-22T02:29:56+02:00",
+      "merged": {
+        "commit": "03e71dd",
+        "mergedAt": "2026-07-22T02:29:56+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.94,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "03e71dd",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 50876,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T02:29:56+02:00",
+        "startedAt": "2026-07-22T02:29:56+02:00",
+        "endedAt": "2026-07-22T02:29:56+02:00",
+        "testedTree": "03e71dd"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 234,
+        "deletions": 13,
+        "files": 6
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "aed46936",
+      "project": "atelier",
+      "ticketId": "atelier-ryh",
+      "title": "atelier-ryh",
+      "branch": "atelier/atelier-ryh",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-22T00:00:46.450Z",
+      "endedAt": "2026-07-22T02:26:34+02:00",
+      "mergedAt": "2026-07-22T02:26:34+02:00",
+      "merged": {
+        "commit": "0cd5f75",
+        "mergedAt": "2026-07-22T02:26:34+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.96,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "0cd5f75",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 68015,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T02:26:34+02:00",
+        "startedAt": "2026-07-22T02:26:34+02:00",
+        "endedAt": "2026-07-22T02:26:34+02:00",
+        "testedTree": "0cd5f75"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 271,
+        "deletions": 21,
+        "files": 6
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "202c2633",
+      "project": "atelier",
+      "ticketId": "atelier-iwx",
+      "title": "atelier-iwx",
+      "branch": "atelier/atelier-iwx",
+      "lane": "claude",
+      "model": "opus",
+      "villager": "wren",
+      "state": "completed",
+      "startedAt": "2026-07-21T22:17:53.990Z",
+      "endedAt": "2026-07-22T02:24:02+02:00",
+      "mergedAt": "2026-07-22T02:24:02+02:00",
+      "merged": {
+        "commit": "146c838",
+        "mergedAt": "2026-07-22T02:24:02+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 4.3,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 2
+        },
+        "rounds": 2
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "146c838",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 68336,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T02:24:02+02:00",
+        "startedAt": "2026-07-22T02:24:02+02:00",
+        "endedAt": "2026-07-22T02:24:02+02:00",
+        "testedTree": "146c838"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 803,
+        "deletions": 24,
+        "files": 19
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "50ecefab",
+      "project": "atelier",
+      "ticketId": "atelier-oaq",
+      "title": "atelier-oaq",
+      "branch": "atelier/atelier-oaq",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-21T23:05:25.890Z",
+      "endedAt": "2026-07-22T02:06:18+02:00",
+      "mergedAt": "2026-07-22T02:06:18+02:00",
+      "merged": {
+        "commit": "087e767",
+        "mergedAt": "2026-07-22T02:06:18+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.23,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "087e767",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 66757,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-22T02:06:18+02:00",
+        "startedAt": "2026-07-22T02:06:18+02:00",
+        "endedAt": "2026-07-22T02:06:18+02:00",
+        "testedTree": "087e767"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 142,
+        "deletions": 2,
+        "files": 6
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "6f7598cc",
+      "project": "atelier",
+      "ticketId": "atelier-v7h",
+      "title": "atelier-v7h",
+      "branch": "atelier/atelier-v7h",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-21T20:16:32.250Z",
+      "endedAt": "2026-07-21T23:40:12+02:00",
+      "mergedAt": "2026-07-21T23:40:12+02:00",
+      "merged": {
+        "commit": "730d6c5",
+        "mergedAt": "2026-07-21T23:40:12+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.65,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "730d6c5",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 58581,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-21T23:40:12+02:00",
+        "startedAt": "2026-07-21T23:40:12+02:00",
+        "endedAt": "2026-07-21T23:40:12+02:00",
+        "testedTree": "730d6c5"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 169,
+        "deletions": 16,
+        "files": 5
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "f96a4af6",
+      "project": "atelier",
+      "ticketId": "atelier-fqv",
+      "title": "atelier-fqv",
+      "branch": "atelier/atelier-fqv",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-21T18:25:34.360Z",
+      "endedAt": "2026-07-21T22:50:37+02:00",
+      "mergedAt": "2026-07-21T22:50:37+02:00",
+      "merged": {
+        "commit": "0ecad1c",
+        "mergedAt": "2026-07-21T22:50:37+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 2.45,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "0ecad1c",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 44861,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-21T22:50:37+02:00",
+        "startedAt": "2026-07-21T22:50:37+02:00",
+        "endedAt": "2026-07-21T22:50:37+02:00",
+        "testedTree": "0ecad1c"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 466,
+        "deletions": 4,
+        "files": 4
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "e605f40b",
+      "project": "atelier",
+      "ticketId": "atelier-1f5",
+      "title": "atelier-1f5",
+      "branch": "atelier/atelier-1f5",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-21T17:26:22.570Z",
+      "endedAt": "2026-07-21T21:21:10+02:00",
+      "mergedAt": "2026-07-21T21:21:10+02:00",
+      "merged": {
+        "commit": "02b9bbd",
+        "mergedAt": "2026-07-21T21:21:10+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.76,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "02b9bbd",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 48902,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-21T21:21:10+02:00",
+        "startedAt": "2026-07-21T21:21:10+02:00",
+        "endedAt": "2026-07-21T21:21:10+02:00",
+        "testedTree": "02b9bbd"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 314,
+        "deletions": 11,
+        "files": 10
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    },
+    {
+      "id": "9eaba16a",
+      "project": "atelier",
+      "ticketId": "atelier-byh",
+      "title": "atelier-byh cyberpunk theme",
+      "branch": "atelier/atelier-byh-cyberpunk-theme",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-21T09:04:15.310Z",
+      "endedAt": "2026-07-21T12:46:10+02:00",
+      "mergedAt": "2026-07-21T12:46:10+02:00",
+      "merged": {
+        "commit": "49a01f1",
+        "mergedAt": "2026-07-21T12:46:10+02:00",
+        "strategy": "primary-merge"
+      },
+      "costUSD": 1.18,
+      "verify": {
+        "state": "passed",
+        "attempts": 1
+      },
+      "review": {
+        "verdict": "pass",
+        "current": {
+          "verdict": "pass",
+          "round": 1
+        },
+        "rounds": 1
+      },
+      "postMerge": {
+        "state": "passed",
+        "commit": "49a01f1",
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 63794,
+            "tail": "# pass 1184"
+          }
+        ],
+        "queuedAt": "2026-07-21T12:46:10+02:00",
+        "startedAt": "2026-07-21T12:46:10+02:00",
+        "endedAt": "2026-07-21T12:46:10+02:00",
+        "testedTree": "49a01f1"
+      },
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "diff": {
+        "insertions": 41,
+        "deletions": 1,
+        "files": 2
+      },
+      "orphanUnresolved": false,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "passed"
+        },
+        {
+          "gate": "main",
+          "state": "passed"
+        }
+      ]
+    }
+  ],
+  "stats": {
+    "merges": 47,
+    "firstPassReviews": 34,
+    "reviewedMerges": 47,
+    "reviewPassRate": 0.723404255319149,
+    "spendMergedUSD": 166.12,
+    "costPerMergeUSD": 4.05,
+    "unlandedSpendUSD": 26.17,
+    "costUnreported": 6,
+    "insertions": 44120,
+    "deletions": 3171,
+    "mainUnresolved": 1
+  }
+}

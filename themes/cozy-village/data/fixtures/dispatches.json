@@ -1,0 +1,649 @@
+{
+  "project": "atelier",
+  "dispatches": [
+    {
+      "id": "c7d21a94",
+      "project": "atelier",
+      "ticketId": "atelier-8r6",
+      "title": "needs_input outcome detection - fail-closed classification",
+      "branch": "atelier-arch/needs-input-residuals",
+      "branchHead": "c41f9a2e",
+      "lane": "claude",
+      "model": "opus",
+      "villager": "wren",
+      "state": "completed",
+      "startedAt": "2026-07-30T16:17:02.833Z",
+      "endedAt": "2026-07-30T19:05:02.833Z",
+      "costUSD": 7.14,
+      "turns": 38,
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "verify": {
+        "state": "passed",
+        "attempt": 1,
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 44120,
+            "tail": "# pass 1184"
+          }
+        ],
+        "attempts": [
+          {
+            "state": "passed",
+            "attempt": 1,
+            "steps": []
+          }
+        ],
+        "testedTree": "c41f9a2e",
+        "mainBranch": "main",
+        "commitsBehind": 0
+      },
+      "review": {
+        "dispatchId": "1d90b7c4",
+        "round": 1,
+        "at": "2026-07-30T18:59:02.833Z",
+        "reviewedHead": "c41f9a2e",
+        "verdict": "pass",
+        "findingCount": 0,
+        "summary": "Attacked the classifier on the three shapes I distrusted - a trailing question inside a quoted span, a plan that ends in a question mark, and an empty diff with a question. Fail-closed holds on all three. No new terminal state leaks into the board.",
+        "current": {
+          "dispatchId": "1d90b7c4",
+          "round": 1,
+          "at": "2026-07-30T18:59:02.833Z",
+          "reviewedHead": "c41f9a2e",
+          "verdict": "pass",
+          "findingCount": 0,
+          "summary": "Attacked the classifier on the three shapes I distrusted - a trailing question inside a quoted span, a plan that ends in a question mark, and an empty diff with a question. Fail-closed holds on all three. No new terminal state leaks into the board."
+        },
+        "rounds": [
+          {
+            "dispatchId": "1d90b7c4",
+            "round": 1,
+            "at": "2026-07-30T18:59:02.833Z",
+            "reviewedHead": "c41f9a2e",
+            "verdict": "pass",
+            "findingCount": 0,
+            "summary": "Attacked the classifier on the three shapes I distrusted - a trailing question inside a quoted span, a plan that ends in a question mark, and an empty diff with a question. Fail-closed holds on all three. No new terminal state leaks into the board."
+          }
+        ]
+      },
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": false,
+      "strandedBrWrites": false,
+      "exitSummary": "Classifier now fails closed; three shapes covered by tests.",
+      "diff": {
+        "insertions": 214,
+        "deletions": 33,
+        "files": 6
+      },
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "passed"
+        },
+        {
+          "gate": "merge",
+          "state": "pending"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    },
+    {
+      "id": "3f80b6e2",
+      "project": "atelier",
+      "ticketId": "atelier-2q6",
+      "title": "review round history - trajectory parking follow-up",
+      "branch": "atelier-arch/review-rounds-followup",
+      "branchHead": "77b1e004",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "needs_input",
+      "startedAt": "2026-07-30T18:29:02.833Z",
+      "costUSD": 1.86,
+      "turns": 11,
+      "outcome": {
+        "kind": "needs_input",
+        "changes": "empty",
+        "finalMessage": "retrieved",
+        "question": "Parking a stalled thread drops its rounds from the active view. Should a parked round still count against reviewPassRate in the chronicle stats, or is a parked thread excluded from the denominator entirely? I can argue both and the choice changes the scorecard.",
+        "detectedAt": "2026-07-30T19:29:02.833Z"
+      },
+      "verify": {
+        "state": "skipped",
+        "detail": "nothing to verify - this dispatch is waiting on an answer",
+        "steps": []
+      },
+      "review": null,
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": false,
+      "strandedBrWrites": false,
+      "diff": {
+        "insertions": 0,
+        "deletions": 0,
+        "files": 0
+      },
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "empty"
+        },
+        {
+          "gate": "verify",
+          "state": "skipped"
+        },
+        {
+          "gate": "review",
+          "state": "not-run"
+        },
+        {
+          "gate": "merge",
+          "state": "not-run"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    },
+    {
+      "id": "a15c9d77",
+      "project": "atelier",
+      "ticketId": "atelier-fo5",
+      "title": "resume-path hygiene - redaction parity across lanes",
+      "branch": "atelier-arch/redaction-parity",
+      "branchHead": "5aa20c31",
+      "lane": "claude",
+      "model": "sonnet[1m]",
+      "villager": "juniper",
+      "state": "verifying",
+      "startedAt": "2026-07-30T18:47:02.833Z",
+      "costUSD": 2.41,
+      "turns": 19,
+      "outcome": {
+        "kind": null,
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "verify": {
+        "state": "running",
+        "attempt": 1,
+        "steps": [],
+        "startedAt": "2026-07-30T19:32:02.833Z",
+        "attempts": []
+      },
+      "review": null,
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": false,
+      "strandedBrWrites": false,
+      "diff": {
+        "insertions": 147,
+        "deletions": 22,
+        "files": 5
+      },
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "pending"
+        },
+        {
+          "gate": "review",
+          "state": "not-run"
+        },
+        {
+          "gate": "merge",
+          "state": "not-run"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    },
+    {
+      "id": "6b2e40f1",
+      "project": "atelier",
+      "ticketId": "atelier-9dt",
+      "title": "verify re-run - race-safe capacity on boot repair",
+      "branch": "atelier-arch/verify-rerun-capacity",
+      "branchHead": "b0c7d199",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-30T14:35:02.833Z",
+      "endedAt": "2026-07-30T17:47:02.833Z",
+      "costUSD": 3.28,
+      "turns": 26,
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "verify": {
+        "state": "failed",
+        "attempt": 2,
+        "testedTree": "b0c7d199",
+        "mainBranch": "main",
+        "commitsBehind": 3,
+        "steps": [
+          {
+            "command": "node --test server/lib/dispatch.test.mjs",
+            "exitCode": 1,
+            "durationMs": 51900,
+            "tail": "not ok 118 - re-run reuses a freed capacity slot\n  expected 2 running, got 3"
+          }
+        ],
+        "attempts": [
+          {
+            "state": "failed",
+            "attempt": 1,
+            "steps": [
+              {
+                "command": "node --test server/lib/dispatch.test.mjs",
+                "exitCode": 1,
+                "durationMs": 50100,
+                "tail": "not ok 118"
+              }
+            ]
+          },
+          {
+            "state": "failed",
+            "attempt": 2,
+            "steps": [
+              {
+                "command": "node --test server/lib/dispatch.test.mjs",
+                "exitCode": 1,
+                "durationMs": 51900,
+                "tail": "not ok 118"
+              }
+            ]
+          }
+        ]
+      },
+      "review": null,
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": false,
+      "strandedBrWrites": false,
+      "diff": {
+        "insertions": 331,
+        "deletions": 47,
+        "files": 8
+      },
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "failed"
+        },
+        {
+          "gate": "review",
+          "state": "not-run"
+        },
+        {
+          "gate": "merge",
+          "state": "pending"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    },
+    {
+      "id": "d904ce38",
+      "project": "atelier",
+      "ticketId": "atelier-e5x",
+      "title": "event log - drain tracing follow-up",
+      "branch": "atelier-arch/event-log-drain",
+      "branchHead": "d1e88a70",
+      "lane": "claude",
+      "model": "opus[1m]",
+      "villager": "marisol",
+      "state": "completed",
+      "startedAt": "2026-07-30T15:29:02.833Z",
+      "endedAt": "2026-07-30T19:17:02.833Z",
+      "costUSD": 9.05,
+      "turns": 52,
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "verify": {
+        "state": "passed",
+        "attempt": 1,
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 46800,
+            "tail": "# pass 1184"
+          }
+        ],
+        "attempts": [
+          {
+            "state": "passed",
+            "attempt": 1,
+            "steps": []
+          }
+        ],
+        "testedTree": "d1e88a70",
+        "mainBranch": "main",
+        "commitsBehind": 1
+      },
+      "review": {
+        "dispatchId": "0ab3f951",
+        "round": 2,
+        "at": "2026-07-30T19:11:02.833Z",
+        "reviewedHead": "d1e88a70",
+        "verdict": "fail",
+        "findingCount": 2,
+        "summary": "Two still open. The cursor survives a restart now, but the spend readout still double-counts a re-run, and the drain trace loses its parent span when the queue parks.",
+        "current": {
+          "dispatchId": "0ab3f951",
+          "round": 2,
+          "at": "2026-07-30T19:11:02.833Z",
+          "reviewedHead": "d1e88a70",
+          "verdict": "fail",
+          "findingCount": 2,
+          "summary": "Two still open. The cursor survives a restart now, but the spend readout still double-counts a re-run, and the drain trace loses its parent span when the queue parks."
+        },
+        "rounds": [
+          {
+            "dispatchId": "77c04b12",
+            "round": 1,
+            "at": "2026-07-30T17:05:02.833Z",
+            "reviewedHead": "9f2b1e77",
+            "verdict": "fail",
+            "findingCount": 3,
+            "summary": "Three blockers: the drain trace loses its cursor across a restart, the spend readout double-counts a re-run, and the log tap is not total."
+          },
+          {
+            "dispatchId": "0ab3f951",
+            "round": 2,
+            "at": "2026-07-30T19:11:02.833Z",
+            "reviewedHead": "d1e88a70",
+            "verdict": "fail",
+            "findingCount": 2,
+            "summary": "Two still open. The cursor survives a restart now, but the spend readout still double-counts a re-run, and the drain trace loses its parent span when the queue parks."
+          }
+        ]
+      },
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": false,
+      "strandedBrWrites": false,
+      "diff": {
+        "insertions": 688,
+        "deletions": 91,
+        "files": 12
+      },
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "failed"
+        },
+        {
+          "gate": "merge",
+          "state": "pending"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    },
+    {
+      "id": "72af1b05",
+      "project": "atelier",
+      "ticketId": "atelier-za6",
+      "title": "codex reaper - observer-safe gc residuals",
+      "branch": "atelier-arch/codex-reaper-residuals",
+      "branchHead": null,
+      "lane": "codex",
+      "model": "gpt-5.4-codex",
+      "villager": "alder",
+      "state": "running",
+      "startedAt": "2026-07-30T16:59:02.833Z",
+      "costUSD": null,
+      "turns": null,
+      "outcome": {
+        "kind": null,
+        "changes": "unknown",
+        "question": null,
+        "finalMessage": "unavailable"
+      },
+      "verify": null,
+      "review": null,
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": true,
+      "strandedBrWrites": false,
+      "diff": null,
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "unknown"
+        },
+        {
+          "gate": "verify",
+          "state": "not-run"
+        },
+        {
+          "gate": "review",
+          "state": "not-run"
+        },
+        {
+          "gate": "merge",
+          "state": "not-run"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    },
+    {
+      "id": "1c46fa9b",
+      "project": "atelier",
+      "ticketId": "atelier-vke",
+      "title": "queue un-park MCP tool - schema drift guard",
+      "branch": "atelier-arch/queue-unpark-schema",
+      "branchHead": "0f31ab6d",
+      "lane": "claude",
+      "model": "haiku",
+      "villager": "pell",
+      "state": "completed",
+      "startedAt": "2026-07-30T18:05:02.833Z",
+      "endedAt": "2026-07-30T18:35:02.833Z",
+      "costUSD": 0.41,
+      "turns": 7,
+      "outcome": {
+        "kind": "completed_empty",
+        "changes": "empty",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "verify": {
+        "state": "skipped",
+        "detail": "nothing to verify - this dispatch produced no changes",
+        "steps": []
+      },
+      "review": null,
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": false,
+      "strandedBrWrites": false,
+      "exitSummary": "Schema already covered queueFailureLimit; nothing to change.",
+      "diff": {
+        "insertions": 0,
+        "deletions": 0,
+        "files": 0
+      },
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "empty"
+        },
+        {
+          "gate": "verify",
+          "state": "skipped"
+        },
+        {
+          "gate": "review",
+          "state": "not-run"
+        },
+        {
+          "gate": "merge",
+          "state": "pending"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    },
+    {
+      "id": "e58d3c60",
+      "project": "atelier",
+      "ticketId": "atelier-def",
+      "title": "settings schema drift guard - MCP parity residuals",
+      "branch": "atelier-arch/settings-drift-guard",
+      "branchHead": "3c7710ab",
+      "lane": "claude",
+      "model": "sonnet",
+      "villager": "tobin",
+      "state": "completed",
+      "startedAt": "2026-07-30T17:29:02.833Z",
+      "endedAt": "2026-07-30T19:23:02.833Z",
+      "costUSD": 2.02,
+      "turns": 16,
+      "outcome": {
+        "kind": "completed",
+        "changes": "changed",
+        "question": null,
+        "finalMessage": "retrieved"
+      },
+      "verify": {
+        "state": "passed",
+        "attempt": 1,
+        "steps": [
+          {
+            "command": "node --test server/**/*.test.mjs",
+            "exitCode": 0,
+            "durationMs": 43310,
+            "tail": "# pass 1184"
+          }
+        ],
+        "attempts": [
+          {
+            "state": "passed",
+            "attempt": 1,
+            "steps": []
+          }
+        ],
+        "testedTree": "3c7710ab",
+        "mainBranch": "main",
+        "commitsBehind": 0
+      },
+      "review": null,
+      "merged": null,
+      "dismissed": null,
+      "postMerge": null,
+      "orphanUnresolved": false,
+      "strandedBrWrites": false,
+      "exitSummary": "Drift guard covers every settings field the MCP schema exposes.",
+      "diff": {
+        "insertions": 268,
+        "deletions": 41,
+        "files": 7
+      },
+      "gates": [
+        {
+          "gate": "changes",
+          "state": "passed"
+        },
+        {
+          "gate": "verify",
+          "state": "passed"
+        },
+        {
+          "gate": "review",
+          "state": "not-run"
+        },
+        {
+          "gate": "merge",
+          "state": "pending"
+        },
+        {
+          "gate": "main",
+          "state": "not-run"
+        }
+      ]
+    }
+  ],
+  "convoy": {
+    "id": "cv-71a4",
+    "project": "atelier",
+    "label": "theme substrate + flagship world",
+    "ticketIds": [
+      "atelier-2q6",
+      "atelier-e5x",
+      "atelier-yqk",
+      "atelier-8r6",
+      "atelier-9dt",
+      "atelier-za6",
+      "atelier-def"
+    ],
+    "cursor": 3,
+    "state": "running",
+    "completedConvoys": 6
+  }
+}

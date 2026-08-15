@@ -1,0 +1,16 @@
+{
+  "_comment": "theme_color mirrors --c-indigo-600; background_color mirrors --c-gray-900.",
+  "name": "Atelier",
+  "short_name": "Atelier",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#4053c4",
+  "background_color": "#1c1f27",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
