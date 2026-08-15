@@ -67,18 +67,18 @@ was — you correct the course instead of restarting it.
 |---|---|
 | **Node.js** | 18 or newer. Nothing else to install — Atelier's runtime is Node's standard library |
 | **Git** | Any modern version, with worktree support |
-| **[`br`](https://github.com/Dicklesworthstone/beads_rust)** | The tracker CLI (a Rust port of [Steve Yegge's Beads](https://github.com/steveyegge/beads)). `cargo install --git https://github.com/Dicklesworthstone/beads_rust` |
+| **[`br`](https://github.com/Dicklesworthstone/beads_rust)** | The tracker CLI (a Rust port of [Steve Yegge's Beads](https://github.com/steveyegge/beads)). Install with `cargo install --git https://github.com/Dicklesworthstone/beads_rust.git beads_rust --locked`, or the project's [install script](https://github.com/Dicklesworthstone/beads_rust/blob/main/docs/INSTALLING.md) |
 | **An agent CLI** | At least one of [Claude Code](https://claude.com/claude-code) (`claude`) or [Codex](https://github.com/openai/codex) (`codex`) |
 
-Linux and macOS are the developed-against platforms. The code is written to be
-Windows-portable and ships a Windows smoke checklist in
-[`docs/`](docs/ARCHITECTURE.md), but Windows has not been verified end to end —
-see [Status](#status).
+Linux is the developed-against platform and macOS should work. The code is
+written to be Windows-portable, but Windows has **not** been verified end to
+end — [`docs/WINDOWS.md`](docs/WINDOWS.md) is the checklist for closing that
+gap, and working through it is a genuinely useful contribution.
 
 ## Quickstart
 
 ```sh
-git clone https://github.com/<you>/atelier.git
+git clone https://github.com/Tavrin/atelier.git
 cd atelier
 node bin/atelier.mjs init
 node bin/atelier.mjs serve
@@ -189,6 +189,7 @@ aware that:
 | [Theme handbook](docs/THEMES.md) | Bundles, data surfaces, lifecycle, trust tiers |
 | [Notifications](docs/NOTIFICATIONS.md) | Self-hosted delivery, and why no third parties |
 | [The loop](docs/LOOP.md) | The dispatch cycle as a formal five-field loop |
+| [Windows](docs/WINDOWS.md) | The unverified-platform checklist, and how to report results |
 | [Lessons](docs/lessons/INDEX.md) | Durable traps found the hard way while building this |
 
 ## Contributing
