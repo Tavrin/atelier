@@ -1,0 +1,72 @@
+name: Bug report
+description: Something in Atelier behaved incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Atelier writes a structured event log for exactly this situation. If the
+        bug involves a dispatch, `atelier logs --dispatch <id>` is usually the
+        fastest route to a diagnosis — please include the relevant lines.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Command and full output
+      description: The exact command, and its complete output. Redact anything sensitive.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: "Ubuntu 24.04 / macOS 15.1 / Windows 11 23H2"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version`
+      placeholder: "v22.22.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: lane
+    attributes:
+      label: Which lane, if relevant
+      options:
+        - Not lane-specific
+        - claude
+        - codex
+        - Both
+
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Does it reproduce?
+      options:
+        - Yes, every time
+        - Intermittently
+        - Happened once, could not reproduce
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant event log lines
+      description: From `atelier logs`, if applicable.
+      render: shell

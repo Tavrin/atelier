@@ -194,12 +194,15 @@ aware that:
 
 ## Contributing
 
-[AGENTS.md](AGENTS.md) holds the binding rules — they are short, and the
-zero-dependency rule in particular is not negotiable for core.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the rules that will reject a PR on
+sight (chiefly: core takes no runtime dependencies, ever) and how to verify a
+change. [AGENTS.md](AGENTS.md) is the full binding rule set.
 
-Verify with `node --test` from the repository root, plus the injection probe in
-[SECURITY.md](docs/SECURITY.md) for any change to request handling, exec, or
-dispatch surfaces.
+Most wanted right now: **Windows verification** — see
+[docs/WINDOWS.md](docs/WINDOWS.md). The code is written for it and has never
+been run there.
+
+Security issues go through [private reporting](SECURITY.md), not public issues.
 
 ## License
 

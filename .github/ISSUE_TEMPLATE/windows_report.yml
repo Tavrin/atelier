@@ -1,0 +1,57 @@
+name: Windows verification report
+description: Results from working through docs/WINDOWS.md — success or failure both wanted
+labels: ["windows", "platform-verification"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Atelier is written to be Windows-portable but has never been verified
+        end to end there. Reports either way are genuinely useful — "all seven
+        steps passed" is as valuable as a failure.
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 23H2"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      placeholder: "v22.22.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shell
+    attributes:
+      label: Shell
+      options:
+        - PowerShell
+        - Command Prompt
+        - Windows Terminal (PowerShell)
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist results — tick what succeeded
+      options:
+        - label: "`node bin\\atelier.mjs init`"
+        - label: "`node bin\\atelier.mjs serve` and the loopback URL opened"
+        - label: "Added one project through the UI"
+        - label: "Completed one isolated dispatch"
+        - label: "Verified and merged that dispatch"
+        - label: "`doctor --install-service --dry-run` printed schtasks argv WITHOUT registering"
+
+  - type: textarea
+    id: failures
+    attributes:
+      label: Failures
+      description: For each failed step, the command and its full output.
+      render: shell
