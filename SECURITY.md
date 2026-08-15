@@ -2,10 +2,12 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately through GitHub's
-[private vulnerability reporting](https://github.com/Tavrin/atelier/security/advisories/new)
-rather than opening a public issue. If you would rather not use GitHub, email
-**etienne.doux.pro@gmail.com** instead.
+Email **etienne.doux.pro@gmail.com**. Please do not open a public issue for a
+security problem.
+
+If GitHub's private vulnerability reporting is enabled on this repository, the
+**Report a vulnerability** button under the Security tab works too — but email
+is the channel that is always available.
 
 Include what you can: the version or commit, the affected surface, a
 reproduction, and what an attacker gains. I am a single maintainer, so expect

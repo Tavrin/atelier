@@ -208,6 +208,9 @@ Security issues go through [private reporting](SECURITY.md), not public issues.
 
 [MIT](LICENSE).
 
-The `cozy-village` theme vendors two MIT-licensed libraries in-repo, frozen and
-auditable, with provenance recorded next to them: [three.js](https://threejs.org)
-and a preview build of the [Moss](https://github.com/Tavrin/Moss) web renderer.
+The `cozy-village` theme vendors two MIT-licensed libraries in-repo, frozen,
+with provenance and SHA-256 manifests recorded next to them:
+[three.js](https://threejs.org), and a preview build of the Moss web renderer —
+a WebGPU engine by the same author, which is **not currently public**, so that
+vendored copy cannot be checked against its upstream source. Its MIT license is
+included verbatim alongside it.

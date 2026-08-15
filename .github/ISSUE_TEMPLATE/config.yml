@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/Tavrin/atelier/security/advisories/new
-    about: Report privately, not as a public issue. See SECURITY.md for what is in and out of scope.
+    url: https://github.com/Tavrin/atelier/blob/main/SECURITY.md
+    about: Report privately by email, not as a public issue. SECURITY.md lists what is in and out of scope.
   - name: Contributing guide
     url: https://github.com/Tavrin/atelier/blob/main/CONTRIBUTING.md
     about: The zero-dependency rule and the verification steps, before you open a PR.
