@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { mintBearerToken } from "./lib/auth.mjs";
+import { ensureAuthSecret, mintBearerToken } from "./lib/auth.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -957,6 +957,9 @@ test("atelier plan sends approve or revision feedback through the loopback API",
 });
 
 test("atelier move-tracker delegates to the loopback API and prints next steps", async (t) => {
+  const state = await mkdtemp(join(tmpdir(), "atelier-cli-move-tracker-"));
+  t.after(() => rm(state, { recursive: true, force: true }));
+  const token = mintBearerToken(ensureAuthSecret(state), "cli");
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -965,6 +968,7 @@ test("atelier move-tracker delegates to the loopback API and prints next steps",
       method: request.method,
       path: request.url,
       contentType: request.headers["content-type"],
+      authorization: request.headers.authorization,
       body: Buffer.concat(chunks).toString("utf8"),
     });
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -986,7 +990,12 @@ test("atelier move-tracker delegates to the loopback API and prints next steps",
     [resolve("bin", "atelier.mjs"), "move-tracker", "fixture", "--to", "external"],
     {
       cwd: resolve("."),
-      env: { ...process.env, PORT: String(server.address().port) },
+      env: {
+        ...process.env,
+        PORT: String(server.address().port),
+        ATELIER_STATE_DIR: state,
+        ATELIER_AUTH_TOKEN: "",
+      },
     },
   );
 
@@ -994,6 +1003,7 @@ test("atelier move-tracker delegates to the loopback API and prints next steps",
     method: "POST",
     path: "/api/projects/fixture/move-tracker",
     contentType: "application/json",
+    authorization: `Bearer ${token}`,
     body: JSON.stringify({ to: "external" }),
   }]);
   assert.match(stdout, /Moved fixture tracker to external/);

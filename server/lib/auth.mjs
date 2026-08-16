@@ -19,6 +19,7 @@ import { stateDir } from "./paths.mjs";
 
 export const AUTH_SECRET_FILE = "auth-secret";
 export const SESSION_COOKIE = "atelier_session";
+export const SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
 
 const TOKEN_PREFIX = "atelier-v1";
 const CLIENT_LABELS = new Set(["api", "cli", "mcp"]);
@@ -163,7 +164,11 @@ function validOrigin(request, host) {
   return origin === undefined || origin === `http://${host}`;
 }
 
-export function createRequestAuth({ directory }) {
+export function createRequestAuth({
+  directory,
+  now = Date.now,
+  sessionTtlMs = SESSION_TTL_MS,
+}) {
   const secret = ensureAuthSecret(directory);
   const failures = new Map();
 
@@ -192,7 +197,11 @@ export function createRequestAuth({ directory }) {
     if (bearer !== undefined) {
       const actor = verifyBearerToken(secret, bearer);
       if (!actor) authenticationFailure(request, "Invalid Atelier bearer token");
-      return { actor, credential: "bearer" };
+      return {
+        actor,
+        credential: "bearer",
+        credentialKey: signature(secret, "event-stream", bearer),
+      };
     }
 
     const session = verifySignedValue(
@@ -201,6 +210,20 @@ export function createRequestAuth({ directory }) {
       cookiesFrom(request)[SESSION_COOKIE],
     );
     if (!session) authenticationFailure(request, "Atelier authentication is required");
+    const match = /^(\d+):(\d+):([A-Za-z0-9_-]{43})$/.exec(session);
+    const issuedAt = Number(match?.[1]);
+    const expiresAt = Number(match?.[2]);
+    const currentTime = now();
+    if (
+      !match ||
+      !Number.isSafeInteger(issuedAt) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= issuedAt ||
+      issuedAt > currentTime ||
+      expiresAt <= currentTime
+    ) {
+      authenticationFailure(request, "Atelier session is invalid or expired");
+    }
     if (mutation) {
       const header = request.headers["x-atelier-csrf"];
       const csrf = Array.isArray(header) ? header[0] : header;
@@ -209,7 +232,11 @@ export function createRequestAuth({ directory }) {
         authenticationFailure(request, "A valid X-Atelier-CSRF token is required");
       }
     }
-    return { actor: "human-ui", credential: "session" };
+    return {
+      actor: "human-ui",
+      credential: "session",
+      credentialKey: signature(secret, "event-stream", session),
+    };
   }
 
   return {
@@ -233,9 +260,12 @@ export function createRequestAuth({ directory }) {
 
     mintSession() {
       const id = randomBytes(32).toString("base64url");
+      const issuedAt = now();
+      const expiresAt = issuedAt + sessionTtlMs;
+      const session = `${issuedAt}:${expiresAt}:${id}`;
       return {
-        cookie: `${SESSION_COOKIE}=${signedValue(secret, "session", id)}; HttpOnly; SameSite=Strict; Path=/`,
-        csrfToken: signedValue(secret, "csrf", id),
+        cookie: `${SESSION_COOKIE}=${signedValue(secret, "session", session)}; HttpOnly; SameSite=Strict; Path=/`,
+        csrfToken: signedValue(secret, "csrf", session),
       };
     },
   };

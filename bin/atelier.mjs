@@ -250,10 +250,15 @@ async function moveTracker(args) {
     throw new Error("move-tracker --to must be external or in-repo");
   }
   const project = encodeURIComponent(positionals[0]);
+  const authorization = `Bearer ${clientBearerToken("cli")}`;
   const result = await responseJson(
     await fetch(`${atelierServerUrl()}/api/projects/${project}/move-tracker`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Atelier-Actor": "cli" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: authorization,
+        "X-Atelier-Actor": "cli",
+      },
       body: JSON.stringify({ to: values.to }),
     }),
   );

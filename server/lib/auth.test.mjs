@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   AUTH_SECRET_FILE,
   clientBearerToken,
+  createRequestAuth,
   ensureAuthSecret,
   mintBearerToken,
   verifyBearerToken,
@@ -21,6 +22,33 @@ test("auth secret is created owner-only and reused across starts", (t) => {
   assert.equal(readFileSync(path, "utf8"), `${first}\n`);
   if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o777, 0o600);
   assert.equal(ensureAuthSecret(directory), first);
+});
+
+test("browser sessions are accepted only within their signed lifetime", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "atelier-auth-session-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let currentTime = 1_000;
+  const auth = createRequestAuth({
+    directory,
+    now: () => currentTime,
+    sessionTtlMs: 500,
+  });
+  const session = auth.mintSession();
+  const request = {
+    method: "GET",
+    headers: {
+      host: "127.0.0.1:5170",
+      cookie: session.cookie.split(";", 1)[0],
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+
+  assert.equal(auth.guard(request, { path: "/api/projects", port: 5170 }).actor, "human-ui");
+  currentTime += 501;
+  assert.throws(
+    () => auth.guard(request, { path: "/api/projects", port: 5170 }),
+    /session is invalid or expired/,
+  );
 });
 
 test("bearers bind the client label and compare signatures safely", (t) => {

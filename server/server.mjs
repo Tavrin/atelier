@@ -171,6 +171,14 @@ const AGGREGATE_EVENT_TYPES = new Set([
 ]);
 const PATCH_LIMIT = 1024 * 1024;
 const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 1_500;
+const EVENT_STREAM_GLOBAL_LIMIT = 64;
+const EVENT_STREAM_PER_CREDENTIAL_LIMIT = 8;
+const MCP_RESTRICTED_SETTINGS = new Set([
+  "requireReview",
+  "reviewPolicy",
+  "budgetUSDPerDay",
+  "unpricedDispatchCapPerDay",
+]);
 const serverResources = new WeakMap();
 
 function projectByName(registry, name) {
@@ -266,13 +274,26 @@ function parseAggregateResume(value) {
   return { dispatchId: match[1], seq };
 }
 
-function trackEventStream(response, eventStreams) {
-  eventStreams.add(response);
-  response.once("close", () => eventStreams.delete(response));
+function trackEventStream(response, eventStreamState, credentialKey) {
+  if (eventStreamState.responses.size >= eventStreamState.globalLimit) {
+    throw new HttpError(429, "Atelier event-stream connection limit reached");
+  }
+  const credentialCount = eventStreamState.byCredential.get(credentialKey) ?? 0;
+  if (credentialCount >= eventStreamState.perCredentialLimit) {
+    throw new HttpError(429, "Atelier event-stream credential limit reached");
+  }
+  eventStreamState.responses.add(response);
+  eventStreamState.byCredential.set(credentialKey, credentialCount + 1);
+  response.once("close", () => {
+    eventStreamState.responses.delete(response);
+    const remaining = (eventStreamState.byCredential.get(credentialKey) ?? 1) - 1;
+    if (remaining > 0) eventStreamState.byCredential.set(credentialKey, remaining);
+    else eventStreamState.byCredential.delete(credentialKey);
+  });
 }
 
-function openEventStream(request, response, dispatcher, eventStreams, dispatchId) {
-  trackEventStream(response, eventStreams);
+function openEventStream(request, response, dispatcher, eventStreamState, credentialKey, dispatchId) {
+  trackEventStream(response, eventStreamState, credentialKey);
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-store",
@@ -337,8 +358,8 @@ function openEventStream(request, response, dispatcher, eventStreams, dispatchId
   });
 }
 
-function openBoardEventStream(response, boardEvents, bootStamp, eventStreams) {
-  trackEventStream(response, eventStreams);
+function openBoardEventStream(response, boardEvents, bootStamp, eventStreamState, credentialKey) {
+  trackEventStream(response, eventStreamState, credentialKey);
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-store",
@@ -742,6 +763,8 @@ export function createServer({
   // can corroborate, so running it often buys nothing and each run is a full
   // /proc scan. Terminal transitions, dismissal and merge do the timely work.
   codexSweepIntervalMs = 600_000,
+  eventStreamGlobalLimit = EVENT_STREAM_GLOBAL_LIMIT,
+  eventStreamPerCredentialLimit = EVENT_STREAM_PER_CREDENTIAL_LIMIT,
 }) {
   // Keep the HTML, modules, and styles from one boot together. A merge may
   // update the checkout while this process is running; request-time reads can
@@ -781,6 +804,12 @@ export function createServer({
     }
   };
   const eventStreams = new Set();
+  const eventStreamState = {
+    responses: eventStreams,
+    byCredential: new Map(),
+    globalLimit: eventStreamGlobalLimit,
+    perCredentialLimit: eventStreamPerCredentialLimit,
+  };
   const sockets = new Set();
   const movingTrackerProjects = new Set();
   const requireStableTracker = (project) => {
@@ -800,6 +829,8 @@ export function createServer({
       });
       requestAuthContexts.set(request, authContext);
       if (authContext.requestClass === "session-bootstrap") {
+        // Local authentication blocks cross-origin and remote callers, not a
+        // process already running as the same OS user; that boundary is OS policy.
         const session = requestAuth.mintSession();
         response.setHeader("Set-Cookie", session.cookie);
         jsonResponse(response, 200, { csrfToken: session.csrfToken });
@@ -1034,6 +1065,15 @@ export function createServer({
         }
         if (Object.keys(postBody).length === 0) {
           throw new HttpError(400, "At least one mutable project field is required");
+        }
+        const restricted = Object.keys(postBody).filter((key) =>
+          MCP_RESTRICTED_SETTINGS.has(key)
+        );
+        if (requestActor(request) === "mcp" && restricted.length > 0) {
+          throw new HttpError(
+            403,
+            `MCP cannot change gate-critical settings (${restricted.join(", ")}); use human/UI authority`,
+          );
         }
         const before = { ...projectByName(registry, name) };
         const parkedBefore = Object.hasOwn(postBody, "queueFailureLimit")
@@ -1372,11 +1412,23 @@ export function createServer({
       }
 
       if (request.method === "GET" && path === "/api/dispatches/events") {
-        openEventStream(request, response, dispatcher, eventStreams);
+        openEventStream(
+          request,
+          response,
+          dispatcher,
+          eventStreamState,
+          authContext.credentialKey,
+        );
         return;
       }
       if (request.method === "GET" && path === "/api/board/events") {
-        openBoardEventStream(response, boardEvents, bootStamp, eventStreams);
+        openBoardEventStream(
+          response,
+          boardEvents,
+          bootStamp,
+          eventStreamState,
+          authContext.credentialKey,
+        );
         return;
       }
 
@@ -1486,10 +1538,7 @@ export function createServer({
                 ? { redirectTicket: postBody.redirectTicket }
                 : {}),
               note: requiredString(postBody, "note"),
-              // This actor is intentionally explicit rather than inferred from
-              // the transport header: dispositions are human adjudications,
-              // while the header only says which UI/API surface carried them.
-              actor: requiredString(postBody, "actor"),
+              actor: requestActor(request),
             }));
           } catch (error) {
             throw dispatchHttpError(error);
@@ -1559,7 +1608,14 @@ export function createServer({
           return;
         }
         if (request.method === "GET" && action === "events") {
-          openEventStream(request, response, dispatcher, eventStreams, id);
+          openEventStream(
+            request,
+            response,
+            dispatcher,
+            eventStreamState,
+            authContext.credentialKey,
+            id,
+          );
           return;
         }
         if (request.method === "GET" && action === "diff") {
@@ -1663,6 +1719,7 @@ export function createServer({
     resourcesClosed = true;
     for (const response of eventStreams) response.end();
     eventStreams.clear();
+    eventStreamState.byCredential.clear();
     boardEvents.close?.();
   };
   serverResources.set(server, {

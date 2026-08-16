@@ -14,6 +14,7 @@ unexpected API billing, and credentials appearing in operator-visible output.
    a signed bearer or browser session. Mutations additionally enforce the exact
    loopback Host and same-origin Origin; browser mutations require the session's
    CSRF token. Remote exposure remains forbidden.
+   This authentication does not defend against another process running as the same OS user; that boundary requires the ATT-008 OS sandbox and ATT-010 human break-glass policy.
 2. **No shell execution.** Subprocesses use `execFile` or `spawn` with explicit
    argv arrays. User strings remain single arguments and are never interpolated
    into a shell command.

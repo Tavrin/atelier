@@ -522,7 +522,7 @@ test("atelier_review proxies normally and rejects force before HTTP", async () =
   assert.match(responses[2].error.message, /Unknown argument field: force/);
 });
 
-test("atelier_review_disposition round-trips the mandatory actor and append payload", async () => {
+test("atelier_review_disposition omits caller-supplied actor identity", async () => {
   const requests = [];
   const disposition = {
     ref: "disposition-1",
@@ -539,13 +539,13 @@ test("atelier_review_disposition round-trips the mandatory actor and append payl
         findingRef: disposition.findingRef,
         disposition: disposition.disposition,
         note: disposition.note,
-        actor: disposition.actor,
       }),
       toolCall(3, "atelier_review_disposition", {
         id: "dispatch-1",
         findingRef: disposition.findingRef,
         disposition: "accepted",
-        note: "Missing actor must fail schema validation.",
+        note: "Credential identity is sufficient.",
+        actor: disposition.actor,
       }),
     ),
     async (url, options) => {
@@ -569,13 +569,12 @@ test("atelier_review_disposition round-trips the mandatory actor and append payl
     findingRef: disposition.findingRef,
     disposition: disposition.disposition,
     note: disposition.note,
-    actor: disposition.actor,
   });
   assert.deepEqual(
     JSON.parse(responses[1].result.content[0].text).reviewDispositions,
     [disposition],
   );
-  assert.match(responses[2].error.message, /Missing required argument field: actor/);
+  assert.match(responses[2].error.message, /Unknown argument field: actor/);
 });
 
 test("atelier_merge proxies ordinary merges and rejects force before HTTP", async () => {

@@ -98,7 +98,7 @@ with `?` below.
 | `atelier_reply` | `id`, `text` | `false` | `false` | Sends live input or resumes a supported dispatch. |
 | `atelier_plan_action` | `id`, `action`, `text?` | `false` | `false` | Approves a plan or requests revision. |
 | `atelier_review` | `id` | `false` | `false` | Starts a linked read-only spec-audit dispatch. |
-| `atelier_review_disposition` | `id`, `findingRef`, `disposition`, `redirectTicket?`, `note`, `actor` | `false` | `false` | Appends an audited human disposition (`accepted`, `refuted`, `redirected`, or `waived`) for one structured review finding; `redirectTicket` is required only for `redirected`. |
+| `atelier_review_disposition` | `id`, `findingRef`, `disposition`, `redirectTicket?`, `note` | `false` | `false` | Appends an audited disposition (`accepted`, `refuted`, `redirected`, or `waived`) for one structured review finding; the server records the authenticated identity, and `redirectTicket` is required only for `redirected`. |
 | `atelier_verify_rerun` | `id` | `false` | `false` | Re-runs worktree verification on a completed dispatch whose verdict failed; retains every attempt. |
 | `atelier_merge` | `id`, `forcedBy?`, `reason?`, `dispositionRef?` | `false` | `false` | Requests the service's gated merge. Ordinary MCP has no force or override authority. |
 | `atelier_main_health_ack` | `id` | `false` | `false` | Acknowledges an unresolved post-merge verification failure. |

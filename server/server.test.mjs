@@ -411,6 +411,8 @@ async function serverFixture(
     uiDir,
     themesDir,
     codexSweepIntervalMs,
+    eventStreamGlobalLimit,
+    eventStreamPerCredentialLimit,
     beforeCreateServer,
   } = {},
 ) {
@@ -447,6 +449,8 @@ async function serverFixture(
     uiDir,
     themesDir,
     ...(codexSweepIntervalMs === undefined ? {} : { codexSweepIntervalMs }),
+    ...(eventStreamGlobalLimit === undefined ? {} : { eventStreamGlobalLimit }),
+    ...(eventStreamPerCredentialLimit === undefined ? {} : { eventStreamPerCredentialLimit }),
   });
   const address = await listenLoopback(server, 0);
   registerServerAuth(address.port, atelierStateDir);
@@ -1929,6 +1933,39 @@ test("project PATCH atomically updates only mutable settings and mutates the liv
   );
 });
 
+test("MCP credentials cannot change gate-critical settings but retain benign settings", async (t) => {
+  const { port, registry } = await serverFixture(t);
+  const gateFields = [
+    ["requireReview", true],
+    ["reviewPolicy", "tiered"],
+    ["budgetUSDPerDay", 10],
+    ["unpricedDispatchCapPerDay", 3],
+  ];
+
+  for (const [field, value] of gateFields) {
+    const response = await send(port, {
+      method: "PATCH",
+      path: "/api/projects/tracked",
+      body: JSON.stringify({ [field]: value }),
+      contentType: "application/json",
+      credential: "mcp",
+    });
+    assert.equal(response.status, 403, field);
+    assert.match(JSON.parse(response.text).error, /human\/UI authority/);
+    assert.equal(Object.hasOwn(registry.projects[0], field), false);
+  }
+
+  const benign = await send(port, {
+    method: "PATCH",
+    path: "/api/projects/tracked",
+    body: JSON.stringify({ notes: "Updated through MCP" }),
+    contentType: "application/json",
+    credential: "mcp",
+  });
+  assert.equal(benign.status, 200);
+  assert.equal(registry.projects[0].notes, "Updated through MCP");
+});
+
 test("queueFailureLimit parking changes immediately reach board SSE without a tracker write", async (t) => {
   const boardEvents = boardEventsStub();
   const setup = await serverFixture(t, {
@@ -2453,14 +2490,14 @@ test("review route creates a linked read-only dispatch and forwards force", asyn
   assert.deepEqual(dispatcher._reviews, [{ id: "dispatch-1", force: true, actor: "api" }]);
 });
 
-test("review disposition API requires and round-trips an explicit human actor", async (t) => {
+test("review disposition records only the authenticated credential identity", async (t) => {
   const { port, dispatcher } = await serverFixture(t);
   const body = {
     findingRef: "round-2:finding-3",
     disposition: "redirected",
     redirectTicket: "atelier-gg0",
     note: "This subsystem is owned by the redirect ticket.",
-    actor: "maintainer",
+    actor: "different-body-identity",
   };
   const response = await send(port, {
     method: "POST",
@@ -2469,10 +2506,21 @@ test("review disposition API requires and round-trips an explicit human actor", 
     contentType: "application/json",
   });
   assert.equal(response.status, 200);
-  assert.deepEqual(dispatcher._reviewDispositions, [{ id: "dispatch-1", ...body }]);
+  assert.deepEqual(dispatcher._reviewDispositions, [{
+    id: "dispatch-1",
+    findingRef: body.findingRef,
+    disposition: body.disposition,
+    redirectTicket: body.redirectTicket,
+    note: body.note,
+    actor: "api",
+  }]);
   assert.deepEqual(JSON.parse(response.text).reviewDispositions[0], {
     ref: "disposition-1",
-    ...body,
+    findingRef: body.findingRef,
+    disposition: body.disposition,
+    redirectTicket: body.redirectTicket,
+    note: body.note,
+    actor: "api",
     at: "2026-07-31T00:00:00.000Z",
   });
 
@@ -2501,14 +2549,15 @@ test("review disposition API requires and round-trips an explicit human actor", 
     "the API appends a superseding ruling without rewriting history",
   );
 
-  const missingActor = await send(port, {
+  const credentialOnly = await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/review-disposition",
     body: JSON.stringify({ ...body, actor: undefined }),
     contentType: "application/json",
+    credential: "mcp",
   });
-  assert.equal(missingActor.status, 400);
-  assert.match(JSON.parse(missingActor.text).error, /actor/);
+  assert.equal(credentialOnly.status, 200);
+  assert.equal(JSON.parse(credentialOnly.text).reviewDispositions[2].actor, "mcp");
 });
 
 test("verify route admits a re-run, reports it as started, and rejects unknown fields", async (t) => {
@@ -2923,6 +2972,32 @@ test("move-tracker route moves both directions, smokes br, and returns user-owne
   assert.equal(calls.some((call) => call.file === "git"), false);
   const stored = JSON.parse(await readFile(setup.registryPath, "utf8"));
   assert.equal("trackerPath" in stored.projects.find((project) => project.name === "tracked"), false);
+});
+
+test("move-tracker CLI uses the state-dir bearer against the guarded daemon", async (t) => {
+  const setup = await serverFixture(t, {
+    commandRunner: async () => "",
+    brExecutable: "/fixture/br",
+  });
+  for (const record of setup.dispatcher._records) record.state = "completed";
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "atelier.mjs"),
+      "move-tracker", "tracked", "--to", "external"],
+    {
+      cwd: join(dirname(fileURLToPath(import.meta.url)), ".."),
+      env: {
+        ...process.env,
+        PORT: String(setup.port),
+        ATELIER_STATE_DIR: setup.atelierStateDir,
+        ATELIER_AUTH_TOKEN: "",
+      },
+    },
+  );
+
+  assert.match(stdout, /Moved tracked tracker to external/);
+  assert.equal(setup.registry.projects[0].tracker, "personal");
 });
 
 test("move-tracker route refuses active dispatches and a running queue drain", async (t) => {
@@ -3934,6 +4009,58 @@ test("dispatch SSE has replay headers and an immediate heartbeat frame", async (
     request.end();
   });
   assert.match(heartbeat, /: heartbeat/);
+});
+
+test("event streams enforce per-credential and global connection caps", async (t) => {
+  const setup = await serverFixture(t, {
+    eventStreamGlobalLimit: 2,
+    eventStreamPerCredentialLimit: 1,
+  });
+  const openStream = (path, credential) => new Promise((resolvePromise, rejectPromise) => {
+    const request = httpRequest({
+      host: "127.0.0.1",
+      port: setup.port,
+      path,
+      headers: {
+        Authorization: `Bearer ${setup.auth[credential]}`,
+        Accept: "text/event-stream",
+      },
+    }, (response) => {
+      let data = "";
+      response.on("data", (chunk) => {
+        data += chunk.toString("utf8");
+        if (data.includes(": heartbeat\n\n")) resolvePromise({ request, response });
+      });
+    });
+    request.on("error", rejectPromise);
+    request.end();
+  });
+
+  const first = await openStream("/api/dispatch/dispatch-1/events", "api");
+  const sameCredential = await send(setup.port, {
+    path: "/api/board/events",
+    credential: "api",
+  });
+  assert.equal(sameCredential.status, 429);
+  assert.match(JSON.parse(sameCredential.text).error, /credential limit/);
+
+  const second = await openStream("/api/board/events", "mcp");
+  const global = await send(setup.port, {
+    path: "/api/dispatches/events",
+    credential: "cli",
+  });
+  assert.equal(global.status, 429);
+  assert.match(JSON.parse(global.text).error, /connection limit/);
+
+  const liveEvent = new Promise((resolvePromise) => {
+    second.response.on("data", (chunk) => {
+      if (chunk.toString("utf8").includes('\"project\":\"tracked\"')) resolvePromise();
+    });
+  });
+  setup.boardEvents.emit({ type: "board", project: "tracked" });
+  await liveEvent;
+  first.response.destroy();
+  second.response.destroy();
 });
 
 test("board SSE emits the new channel shape and an immediate heartbeat", async (t) => {

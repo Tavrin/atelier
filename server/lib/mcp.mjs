@@ -491,7 +491,7 @@ export const MCP_TOOLS = Object.freeze([
   tool(
     "atelier_review_disposition",
     "Record Review Disposition",
-    "Append a human disposition for one structured review finding.",
+    "Append a disposition for one structured review finding.",
     objectSchema({
       id: dispatchIdProperty,
       findingRef: stringProperty("Stable finding ref from review.current.findings."),
@@ -502,8 +502,7 @@ export const MCP_TOOLS = Object.freeze([
       },
       redirectTicket: ticketIdProperty,
       note: stringProperty("Human rationale or refutation evidence; required and bounded."),
-      actor: stringProperty("Human or architect identity; required and recorded after redaction."),
-    }, ["id", "findingRef", "disposition", "note", "actor"]),
+    }, ["id", "findingRef", "disposition", "note"]),
     false,
   ),
   tool(
@@ -1099,7 +1098,6 @@ async function invokeTool(client, name, args) {
           disposition: args.disposition,
           redirectTicket: args.redirectTicket,
           note: args.note,
-          actor: args.actor,
         }),
       });
     }
