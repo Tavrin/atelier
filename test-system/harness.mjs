@@ -8,6 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { clientBearerToken } from "../server/lib/auth.mjs";
 import { REAL_PROVIDER_DISABLED_CODE } from "./fake-agent/poison-adapter.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -162,9 +163,21 @@ export async function createGoldenHarness(t, {
   let tornDown = false;
 
   async function rawApi(path, { method = "GET", body } = {}) {
+    // The daemon writes its auth secret at startup; authenticate once it exists
+    // (the pre-registration readiness probe runs before it and stays unauthenticated).
+    let authorization;
+    try {
+      authorization = `Bearer ${clientBearerToken("cli", { directory: stateDir, env: {} })}`;
+    } catch {
+      authorization = undefined;
+    }
+    const headers = {
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(authorization ? { Authorization: authorization } : {}),
+    };
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
       method,
-      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await response.text();
