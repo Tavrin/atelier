@@ -9,6 +9,8 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { mintBearerToken } from "./lib/auth.mjs";
+
 const execFileAsync = promisify(execFile);
 
 // The same spelling dispatch.mjs persists, so a seeded tree member is
@@ -646,10 +648,16 @@ async function assertGracefulSignalShutdown(t, shutdownSignal) {
     });
   });
   assert.equal(await readFile(join(state, "atelier.lock"), "utf8"), `${child.pid}\n`);
+  const authSecret = (await readFile(join(state, "auth-secret"), "utf8")).trim();
 
   const stream = await new Promise((resolvePromise, rejectPromise) => {
     const request = httpRequest(
-      { host: "127.0.0.1", port, path: "/api/dispatches/events" },
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/api/dispatches/events",
+        headers: { Authorization: `Bearer ${mintBearerToken(authSecret, "api")}` },
+      },
       (response) => {
         response.on("data", (chunk) => {
           if (chunk.toString("utf8").includes(": heartbeat\n\n")) resolvePromise(response);
@@ -755,6 +763,7 @@ test("atelier reply joins text and follows new events through the loopback API",
       method: request.method,
       path: request.url,
       lastEventId: request.headers["last-event-id"],
+      authorization: request.headers.authorization,
       body: Buffer.concat(chunks).toString("utf8"),
     });
     if (request.method === "GET" && request.url.endsWith("/events")) {
@@ -809,12 +818,17 @@ test("atelier reply joins text and follows new events through the loopback API",
     [resolve("bin", "atelier.mjs"), "reply", "dispatch-1", "please", "continue", "--follow"],
     {
       cwd: resolve("."),
-      env: { ...process.env, PORT: String(server.address().port) },
+      env: {
+        ...process.env,
+        PORT: String(server.address().port),
+        ATELIER_AUTH_TOKEN: "fixture-token",
+      },
     },
   );
 
   assert.deepEqual(JSON.parse(requests[1].body), { text: "please continue" });
   assert.equal(requests[2].lastEventId, "5");
+  assert.ok(requests.every((request) => request.authorization === "Bearer fixture-token"));
   assert.match(stdout, /"state":"running"/);
   assert.match(stdout, /"type":"reply"/);
   assert.match(stdout, /"state":"completed"/);
@@ -861,7 +875,14 @@ test("atelier --follow stops on needs_input and exits non-zero", async (t) => {
   const failure = await execFileAsync(
     process.execPath,
     [resolve("bin", "atelier.mjs"), "reply", "dispatch-2", "answer", "later", "--follow"],
-    { cwd: resolve("."), env: { ...process.env, PORT: String(server.address().port) } },
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        PORT: String(server.address().port),
+        ATELIER_AUTH_TOKEN: "fixture-token",
+      },
+    },
   ).then(
     (result) => ({ code: 0, ...result }),
     (error) => error,
@@ -894,7 +915,11 @@ test("atelier plan sends approve or revision feedback through the loopback API",
   });
   const options = {
     cwd: resolve("."),
-    env: { ...process.env, PORT: String(server.address().port) },
+    env: {
+      ...process.env,
+      PORT: String(server.address().port),
+      ATELIER_AUTH_TOKEN: "fixture-token",
+    },
   };
 
   const approved = await execFileAsync(

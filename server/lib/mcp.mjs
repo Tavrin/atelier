@@ -2,6 +2,7 @@ import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
+import { clientBearerToken } from "./auth.mjs";
 import { assertAgentUiParity } from "./parity.mjs";
 
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
@@ -60,7 +61,6 @@ const projectProperty = stringProperty("Registered Atelier project name.");
 const dispatchIdProperty = stringProperty("Atelier dispatch id.");
 const ticketIdProperty = stringProperty("Tracker ticket id.");
 const convoyIdProperty = stringProperty("Atelier convoy id.");
-const forceProperty = booleanProperty("Override the corresponding server-side safety gate.");
 const dispatchProfileSchema = objectSchema({
   model: stringProperty("Agent model selection."),
   defaultModel: stringProperty("Fallback agent model selection."),
@@ -437,7 +437,6 @@ export const MCP_TOOLS = Object.freeze([
         description: "Maximum agent turns.",
       },
       planFirst: booleanProperty("Pause after a read-only planning pass."),
-      force: forceProperty,
     }, ["project"]),
     false,
   ),
@@ -454,7 +453,6 @@ export const MCP_TOOLS = Object.freeze([
         uniqueItems: true,
         default: ["claude", "codex"],
       }),
-      force: forceProperty,
     }, ["project", "ticketId"]),
     false,
   ),
@@ -465,7 +463,6 @@ export const MCP_TOOLS = Object.freeze([
     objectSchema({
       id: dispatchIdProperty,
       text: stringProperty("Reply text."),
-      force: forceProperty,
     }, ["id", "text"]),
     false,
   ),
@@ -481,7 +478,6 @@ export const MCP_TOOLS = Object.freeze([
         description: "Plan action.",
       },
       text: stringProperty("Revision feedback."),
-      force: forceProperty,
     }, ["id", "action"]),
     false,
   ),
@@ -489,7 +485,7 @@ export const MCP_TOOLS = Object.freeze([
     "atelier_review",
     "Review Atelier Dispatch",
     "Start a linked read-only spec-audit dispatch for a completed dispatch.",
-    objectSchema({ id: dispatchIdProperty, force: forceProperty }, ["id"]),
+    objectSchema({ id: dispatchIdProperty }, ["id"]),
     false,
   ),
   tool(
@@ -523,7 +519,6 @@ export const MCP_TOOLS = Object.freeze([
     "Run Atelier's gated merge for a completed dispatch.",
     objectSchema({
       id: dispatchIdProperty,
-      force: forceProperty,
       forcedBy: stringProperty("Human identity responsible for a forced merge."),
       reason: stringProperty("Human rationale for overriding open findings."),
       dispositionRef: stringProperty("Disposition, ticket comment, or adjudication reference."),
@@ -841,7 +836,7 @@ function serviceErrorMessage(response, body) {
   return `Atelier server returned HTTP ${response.status}`;
 }
 
-function proxyClient(fetchImpl, baseUrl) {
+function proxyClient(fetchImpl, baseUrl, authToken) {
   async function request(path, { method = "GET", body, headers = {}, signal } = {}) {
     let response;
     try {
@@ -849,8 +844,9 @@ function proxyClient(fetchImpl, baseUrl) {
         method,
         headers: {
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-          // Provenance for the event log (atelier-e5x): a settings or queue change
-          // made by an agent must be distinguishable from one made in the UI.
+          Authorization: `Bearer ${authToken}`,
+          // Optional display provenance only. The server derives the MCP
+          // identity from the signed bearer and never trusts this header.
           "X-Atelier-Actor": "mcp",
           ...headers,
         },
@@ -1064,7 +1060,6 @@ async function invokeTool(client, name, args) {
           effort: args.effort,
           maxTurns: args.maxTurns,
           planFirst: args.planFirst,
-          force: args.force,
         }),
       });
     }
@@ -1075,26 +1070,25 @@ async function invokeTool(client, name, args) {
           project: args.project,
           ticketId: args.ticketId,
           lanes: args.lanes ?? ["claude", "codex"],
-          force: args.force,
         }),
       });
     }
     case "atelier_reply": {
       return client.json(`/api/dispatch/${encoded(args.id)}/reply`, {
         method: "POST",
-        body: withoutUndefined({ text: args.text, force: args.force }),
+        body: { text: args.text },
       });
     }
     case "atelier_plan_action": {
       return client.json(`/api/dispatch/${encoded(args.id)}/plan`, {
         method: "POST",
-        body: withoutUndefined({ action: args.action, text: args.text, force: args.force }),
+        body: withoutUndefined({ action: args.action, text: args.text }),
       });
     }
     case "atelier_review": {
       return client.json(`/api/dispatch/${encoded(args.id)}/review`, {
         method: "POST",
-        body: withoutUndefined({ force: args.force }),
+        body: {},
       });
     }
     case "atelier_review_disposition": {
@@ -1119,7 +1113,6 @@ async function invokeTool(client, name, args) {
       return client.json(`/api/dispatch/${encoded(args.id)}/merge`, {
         method: "POST",
         body: withoutUndefined({
-          force: args.force,
           forcedBy: args.forcedBy,
           reason: args.reason,
           dispositionRef: args.dispositionRef,
@@ -1240,6 +1233,7 @@ export async function runMcpServer({
   fetchImpl = globalThis.fetch,
   port = Number(process.env.PORT || 5170),
   baseUrl,
+  authToken,
 } = {}) {
   if (baseUrl === undefined) {
     if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -1250,7 +1244,8 @@ export async function runMcpServer({
   baseUrl = String(baseUrl).replace(/\/$/, "");
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable");
 
-  const client = proxyClient(fetchImpl, baseUrl);
+  authToken ??= clientBearerToken("mcp");
+  const client = proxyClient(fetchImpl, baseUrl, authToken);
   const lines = createInterface({ input, crlfDelay: Infinity, terminal: false });
   let initialized = false;
   let ready = false;

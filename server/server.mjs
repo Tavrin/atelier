@@ -6,7 +6,6 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { isRequestActor } from "../ui/actor.mjs";
 import {
   _clearProbeCache,
   probeProject,
@@ -14,6 +13,7 @@ import {
   trackerMode,
 } from "./lib/capabilities.mjs";
 import { agents } from "./lib/agents/index.mjs";
+import { createRequestAuth } from "./lib/auth.mjs";
 import { createBoardEvents } from "./lib/board-events.mjs";
 import {
   LONG_GIT_TIMEOUT_MS,
@@ -763,15 +763,9 @@ export function createServer({
   });
   const boardEvents = providedBoardEvents ?? createBoardEvents({ registry });
   const eventLog = providedEventLog ?? createEventLog({ stateDir: atelierStateDir });
-  // Registry/settings changes are the events that need provenance most, so the
-  // actor is read from the request rather than assumed. Bounded and pattern-
-  // checked because it is persisted: an unrecognized shape degrades to "api"
-  // instead of writing caller-controlled text into the log.
-  const requestActor = (request) => {
-    const header = request.headers["x-atelier-actor"];
-    const value = Array.isArray(header) ? header[0] : header;
-    return isRequestActor(value) ? value : "api";
-  };
+  const requestAuth = createRequestAuth({ directory: atelierStateDir });
+  const requestAuthContexts = new WeakMap();
+  const requestActor = (request) => requestAuthContexts.get(request)?.actor ?? "api";
   const dispatchActionContext = (request, fields = {}) => ({
     ...fields,
     actor: requestActor(request),
@@ -799,9 +793,27 @@ export function createServer({
     try {
       const url = new URL(request.url, "http://127.0.0.1");
       const path = url.pathname;
+      const address = server.address();
+      const authContext = requestAuth.guard(request, {
+        path,
+        port: typeof address === "object" && address ? address.port : 0,
+      });
+      requestAuthContexts.set(request, authContext);
+      if (authContext.requestClass === "session-bootstrap") {
+        const session = requestAuth.mintSession();
+        response.setHeader("Set-Cookie", session.cookie);
+        jsonResponse(response, 200, { csrfToken: session.csrfToken });
+        return;
+      }
       const postBody = ["POST", "PATCH"].includes(request.method)
         ? await readJsonBody(request)
         : undefined;
+      if (authContext.actor === "mcp" && postBody?.force === true) {
+        throw new HttpError(
+          409,
+          "MCP force overrides are forbidden; use the human break-glass policy",
+        );
+      }
 
       const staticAsset = request.method === "GET" ? staticAssets.get(path) : undefined;
       if (staticAsset) {

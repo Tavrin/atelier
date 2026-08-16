@@ -43,7 +43,7 @@ import {
   verifyRerunAvailability,
 } from "./reply-availability.mjs";
 import { createDesktopNotifier } from "./notifications.mjs";
-import { atelierRequestOptions } from "./request.mjs";
+import { atelierRequestOptions, setAtelierCsrfToken } from "./request.mjs";
 import {
   shouldReturnToDashboard,
   teardownTheme,
@@ -6581,6 +6581,12 @@ async function bootstrap() {
   applyTheme();
   initializeNotifications();
   try {
+    const sessionResponse = await fetch("/api/session");
+    const session = await sessionResponse.json().catch(() => ({}));
+    if (!sessionResponse.ok || typeof session.csrfToken !== "string") {
+      throw new Error(session.error || `Session bootstrap failed with ${sessionResponse.status}`);
+    }
+    setAtelierCsrfToken(session.csrfToken);
     setWorldThemeInventory(await api("/api/themes"));
     await loadShell();
     boardSseManager.open();

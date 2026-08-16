@@ -23,8 +23,8 @@ program. Reports are most useful when they respect that boundary.
 **In scope** — these are real bugs, please report them:
 
 - Anything reachable from the loopback HTTP surface that escapes the intended
-  request handling: bypassing the JSON content-type gate, the 256 KB body cap,
-  or leading-dash argument rejection.
+  request handling: bypassing authentication, Host/Origin/CSRF enforcement,
+  the JSON content-type gate, the 256 KB body cap, or leading-dash rejection.
 - **Any path that reaches a shell.** Subprocesses are executed with argv
   arrays; a shell being invoked on user-influenced input is a bug regardless of
   whether you can demonstrate an exploit.
@@ -39,10 +39,8 @@ program. Reports are most useful when they respect that boundary.
 
 **Out of scope** — these are documented design decisions, not findings:
 
-- **There is no authentication.** The server binds `127.0.0.1` explicitly and
-  is meant for one local user. "No auth on the API" is the design. Exposing it
-  to a network is unsupported; if you do that anyway, the consequences are
-  yours.
+- **Remote access.** Authentication protects the loopback control plane; it is
+  not permission to bind Atelier to a network interface. Remote exposure is unsupported.
 - **Agents execute code.** That is the product. A dispatch running arbitrary
   commands inside its own worktree is intended behavior.
 - Anything requiring an attacker who already has local shell access as your

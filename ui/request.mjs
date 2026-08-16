@@ -1,16 +1,24 @@
-// One request-options helper for the browser UI. Every state-changing request
-// is attributed as a human UI action in the forensic event log; read-only
-// requests remain ordinary GETs.
+// One request-options helper for the browser UI. The server derives identity
+// from the signed session; this module only carries the per-session CSRF proof.
 
 import { isThemeId } from "./actor.mjs";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const CSRF_SLOT = "__atelierCsrfToken";
+
+export function setAtelierCsrfToken(token) {
+  if (typeof token !== "string" || !token) throw new TypeError("Invalid Atelier CSRF token");
+  globalThis[CSRF_SLOT] = token;
+}
 
 export function atelierRequestOptions(options = {}, actor = "ui") {
   const request = { ...options };
   const headers = new Headers(options.headers || {});
   const method = String(options.method ?? "GET").toUpperCase();
-  if (MUTATING_METHODS.has(method)) headers.set("X-Atelier-Actor", actor);
+  if (MUTATING_METHODS.has(method)) {
+    headers.set("X-Atelier-Actor", actor);
+    if (globalThis[CSRF_SLOT]) headers.set("X-Atelier-CSRF", globalThis[CSRF_SLOT]);
+  }
   if (options.body !== undefined) {
     headers.set("Content-Type", "application/json");
     request.body = JSON.stringify(options.body);

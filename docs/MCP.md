@@ -10,6 +10,11 @@ The Atelier service must already be running. By default the bridge connects to
 turn overrides the default. If the service cannot be reached, the tool result
 asks the operator to run `systemctl --user start atelier`.
 
+The bridge reads the installation secret from
+`${ATELIER_STATE_DIR:-~/.local/state/atelier}/auth-secret` and derives an
+MCP-labeled bearer. `ATELIER_AUTH_TOKEN` may provide an already minted bearer
+instead. A missing or rejected token is reported explicitly.
+
 ## Architecture
 
 ```text
@@ -88,14 +93,14 @@ with `?` below.
 | `atelier_ticket_comment` | `project`, `id`, `text` | `false` | `false` | Adds a ticket comment. |
 | `atelier_ticket_action` | `project`, `id`, `action`, `actor?` | `false` | `false` | Claims a ticket for the required actor or promotes a triage ticket. |
 | `atelier_ticket_close` | `project`, `id`, `reason` | `false` | `true` | Closes a ticket with the supplied reason. |
-| `atelier_dispatch_start` | `project`, `ticketId?`, `prompt?`, `lane?`, `model?`, `effort?`, `maxTurns?`, `planFirst?`, `force?` | `false` | `false` | Starts an isolated dispatch through the service. |
-| `atelier_bakeoff_start` | `project`, `ticketId`, `lanes?` (default Claude + Codex), `force?` | `false` | `false` | Starts two isolated attempts on distinct agent lanes. |
-| `atelier_reply` | `id`, `text`, `force?` | `false` | `false` | Sends live input or resumes a supported dispatch. |
-| `atelier_plan_action` | `id`, `action`, `text?`, `force?` | `false` | `false` | Approves a plan or requests revision. |
-| `atelier_review` | `id`, `force?` | `false` | `false` | Starts a linked read-only spec-audit dispatch. |
+| `atelier_dispatch_start` | `project`, `ticketId?`, `prompt?`, `lane?`, `model?`, `effort?`, `maxTurns?`, `planFirst?` | `false` | `false` | Starts an isolated dispatch through the service. |
+| `atelier_bakeoff_start` | `project`, `ticketId`, `lanes?` (default Claude + Codex) | `false` | `false` | Starts two isolated attempts on distinct agent lanes. |
+| `atelier_reply` | `id`, `text` | `false` | `false` | Sends live input or resumes a supported dispatch. |
+| `atelier_plan_action` | `id`, `action`, `text?` | `false` | `false` | Approves a plan or requests revision. |
+| `atelier_review` | `id` | `false` | `false` | Starts a linked read-only spec-audit dispatch. |
 | `atelier_review_disposition` | `id`, `findingRef`, `disposition`, `redirectTicket?`, `note`, `actor` | `false` | `false` | Appends an audited human disposition (`accepted`, `refuted`, `redirected`, or `waived`) for one structured review finding; `redirectTicket` is required only for `redirected`. |
 | `atelier_verify_rerun` | `id` | `false` | `false` | Re-runs worktree verification on a completed dispatch whose verdict failed; retains every attempt. |
-| `atelier_merge` | `id`, `force?`, `forcedBy?`, `reason?`, `dispositionRef?` | `false` | `false` | Requests the service's gated merge. When `force` is `true`, the audit triple `forcedBy`, `reason`, and `dispositionRef` is required. |
+| `atelier_merge` | `id`, `forcedBy?`, `reason?`, `dispositionRef?` | `false` | `false` | Requests the service's gated merge. Ordinary MCP has no force or override authority. |
 | `atelier_main_health_ack` | `id` | `false` | `false` | Acknowledges an unresolved post-merge verification failure. |
 | `atelier_dismiss` | `id` | `false` | `true` | Removes a terminal dispatch's worktree and branch. |
 | `atelier_stop` | `id` | `false` | `true` | Stops an active dispatch and its process group. |
@@ -116,8 +121,7 @@ parameters (`-32602`) before any HTTP request. That boundary validation follows
 the published input schemas, including nested settings and project-registration
 fields. HTTP 4xx and 5xx responses become MCP tool results with `isError: true`;
 the service's human-readable error text is preserved verbatim. Structured HTTP
-error fields are preserved as JSON text, including bake-off budget metadata
-needed for a deliberate `force` retry. Project,
+error fields are preserved as JSON text. Project,
 tracker, dispatch, budget, lifecycle, and filesystem gates remain authoritative
 in the running service.
 
@@ -129,8 +133,7 @@ are descriptive hints, not enforcement.
 
 The bridge does not bypass Atelier's server-side controls. Dispatch caps, daily
 cost budgets, daily unpriced-dispatch caps, tracker placement, plan state,
-verification requirements, force
-handling, merge gates, and dismiss eligibility remain authoritative in the
+verification requirements, merge gates, and dismiss eligibility remain authoritative in the
 loopback service. In particular, `atelier_merge` remains gated even though its
 `destructiveHint` is `false`, while `atelier_dismiss` is marked destructive
 because it removes the retained worktree and branch. Convoy cancellation,
@@ -150,16 +153,14 @@ non-terminal dispatch) still refuses outright with the same 404.
 `atelier_queue_set` remains non-destructive because the persisted toggle can be
 reversed without removing work.
 
-Atelier has no authentication and remains loopback-only. Do not expose either
-the cockpit service or this local stdio integration as a remote unauthenticated
-service.
+Atelier remains loopback-only. The MCP bearer cryptographically binds the `mcp`
+credential class, and the HTTP service rejects `force: true` from that class;
+break-glass authority remains a human HTTP/UI path.
 
-The bridge stamps proxied requests with the syntactically validated actor
-`mcp`; the dashboard and first-party themes similarly stamp `ui` or
-`theme:<id>`. These labels are audit attribution, not authenticated provenance:
-the loopback API validates only their bounded shape, and same-page theme code
-shares the MVP trust boundary. Enforced theme tiers and provenance remain
-future isolation work. Chronicle responses are likewise a boot snapshot, not
+The service derives `mcp`, `cli`, `api`, or `human-ui` actors from the verified
+credential. `X-Atelier-Actor` is not identity. Same-page theme code still shares
+the browser session's MVP trust boundary; enforced theme tiers remain future
+isolation work. Chronicle responses are likewise a boot snapshot, not
 live history: they stay frozen until restart, and `generatedAt` is the freshness
 contract. A project registered after boot receives an empty bounded
 per-project chronicle with that boot timestamp and remains absent from the

@@ -1,5 +1,11 @@
-function capability(tool, http, readOnlyHint, destructiveHint = false) {
-  return Object.freeze({ tool, http: Object.freeze([...http]), readOnlyHint, destructiveHint });
+function capability(tool, http, readOnlyHint, destructiveHint = false, mcpExcluded = []) {
+  return Object.freeze({
+    tool,
+    http: Object.freeze([...http]),
+    readOnlyHint,
+    destructiveHint,
+    mcpExcluded: Object.freeze([...mcpExcluded]),
+  });
 }
 
 // This manifest is the reviewable contract between Atelier's UI/API capabilities
@@ -33,18 +39,18 @@ export const AGENT_UI_CAPABILITY_MANIFEST = Object.freeze([
     false,
   ),
   capability("atelier_ticket_close", ["POST /api/projects/:project/close"], false, true),
-  capability("atelier_dispatch_start", ["POST /api/dispatch"], false),
-  capability("atelier_bakeoff_start", ["POST /api/dispatch"], false),
-  capability("atelier_reply", ["POST /api/dispatch/:id/reply"], false),
-  capability("atelier_plan_action", ["POST /api/dispatch/:id/plan"], false),
-  capability("atelier_review", ["POST /api/dispatch/:id/review"], false),
+  capability("atelier_dispatch_start", ["POST /api/dispatch"], false, false, ["force"]),
+  capability("atelier_bakeoff_start", ["POST /api/dispatch"], false, false, ["force"]),
+  capability("atelier_reply", ["POST /api/dispatch/:id/reply"], false, false, ["force"]),
+  capability("atelier_plan_action", ["POST /api/dispatch/:id/plan"], false, false, ["force"]),
+  capability("atelier_review", ["POST /api/dispatch/:id/review"], false, false, ["force"]),
   capability(
     "atelier_review_disposition",
     ["POST /api/dispatch/:id/review-disposition"],
     false,
   ),
   capability("atelier_verify_rerun", ["POST /api/dispatch/:id/verify"], false),
-  capability("atelier_merge", ["POST /api/dispatch/:id/merge"], false),
+  capability("atelier_merge", ["POST /api/dispatch/:id/merge"], false, false, ["force"]),
   capability("atelier_main_health_ack", ["POST /api/dispatch/:id/ack-main-health"], false),
   capability("atelier_dismiss", ["POST /api/dispatch/:id/dismiss"], false, true),
   capability("atelier_stop", ["POST /api/dispatch/:id/stop"], false, true),
@@ -76,6 +82,14 @@ export function assertAgentUiParity(tools) {
   );
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error("MCP tool surface does not match the agent/UI capability manifest");
+  }
+  for (const entry of AGENT_UI_CAPABILITY_MANIFEST) {
+    const schema = tools.find(({ name }) => name === entry.tool)?.inputSchema;
+    for (const property of entry.mcpExcluded) {
+      if (Object.hasOwn(schema?.properties ?? {}, property)) {
+        throw new Error(`MCP tool ${entry.tool} must exclude ${property} authority`);
+      }
+    }
   }
   return true;
 }

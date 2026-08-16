@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { probeProject, probeProjectPath, trackerMode } from "../server/lib/capabilities.mjs";
 import { createBoardEvents } from "../server/lib/board-events.mjs";
+import { clientBearerToken } from "../server/lib/auth.mjs";
 import { createDispatcher } from "../server/lib/dispatch.mjs";
 import { createEventLog, fieldDiff } from "../server/lib/event-log.mjs";
 import { resolveBrExecutable, runFile } from "../server/lib/exec.mjs";
@@ -316,11 +317,11 @@ async function responseJson(response) {
   return body;
 }
 
-async function latestEventSeq(baseUrl, id) {
+async function latestEventSeq(baseUrl, id, authorization) {
   const controller = new AbortController();
   try {
     const response = await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}/events`, {
-      headers: { Accept: "text/event-stream" },
+      headers: { Accept: "text/event-stream", Authorization: authorization },
       signal: controller.signal,
     });
     if (!response.ok) {
@@ -342,15 +343,16 @@ async function latestEventSeq(baseUrl, id) {
 
 function serverDispatcher({ followReplies = false } = {}) {
   const baseUrl = atelierServerUrl();
+  const authorization = `Bearer ${clientBearerToken("cli")}`;
   let sinceSeq = 0;
   let dispatchId;
   return {
     async reply(id, body) {
       dispatchId = id;
-      if (followReplies) sinceSeq = await latestEventSeq(baseUrl, id);
+      if (followReplies) sinceSeq = await latestEventSeq(baseUrl, id, authorization);
       return responseJson(await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}/reply`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authorization },
         body: JSON.stringify(body),
       }));
     },
@@ -358,12 +360,14 @@ function serverDispatcher({ followReplies = false } = {}) {
       dispatchId = id;
       return responseJson(await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}/plan`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authorization },
         body: JSON.stringify(body),
       }));
     },
     async get(id) {
-      return responseJson(await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}`));
+      return responseJson(await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}`, {
+        headers: { Authorization: authorization },
+      }));
     },
     getEvents() {
       return [];
@@ -371,7 +375,7 @@ function serverDispatcher({ followReplies = false } = {}) {
     onEvent(listener, onError) {
       const controller = new AbortController();
       void (async () => {
-        const headers = { Accept: "text/event-stream" };
+        const headers = { Accept: "text/event-stream", Authorization: authorization };
         if (sinceSeq > 0) headers["Last-Event-ID"] = String(sinceSeq);
         const response = await fetch(
           `${baseUrl}/api/dispatch/${encodeURIComponent(dispatchId)}/events`,
