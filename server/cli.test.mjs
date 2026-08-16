@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { clientBearerToken, ensureAuthSecret } from "./lib/auth.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,9 @@ async function liveFakeDaemonState(t) {
   const state = join(root, "state");
   await mkdir(state);
   await writeFile(join(state, "atelier.lock"), `${process.pid}\n`);
+  // Post-ATT-005 the CLI mints its bearer from the daemon's state-dir secret,
+  // so a fake live daemon must provide one exactly like the real one does.
+  ensureAuthSecret(state);
   t.after(() => rm(root, { recursive: true, force: true }));
   return state;
 }
@@ -665,11 +669,27 @@ async function assertGracefulSignalShutdown(t, shutdownSignal) {
 
   const stream = await new Promise((resolvePromise, rejectPromise) => {
     const request = httpRequest(
-      { host: "127.0.0.1", port, path: "/api/dispatches/events" },
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/api/dispatches/events",
+        headers: {
+          authorization: `Bearer ${clientBearerToken("cli", { directory: state })}`,
+        },
+      },
       (response) => {
+        let body = "";
         response.on("data", (chunk) => {
-          if (chunk.toString("utf8").includes(": heartbeat\n\n")) resolvePromise(response);
+          body += chunk.toString("utf8");
+          if (body.includes(": heartbeat\n\n")) resolvePromise(response);
         });
+        // A response that ends without a heartbeat (a 401, most likely) must
+        // reject rather than leave this promise pending forever: the ended
+        // socket goes idle, so neither the error handler nor the socket
+        // timeout below would ever fire.
+        response.on("end", () =>
+          rejectPromise(new Error(`SSE stream closed without heartbeat (${response.statusCode}): ${body}`)),
+        );
       },
     );
     request.on("error", rejectPromise);
