@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,4 +62,42 @@ test("stale takeover yields when the graveyard captures a fresh live lock", asyn
   );
   // The live lock was preserved or restored - never silently destroyed.
   assert.equal((await readFile(path, "utf8")).trim(), String(process.pid));
+});
+
+test("stale takeover interleaving leaves only the fresh contender owning the lock", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "atelier-lock-race-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "atelier.lock");
+  const stalePid = 101;
+  const contenderPid = 202;
+  const freshPid = 303;
+  await writeFile(path, `${stalePid}\n`);
+  let freshLock;
+
+  assert.throws(
+    () => acquireInstanceLock(directory, {
+      pid: contenderPid,
+      killProcess(pid) {
+        if (pid === stalePid) {
+          const error = new Error("gone");
+          error.code = "ESRCH";
+          throw error;
+        }
+        return true;
+      },
+      beforeTakeoverRename({ path: lockPath }) {
+        renameSync(lockPath, `${lockPath}.taken-by-b`);
+        freshLock = acquireInstanceLock(directory, {
+          pid: freshPid,
+          killProcess: () => true,
+        });
+      },
+    }),
+    (error) => error.code === "EATELIERLOCKED" && /PID 303/.test(error.message),
+  );
+
+  assert.ok(freshLock, "the fresh contender believes it acquired the lock");
+  assert.equal(await readFile(path, "utf8"), `${freshPid}\n`);
+  freshLock.release();
+  assert.equal(existsSync(path), false);
 });

@@ -1105,9 +1105,10 @@ function promptFor(project, opts, priorAttempts = "", { unattendedQueue = false 
   return sections.join("\n\n");
 }
 
-function parseIndex(path) {
+function parseIndex(path, { warnMalformed = false } = {}) {
   if (!existsSync(path)) return [];
   const records = new Map();
+  let malformed = 0;
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
@@ -1116,9 +1117,15 @@ function parseIndex(path) {
       records.delete(record.id);
       records.set(record.id, record);
     } catch {
+      malformed += 1;
       // Partial or malformed appends are ignored; later recovered snapshots
       // remain usable because every retry starts on a fresh JSONL line.
     }
+  }
+  if (warnMalformed && malformed > 0) {
+    logPersistenceWarning(
+      `Atelier persistence skipped ${malformed} malformed index line${malformed === 1 ? "" : "s"} in ${path}`,
+    );
   }
   return [...records.values()];
 }
@@ -1474,32 +1481,35 @@ export function createDispatcher({
     // defect is competing cross-process writers, and serve already owns this PID's lock.
     ownedInstanceLock = acquireInstanceLock(stateDir);
   }
+  try {
   const dispatchDir = join(stateDir, "dispatches");
   const indexPath = join(dispatchDir, "index.jsonl");
   const queuePath = join(stateDir, "queue.json");
   const convoysPath = join(stateDir, "convoys.json");
-  mkdirSync(dispatchDir, { recursive: true });
-  try {
-    if (hasUnterminatedTail(indexPath)) {
-      logPersistenceWarning(
-        `Atelier persistence found a malformed final line in ${indexPath}; skipping it and repairing the JSONL boundary`,
-      );
-      try {
-        persistenceFileOps.appendFileSync(indexPath, "\n", "utf8");
-      } catch (error) {
-        if (typeof error?.code !== "string") throw error;
+  if (!observer) {
+    mkdirSync(dispatchDir, { recursive: true });
+    try {
+      if (hasUnterminatedTail(indexPath)) {
         logPersistenceWarning(
-          `Atelier persistence could not repair ${indexPath}: ${error.message}; continuing with valid earlier records`,
+          `Atelier persistence found a malformed final line in ${indexPath}; skipping it and repairing the JSONL boundary`,
         );
+        try {
+          persistenceFileOps.appendFileSync(indexPath, "\n", "utf8");
+        } catch (error) {
+          if (typeof error?.code !== "string") throw error;
+          logPersistenceWarning(
+            `Atelier persistence could not repair ${indexPath}: ${error.message}; continuing with valid earlier records`,
+          );
+        }
       }
+    } catch (error) {
+      if (typeof error?.code !== "string") throw error;
+      logPersistenceWarning(
+        `Atelier persistence could not inspect ${indexPath}: ${error.message}; continuing in memory`,
+      );
     }
-  } catch (error) {
-    if (typeof error?.code !== "string") throw error;
-    logPersistenceWarning(
-      `Atelier persistence could not inspect ${indexPath}: ${error.message}; continuing in memory`,
-    );
+    compactIndex(indexPath);
   }
-  compactIndex(indexPath);
   const emitter = new EventEmitter();
   const entries = new Map();
   const ticketReservations = new Map();
@@ -3609,7 +3619,7 @@ export function createDispatcher({
   const bootQueueSettlements = [];
   const bootReattachments = [];
   const bootOrphanReaps = [];
-  for (const loaded of parseIndex(indexPath)) {
+  for (const loaded of parseIndex(indexPath, { warnMalformed: observer })) {
     const entry = inertEntry(loaded);
     entries.set(loaded.id, entry);
     seedPostMergeFenceBarrier(entry);
@@ -9882,6 +9892,10 @@ ${diff}`;
       return () => emitter.off("event", listener);
     },
   };
+  } catch (error) {
+    ownedInstanceLock?.release();
+    throw error;
+  }
 }
 
 export function _setSpawner(nextSpawner = spawnTracked) {

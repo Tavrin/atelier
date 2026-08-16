@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { liveInstanceOwner } from "./instance-lock.mjs";
@@ -16,10 +16,10 @@ function loopbackUrl(value, source) {
 export function atelierServerUrl({ directory = stateDir(), env = process.env } = {}) {
   if (env.PORT !== undefined) {
     const port = Number(env.PORT);
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new Error("PORT must be an integer between 1 and 65535");
+    if (env.PORT === "" || !Number.isInteger(port) || port < 0 || port > 65_535) {
+      throw new Error("PORT must be an integer between 0 and 65535");
     }
-    return `http://127.0.0.1:${port}`;
+    if (port > 0) return `http://127.0.0.1:${port}`;
   }
   const urlPath = join(directory, "atelier.url");
   try {
@@ -100,9 +100,23 @@ async function latestEventSeq(baseUrl, directory, id) {
 
 export function createCommandClient({
   directory = stateDir(),
-  baseUrl = atelierServerUrl({ directory }),
+  baseUrl,
   followReplies = false,
 } = {}) {
+  const owner = liveInstanceOwner(directory);
+  if (owner === undefined) {
+    try {
+      rmSync(join(directory, "atelier.url"), { force: true });
+    } catch {
+      // Stale endpoint cleanup is opportunistic; the absent lock is decisive.
+    }
+    throw new CommandClientError(
+      "no daemon; start it with `atelier serve` / systemctl --user start atelier",
+    );
+  }
+  // The live filesystem lock proves daemon authority, but the HTTP responder is
+  // not authenticated against same-user spoofing until ATT-005 lands.
+  baseUrl ??= atelierServerUrl({ directory });
   let sinceSeq = 0;
   let dispatchId;
   const request = async (path, options) =>
@@ -140,7 +154,7 @@ export function createCommandClient({
     getEvents() {
       return [];
     },
-    onEvent(listener, onError) {
+    onEvent(listener, onError, onEnd) {
       const controller = new AbortController();
       void (async () => {
         const headers = { Accept: "text/event-stream" };
@@ -168,6 +182,7 @@ export function createCommandClient({
             if (data) listener(JSON.parse(data));
           }
         }
+        await onEnd?.();
       })().catch((error) => {
         if (error.name !== "AbortError") onError?.(error);
       });

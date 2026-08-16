@@ -178,12 +178,12 @@ async function serve(args) {
   } finally {
     if (server?.listening) await shutdownServer(server);
     boardEvents?.close();
-    await rm(urlPath, { force: true });
-    lock.release();
     // Logged in the finally so an abnormal exit path still records the stop -
     // the pairing with service.start is what makes a restart legible later.
     eventLog.append("service.stop", { actor: "cli", reason: stopReason, pid: process.pid });
     eventLog.shutdown();
+    await rm(urlPath, { force: true });
+    lock.release();
   }
 }
 
@@ -281,7 +281,29 @@ async function follow(dispatcher, id) {
       resolveDone();
     }
   };
-  const removeListener = dispatcher.onEvent(consume, rejectDone);
+  const streamEnded = async () => {
+    if (settled) return;
+    try {
+      const record = await dispatcher.get(id);
+      if ([
+        "completed",
+        "completed_empty",
+        "needs_input",
+        "failed",
+        "stopped",
+        "prepare_failed",
+        "rejected",
+      ].includes(record.state)) {
+        settled = true;
+        resolveDone();
+        return;
+      }
+      rejectDone(new Error("event stream ended before completion (daemon stopped?)"));
+    } catch (error) {
+      rejectDone(error);
+    }
+  };
+  const removeListener = dispatcher.onEvent(consume, rejectDone, streamEnded);
   try {
     for (const event of dispatcher.getEvents(id) || []) consume(event);
     if (!settled) await done;

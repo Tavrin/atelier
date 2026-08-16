@@ -2,16 +2,20 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
 import { probeProjectPath } from "./lib/capabilities.mjs";
 import { createDispatcher } from "./lib/dispatch.mjs";
 import { addProject, loadRegistry } from "./lib/registry.mjs";
+import {
+  _setBrResolver as _setTrackerBrResolver,
+  initializeTrackerDirectory,
+} from "./lib/tracker.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -49,10 +53,10 @@ function cliEnv(setup, extra = {}) {
   return env;
 }
 
-async function startDaemon(setup) {
+async function startDaemon(setup, extraEnv = {}) {
   const child = spawn(process.execPath, [resolve("bin", "atelier.mjs"), "serve", "--port", "0"], {
     cwd: resolve("."),
-    env: cliEnv(setup),
+    env: cliEnv(setup, extraEnv),
     stdio: ["ignore", "pipe", "pipe"],
   });
   setup.children.add(child);
@@ -136,6 +140,38 @@ async function cli(setup, args, extraEnv = {}) {
   });
 }
 
+async function fakeBr(root) {
+  const directory = join(root, "fake-bin");
+  const path = join(directory, "br");
+  await mkdir(directory);
+  await writeFile(path, [
+    "#!/usr/bin/env node",
+    'const { mkdirSync, writeFileSync } = require("node:fs");',
+    'if (process.argv[2] !== "init") process.exit(2);',
+    'mkdirSync(".beads", { recursive: true });',
+    'writeFileSync(".beads/issues.jsonl", "");',
+    "",
+  ].join("\n"));
+  await chmod(path, 0o755);
+  return path;
+}
+
+async function filesystemLayout(root, relative = "") {
+  const directory = join(root, relative);
+  const entries = await readdir(directory, { withFileTypes: true });
+  const layout = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const child = join(relative, entry.name);
+    if (entry.isDirectory()) {
+      layout.push({ path: `${child}/`, type: "directory" });
+      layout.push(...await filesystemLayout(root, child));
+    } else {
+      layout.push({ path: child, type: "file", contents: await readFile(join(root, child), "utf8") });
+    }
+  }
+  return layout;
+}
+
 async function waitForTerminal(url, id) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const response = await fetch(`${url}/api/dispatch/${encodeURIComponent(id)}`);
@@ -153,7 +189,11 @@ test("live daemon owns simultaneous CLI and HTTP dispatch record creation", asyn
   await writeFile(join(setup.config, "projects.json"), `${JSON.stringify(emptyRegistry([project]))}\n`);
   const daemon = await startDaemon(setup);
 
-  const cliDispatch = cli(setup, ["dispatch", "fixture", "--prompt", "cli fixture"]);
+  const cliDispatch = cli(
+    setup,
+    ["dispatch", "fixture", "--prompt", "cli fixture"],
+    { PORT: "0" },
+  );
   const httpDispatch = fetch(`${daemon.url}/api/dispatch`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Atelier-Actor": "test" },
@@ -251,6 +291,82 @@ test("dispatch distinguishes a live lock owner from an absent daemon", async (t)
   assert.equal(existsSync(join(setup.state, "dispatches")), false);
 });
 
+test("dispatch ignores and removes atelier.url when no live owner exists", async (t) => {
+  const setup = await fixture(t);
+  const project = await gitProject(setup.root, "fixture");
+  await writeFile(join(setup.config, "projects.json"), `${JSON.stringify(emptyRegistry([project]))}\n`);
+  await mkdir(setup.state, { recursive: true });
+  let requests = 0;
+  const responder = createServer((_request, response) => {
+    requests += 1;
+    response.writeHead(202, { "Content-Type": "application/json" });
+    response.end('{"id":"spoofed"}');
+  });
+  responder.listen(0, "127.0.0.1");
+  await once(responder, "listening");
+  t.after(async () => {
+    responder.close();
+    await once(responder, "close").catch(() => {});
+  });
+  const urlPath = join(setup.state, "atelier.url");
+  await writeFile(urlPath, `http://127.0.0.1:${responder.address().port}\n`);
+
+  const failure = await cli(setup, ["dispatch", "fixture", "--prompt", "must not run"])
+    .catch((error) => error);
+  assert.equal(failure.code, 1);
+  assert.match(failure.stderr, /no daemon; start it with `atelier serve`/);
+  assert.equal(requests, 0);
+  assert.equal(existsSync(urlPath), false);
+});
+
+test("dispatch --follow fails promptly when SSE ends before a nonterminal dispatch completes", async (t) => {
+  const setup = await fixture(t);
+  const project = await gitProject(setup.root, "fixture");
+  await writeFile(join(setup.config, "projects.json"), `${JSON.stringify(emptyRegistry([project]))}\n`);
+  await mkdir(setup.state, { recursive: true });
+  await writeFile(join(setup.state, "atelier.lock"), `${process.pid}\n`);
+  let statusPolls = 0;
+  const responder = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/api/dispatch") {
+      request.resume();
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end('{"id":"follow-id"}');
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/dispatch/follow-id/events") {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.end('id: 1\ndata: {"type":"status","state":"running","dispatchId":"follow-id","seq":1}\n\n');
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/dispatch/follow-id") {
+      statusPolls += 1;
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end('{"id":"follow-id","state":"running"}');
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  responder.listen(0, "127.0.0.1");
+  await once(responder, "listening");
+  t.after(async () => {
+    responder.close();
+    await once(responder, "close").catch(() => {});
+  });
+  await writeFile(
+    join(setup.state, "atelier.url"),
+    `http://127.0.0.1:${responder.address().port}\n`,
+  );
+
+  const failure = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "dispatch", "fixture", "--prompt", "follow", "--follow"],
+    { cwd: resolve("."), env: cliEnv(setup), timeout: 3_000 },
+  ).catch((error) => error);
+  assert.equal(failure.code, 1);
+  assert.match(failure.stderr, /event stream ended before completion \(daemon stopped\?\)/);
+  assert.equal(statusPolls, 1);
+});
+
 test("doctor offline maintenance refuses a live daemon, releases its lock, and permits restart", async (t) => {
   const setup = await fixture(t);
   const daemon = await startDaemon(setup);
@@ -286,6 +402,76 @@ test("track --yes registers through the daemon with old-path equivalent storage"
   assert.deepEqual(stored.projects[0], expected);
   const projects = await fetch(`${daemon.url}/api/projects`).then((response) => response.json());
   assert.ok(projects.projects.some((candidate) => candidate.name === "new-project"));
+  await stopDaemon(daemon);
+});
+
+test("tracker-only track registration initializes missing storage equivalently through the daemon", async (t) => {
+  const setup = await fixture(t);
+  const trackerPath = join(setup.root, "notes");
+  await mkdir(trackerPath);
+  const br = await fakeBr(setup.root);
+  _setTrackerBrResolver(() => br);
+  t.after(() => _setTrackerBrResolver());
+  const probe = await probeProjectPath(trackerPath);
+  const entry = { path: probe.path, ...probe.inferred };
+  const oldRegistryPath = join(setup.root, "old-tracker-only-projects.json");
+  const oldRegistry = await loadRegistry(oldRegistryPath);
+  await initializeTrackerDirectory(entry);
+  await addProject(oldRegistry, entry, oldRegistryPath);
+  const expected = JSON.parse(await readFile(oldRegistryPath, "utf8")).projects[0];
+  const expectedLayout = await filesystemLayout(trackerPath);
+  await rm(join(trackerPath, ".beads"), { recursive: true, force: true });
+
+  const daemon = await startDaemon(setup, {
+    PATH: `${dirname(br)}${delimiter}${process.env.PATH || ""}`,
+  });
+  const { stdout } = await cli(setup, ["track", trackerPath, "--yes"]);
+  assert.match(stdout, /Registered notes/);
+  const stored = JSON.parse(await readFile(join(setup.config, "projects.json"), "utf8"));
+  assert.deepEqual(stored.projects[0], expected);
+  assert.deepEqual(await filesystemLayout(trackerPath), expectedLayout);
+  await stopDaemon(daemon);
+});
+
+test("external trackerLocation registration matches old entry and filesystem layout", async (t) => {
+  const setup = await fixture(t);
+  const project = await gitProject(setup.root, "external-project");
+  const br = await fakeBr(setup.root);
+  _setTrackerBrResolver(() => br);
+  t.after(() => _setTrackerBrResolver());
+  const trackerPath = join(setup.state, "trackers", project.name);
+  await mkdir(trackerPath, { recursive: true });
+  const oldEntry = {
+    ...project,
+    archetype: "full",
+    tracker: "personal",
+    trackerPath,
+  };
+  const oldRegistryPath = join(setup.root, "old-external-projects.json");
+  const oldRegistry = await loadRegistry(oldRegistryPath);
+  await initializeTrackerDirectory(oldEntry);
+  await addProject(oldRegistry, oldEntry, oldRegistryPath);
+  const expected = JSON.parse(await readFile(oldRegistryPath, "utf8")).projects[0];
+  const expectedLayout = await filesystemLayout(trackerPath);
+  await rm(trackerPath, { recursive: true, force: true });
+
+  const daemon = await startDaemon(setup, {
+    PATH: `${dirname(br)}${delimiter}${process.env.PATH || ""}`,
+  });
+  const response = await fetch(`${daemon.url}/api/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Atelier-Actor": "cli" },
+    body: JSON.stringify({
+      ...project,
+      archetype: "full",
+      tracker: "personal",
+      trackerLocation: "external",
+    }),
+  });
+  assert.equal(response.status, 201, await response.text());
+  const stored = JSON.parse(await readFile(join(setup.config, "projects.json"), "utf8"));
+  assert.deepEqual(stored.projects[0], expected);
+  assert.deepEqual(await filesystemLayout(trackerPath), expectedLayout);
   await stopDaemon(daemon);
 });
 

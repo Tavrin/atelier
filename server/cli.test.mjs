@@ -11,6 +11,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+async function liveFakeDaemonState(t) {
+  const root = await mkdtemp(join(tmpdir(), "atelier-cli-fake-daemon-"));
+  const state = join(root, "state");
+  await mkdir(state);
+  await writeFile(join(state, "atelier.lock"), `${process.pid}\n`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return state;
+}
+
 // The same spelling dispatch.mjs persists, so a seeded tree member is
 // identity-corroborated when the CLI's sweep classifies it.
 function cliProcessStartIdentity(pid) {
@@ -685,6 +694,7 @@ async function assertGracefulSignalShutdown(t, shutdownSignal) {
   assert.equal(signal, null);
   assert.ok(Date.now() - startedAt < 2_000, "shutdown exceeded two seconds");
   await assert.rejects(readFile(join(state, "atelier.lock"), "utf8"), /ENOENT/);
+  await assert.rejects(readFile(join(state, "atelier.url"), "utf8"), /ENOENT/);
 
   // atelier-e5x: the service lifecycle pair is what makes a restart legible later,
   // so it is asserted on the real signal path rather than assumed.
@@ -705,7 +715,7 @@ async function assertGracefulSignalShutdown(t, shutdownSignal) {
 }
 
 for (const shutdownSignal of ["SIGTERM", "SIGINT"]) {
-  test(`atelier serve closes SSE and releases its lock promptly on ${shutdownSignal}`, (t) =>
+  test(`atelier serve flushes lifecycle events before releasing authority on ${shutdownSignal}`, (t) =>
     assertGracefulSignalShutdown(t, shutdownSignal));
 }
 
@@ -745,6 +755,7 @@ test("atelier track previews an unregistered path locally without hand-edit guid
 });
 
 test("atelier reply joins text and follows new events through the loopback API", async (t) => {
+  const state = await liveFakeDaemonState(t);
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -807,7 +818,11 @@ test("atelier reply joins text and follows new events through the loopback API",
     [resolve("bin", "atelier.mjs"), "reply", "dispatch-1", "please", "continue", "--follow"],
     {
       cwd: resolve("."),
-      env: { ...process.env, PORT: String(server.address().port) },
+      env: {
+        ...process.env,
+        ATELIER_STATE_DIR: state,
+        PORT: String(server.address().port),
+      },
     },
   );
 
@@ -819,6 +834,7 @@ test("atelier reply joins text and follows new events through the loopback API",
 });
 
 test("atelier --follow stops on needs_input and exits non-zero", async (t) => {
+  const state = await liveFakeDaemonState(t);
   // atelier-8r6: an unfinished outcome is terminal, so `--follow` must settle on it
   // instead of waiting forever on a dispatch that is already asking a question -
   // and the exit code must not claim success.
@@ -859,7 +875,14 @@ test("atelier --follow stops on needs_input and exits non-zero", async (t) => {
   const failure = await execFileAsync(
     process.execPath,
     [resolve("bin", "atelier.mjs"), "reply", "dispatch-2", "answer", "later", "--follow"],
-    { cwd: resolve("."), env: { ...process.env, PORT: String(server.address().port) } },
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_STATE_DIR: state,
+        PORT: String(server.address().port),
+      },
+    },
   ).then(
     (result) => ({ code: 0, ...result }),
     (error) => error,
@@ -871,6 +894,7 @@ test("atelier --follow stops on needs_input and exits non-zero", async (t) => {
 });
 
 test("atelier plan sends approve or revision feedback through the loopback API", async (t) => {
+  const state = await liveFakeDaemonState(t);
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -892,7 +916,11 @@ test("atelier plan sends approve or revision feedback through the loopback API",
   });
   const options = {
     cwd: resolve("."),
-    env: { ...process.env, PORT: String(server.address().port) },
+    env: {
+      ...process.env,
+      ATELIER_STATE_DIR: state,
+      PORT: String(server.address().port),
+    },
   };
 
   const approved = await execFileAsync(
@@ -930,6 +958,7 @@ test("atelier plan sends approve or revision feedback through the loopback API",
 });
 
 test("atelier move-tracker delegates to the loopback API and prints next steps", async (t) => {
+  const state = await liveFakeDaemonState(t);
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -959,7 +988,11 @@ test("atelier move-tracker delegates to the loopback API and prints next steps",
     [resolve("bin", "atelier.mjs"), "move-tracker", "fixture", "--to", "external"],
     {
       cwd: resolve("."),
-      env: { ...process.env, PORT: String(server.address().port) },
+      env: {
+        ...process.env,
+        ATELIER_STATE_DIR: state,
+        PORT: String(server.address().port),
+      },
     },
   );
 
