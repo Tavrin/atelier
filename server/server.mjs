@@ -21,7 +21,10 @@ import {
   runFile,
   spawnTracked,
 } from "./lib/exec.mjs";
-import { sanitizeChildEnv } from "./lib/execution/environment-policy.mjs";
+import {
+  gitChildEnv,
+  sanitizeChildEnv,
+} from "./lib/execution/environment-policy.mjs";
 import {
   HttpError,
   jsonResponse,
@@ -423,7 +426,7 @@ function chronicleDiffStats(project, records, gitRunner) {
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, LC_ALL: "C" },
+        env: gitChildEnv(),
         timeout: LONG_GIT_TIMEOUT_MS,
         maxBuffer: CHRONICLE_GIT_BUFFER,
         windowsHide: true,
@@ -497,7 +500,7 @@ function chronicleMergeHistory(project, gitRunner) {
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, LC_ALL: "C" },
+        env: gitChildEnv(),
         timeout: LONG_GIT_TIMEOUT_MS,
         maxBuffer: CHRONICLE_GIT_BUFFER,
         windowsHide: true,

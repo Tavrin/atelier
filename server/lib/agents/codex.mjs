@@ -484,10 +484,14 @@ function validate({ effort }) {
 }
 
 function companionEnv(env) {
-  return {
-    ...sanitizeChildEnv(env, { class: "provider" }),
+  return sanitizeChildEnv({
+    ...env,
     CLAUDE_PLUGIN_DATA: join(stateDir(), "codex-companion"),
-  };
+  }, {
+    class: "provider",
+    // The Codex adapter owns this companion IPC root; project env cannot set it.
+    allowDenied: ["CLAUDE_PLUGIN_DATA"],
+  });
 }
 
 function companionErrorMessage(payload) {

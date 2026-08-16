@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -30,16 +31,25 @@ test("runFile gives git a locale-stable timeout with per-call overrides", async 
   assert.equal(calls[1].options.timeout, LONG_GIT_TIMEOUT_MS);
   assert.equal(calls[1].options.env.LC_ALL, "C");
   assert.equal(calls[2].options.timeout, 15_000);
-  assert.equal(calls[2].options.env, undefined);
+  assert.equal(calls[2].options.env.PATH, process.env.PATH);
+  assert.equal(calls[2].options.env.HOME, process.env.HOME);
 });
 
-test("runFile excludes hostile parent Git controls and preserves explicit caller env", async (t) => {
+test("runFile strips denied caller Git env while preserving allowed overrides and trusted HOME/PATH", async (t) => {
   const previous = {
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
     GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
     GIT_DIR: process.env.GIT_DIR,
+    LD_AUDIT: process.env.LD_AUDIT,
+    SSH_ASKPASS: process.env.SSH_ASKPASS,
   };
+  process.env.HOME = "/trusted/operator";
+  process.env.PATH = `${join(process.env.HOME, ".local", "bin")}${delimiter}/usr/bin`;
   process.env.GIT_CONFIG_GLOBAL = "/hostile/global-config";
   process.env.GIT_DIR = "/hostile/repository";
+  process.env.LD_AUDIT = "/hostile/audit.so";
+  process.env.SSH_ASKPASS = "/hostile/askpass";
   t.after(() => {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -48,20 +58,64 @@ test("runFile excludes hostile parent Git controls and preserves explicit caller
     _setExecFileRunner();
   });
 
+  const captured = [];
+  _setExecFileRunner((_file, _args, options, callback) => {
+    captured.push(options.env);
+    callback(null, "ok\n", "");
+  });
+  await runFile("git", ["status"], {
+    env: {
+      MY_APP_FLAG: "enabled",
+      GIT_CONFIG_COUNT: "0",
+      HOME: "/project/home",
+      PATH: "/project/bin",
+    },
+  });
+  await runFile("git", ["status"], {
+    env: { GIT_CONFIG_COUNT: "0" },
+    allowDenied: ["GIT_CONFIG_COUNT"],
+  });
+
+  assert.equal(captured[0].GIT_CONFIG_GLOBAL, undefined);
+  assert.equal(captured[0].GIT_DIR, undefined);
+  assert.equal(captured[0].LD_AUDIT, undefined);
+  assert.equal(captured[0].SSH_ASKPASS, undefined);
+  assert.equal(captured[0].MY_APP_FLAG, "enabled");
+  assert.equal(captured[0].GIT_CONFIG_COUNT, undefined);
+  assert.equal(captured[0].HOME, process.env.HOME);
+  assert.equal(captured[0].PATH, process.env.PATH);
+  assert.equal(captured[0].LC_ALL, "C");
+  assert.equal(captured[1].GIT_CONFIG_COUNT, "0");
+});
+
+test("runFile sanitizes the default tracker child environment", async (t) => {
+  const keys = ["HOME", "PATH", "GIT_DIR", "LD_AUDIT", "MY_SERVICE_TOKEN"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    _setExecFileRunner();
+  });
+  process.env.HOME = "/trusted/operator";
+  process.env.PATH = `${join(process.env.HOME, ".local", "bin")}${delimiter}/usr/bin`;
+  process.env.GIT_DIR = "/hostile/repository";
+  process.env.LD_AUDIT = "/hostile/audit.so";
+  process.env.MY_SERVICE_TOKEN = "secret";
+
   let captured;
   _setExecFileRunner((_file, _args, options, callback) => {
     captured = options.env;
     callback(null, "ok\n", "");
   });
-  await runFile("git", ["status"], {
-    env: { MY_APP_FLAG: "enabled", GIT_CONFIG_COUNT: "0" },
-  });
+  await runFile("br", ["ready"]);
 
-  assert.equal(captured.GIT_CONFIG_GLOBAL, undefined);
+  assert.equal(captured.HOME, process.env.HOME);
+  assert.equal(captured.PATH, process.env.PATH);
   assert.equal(captured.GIT_DIR, undefined);
-  assert.equal(captured.MY_APP_FLAG, "enabled");
-  assert.equal(captured.GIT_CONFIG_COUNT, "0");
-  assert.equal(captured.LC_ALL, "C");
+  assert.equal(captured.LD_AUDIT, undefined);
+  assert.equal(captured.MY_SERVICE_TOKEN, undefined);
 });
 
 test("envHygiene copies the environment without secret-shaped keys", () => {
