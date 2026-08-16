@@ -1,5 +1,5 @@
-import { lstat, readdir, readlink, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const NON_TRACKER_PATHS = Object.freeze([".", ":(exclude).beads"]);
 const FINALIZE_SUBJECT = "chore(dispatch): finalize result [atelier-finalized]";
@@ -22,6 +22,119 @@ function inside(root, candidate) {
   return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
 }
 
+async function canonicalPath(path, code, label) {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    throw finalizationError(code, `Could not resolve ${label}: ${error.message}`, error);
+  }
+}
+
+async function validateGitLinkage(worktreePath, expectedCommonDir, runGit) {
+  const root = await canonicalPath(worktreePath, "ERESULT_WORKTREE", "result worktree");
+  const gitEntry = join(root, ".git");
+  let metadata;
+  try {
+    // This lstat must precede every git invocation. A substituted symlink must
+    // never get a chance to redirect even the linkage probe.
+    metadata = await lstat(gitEntry);
+  } catch (error) {
+    throw finalizationError(
+      "ERESULT_GIT_LINKAGE",
+      `Result worktree has no trustworthy .git entry: ${error.message}`,
+      error,
+    );
+  }
+  if (metadata.isSymbolicLink()) {
+    throw finalizationError(
+      "ERESULT_SYMLINK_ESCAPE",
+      "Result finalization refused a symlinked top-level .git entry",
+    );
+  }
+  if (metadata.isDirectory()) {
+    if (expectedCommonDir) {
+      const expected = await canonicalPath(
+        expectedCommonDir,
+        "ERESULT_GIT_LINKAGE",
+        "expected git common directory",
+      );
+      const reported = (await git(runGit, ["-C", root, "rev-parse", "--git-common-dir"])).trim();
+      const common = await canonicalPath(
+        isAbsolute(reported) ? reported : resolve(root, reported),
+        "ERESULT_GIT_LINKAGE",
+        "worktree git common directory",
+      );
+      if (common !== expected) {
+        throw finalizationError(
+          "ERESULT_GIT_LINKAGE",
+          "Result worktree git common directory does not match the configured project",
+        );
+      }
+    }
+    return root;
+  }
+  if (!metadata.isFile()) {
+    throw finalizationError(
+      "ERESULT_GIT_LINKAGE",
+      "Result worktree .git entry is neither a gitfile nor a directory",
+    );
+  }
+
+  let contents;
+  try {
+    contents = await readFile(gitEntry, "utf8");
+  } catch (error) {
+    throw finalizationError(
+      "ERESULT_GIT_LINKAGE",
+      `Could not read result worktree gitfile: ${error.message}`,
+      error,
+    );
+  }
+  const match = /^gitdir: ([^\r\n]+)\r?\n?$/.exec(contents);
+  if (!match) {
+    throw finalizationError(
+      "ERESULT_GIT_LINKAGE",
+      "Result worktree .git file is not a valid gitdir linkage",
+    );
+  }
+  const gitDir = await canonicalPath(
+    isAbsolute(match[1]) ? match[1] : resolve(root, match[1]),
+    "ERESULT_GIT_LINKAGE",
+    "result worktree gitdir",
+  );
+  const reported = (await git(runGit, ["-C", root, "rev-parse", "--git-common-dir"])).trim();
+  const common = await canonicalPath(
+    isAbsolute(reported) ? reported : resolve(root, reported),
+    "ERESULT_GIT_LINKAGE",
+    "worktree git common directory",
+  );
+  if (expectedCommonDir) {
+    const expected = await canonicalPath(
+      expectedCommonDir,
+      "ERESULT_GIT_LINKAGE",
+      "expected git common directory",
+    );
+    if (common !== expected) {
+      throw finalizationError(
+        "ERESULT_GIT_LINKAGE",
+        "Result worktree git common directory does not match the configured project",
+      );
+    }
+  }
+  const worktreesRoot = await canonicalPath(
+    join(common, "worktrees"),
+    "ERESULT_GIT_LINKAGE",
+    "git worktrees directory",
+  );
+  if (gitDir === worktreesRoot || !inside(worktreesRoot, gitDir)) {
+    throw finalizationError(
+      "ERESULT_GIT_LINKAGE",
+      "Result worktree gitfile does not point inside the configured repository's worktrees",
+    );
+  }
+  return root;
+}
+
 async function inspectWorkspace(worktreePath) {
   let root;
   try {
@@ -34,6 +147,7 @@ async function inspectWorkspace(worktreePath) {
     );
   }
 
+  const embeddedRepos = [];
   async function inspect(path, localPath) {
     let metadata;
     try {
@@ -99,6 +213,10 @@ async function inspectWorkspace(worktreePath) {
       for (const name of names) {
         const childPath = localPath ? `${localPath}/${name}` : name;
         if (!localPath && (name === ".git" || name === ".beads")) continue;
+        if (localPath && name === ".git") {
+          embeddedRepos.push(localPath);
+          continue;
+        }
         await inspect(resolve(path, name), childPath);
       }
       return;
@@ -113,6 +231,7 @@ async function inspectWorkspace(worktreePath) {
   }
 
   await inspect(root, "");
+  return embeddedRepos;
 }
 
 function parseStatus(output) {
@@ -137,15 +256,19 @@ function parseStatus(output) {
 }
 
 function parseTree(output) {
-  const blobs = new Map();
+  const entries = new Map();
   for (const record of output.split("\0")) {
     if (!record) continue;
     const tab = record.indexOf("\t");
     if (tab === -1) continue;
     const metadata = record.slice(0, tab).split(" ");
-    blobs.set(record.slice(tab + 1), metadata[2]);
+    entries.set(record.slice(tab + 1), {
+      mode: metadata[0],
+      type: metadata[1],
+      objectId: metadata[2],
+    });
   }
-  return blobs;
+  return entries;
 }
 
 async function git(runGit, args) {
@@ -189,6 +312,48 @@ function dirtyEntries(entries) {
   return entries.filter(({ code }) => code !== "!!");
 }
 
+async function assertTrackedEmbeddedRepos(runGit, worktreePath, embeddedRepos) {
+  if (embeddedRepos.length === 0) return;
+  let configured = "";
+  try {
+    configured = await git(runGit, [
+      "config",
+      "--file",
+      join(worktreePath, ".gitmodules"),
+      "--get-regexp",
+      "^submodule\\..*\\.path$",
+    ]);
+  } catch {
+    // Missing or malformed .gitmodules is not a reason to trust a nested repo.
+  }
+  const submodulePaths = new Set(configured
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.slice(line.search(/\s/) + 1).trim()));
+  for (const path of embeddedRepos) {
+    const staged = await git(runGit, [
+      "--literal-pathspecs",
+      "-C",
+      worktreePath,
+      "ls-files",
+      "--stage",
+      "-z",
+      "--",
+      path,
+    ]);
+    const record = staged.split("\0").find(Boolean) ?? "";
+    const tab = record.indexOf("\t");
+    const metadata = tab === -1 ? [] : record.slice(0, tab).split(" ");
+    const trackedPath = tab === -1 ? "" : record.slice(tab + 1);
+    if (metadata[0] !== "160000" || trackedPath !== path || !submodulePaths.has(path)) {
+      throw finalizationError(
+        "ERESULT_EMBEDDED_REPO",
+        `Result finalization refused untracked embedded repository: ${path}`,
+      );
+    }
+  }
+}
+
 async function manifestFor(runGit, worktreePath, baseCommit, resultCommit) {
   const paths = (await git(runGit, [
     "-C",
@@ -198,11 +363,9 @@ async function manifestFor(runGit, worktreePath, baseCommit, resultCommit) {
     "-z",
     baseCommit,
     resultCommit,
-    "--",
-    ...NON_TRACKER_PATHS,
   ])).split("\0").filter(Boolean);
   if (paths.length === 0) return [];
-  const blobs = new Map();
+  const treeEntries = new Map();
   for (let offset = 0; offset < paths.length; offset += 500) {
     const chunk = paths.slice(offset, offset + 500);
     const entries = parseTree(await git(runGit, [
@@ -216,12 +379,22 @@ async function manifestFor(runGit, worktreePath, baseCommit, resultCommit) {
       "--",
       ...chunk,
     ]));
-    for (const [path, blobHash] of entries) blobs.set(path, blobHash);
+    for (const [path, entry] of entries) treeEntries.set(path, entry);
   }
-  return paths.map((path) => ({ path, blobHash: blobs.get(path) ?? null }));
+  return paths.map((path) => {
+    const tracker = path === ".beads" || path.startsWith(".beads/")
+      ? { tracker: true }
+      : {};
+    const entry = treeEntries.get(path);
+    if (!entry) return { path, deleted: true, ...tracker };
+    if (entry.mode === "160000") {
+      return { path, type: "gitlink", objectId: entry.objectId, ...tracker };
+    }
+    return { path, blobHash: entry.objectId, ...tracker };
+  });
 }
 
-export async function finalizeResult({ worktreePath, baseCommit, runGit }) {
+export async function finalizeResult({ worktreePath, baseCommit, runGit, expectedCommonDir }) {
   if (typeof runGit !== "function") {
     throw finalizationError("ERESULT_RUNNER", "Result finalization requires a git runner");
   }
@@ -232,7 +405,9 @@ export async function finalizeResult({ worktreePath, baseCommit, runGit }) {
     throw finalizationError("ERESULT_BASE", "Result finalization requires a valid base commit");
   }
 
-  await inspectWorkspace(worktreePath);
+  await validateGitLinkage(worktreePath, expectedCommonDir, runGit);
+  const embeddedRepos = await inspectWorkspace(worktreePath);
+  await assertTrackedEmbeddedRepos(runGit, worktreePath, embeddedRepos);
   const before = await status(runGit, worktreePath);
   assertNoIgnored(before);
   const dirt = dirtyEntries(before);
@@ -266,7 +441,11 @@ export async function finalizeResult({ worktreePath, baseCommit, runGit }) {
       "Result finalization left non-tracker workspace changes",
     );
   }
-  await inspectWorkspace(worktreePath);
+  // A detached descendant writing after this final clean check can mutate only
+  // the disposable worktree, not the frozen result commit. ATT-003/004 bind
+  // downstream verification and review to that SHA; writer quiescence is ATT-017.
+  const finalEmbeddedRepos = await inspectWorkspace(worktreePath);
+  await assertTrackedEmbeddedRepos(runGit, worktreePath, finalEmbeddedRepos);
 
   const canonicalBase = (await git(runGit, [
     "-C",

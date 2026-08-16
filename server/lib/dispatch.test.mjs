@@ -2246,7 +2246,13 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     gitCalls.push(args);
     if (args[2] === "worktree") {
       await mkdir(args[6], { recursive: true });
+      const gitDir = join(setup.primary, ".git", "worktrees", "fixture-finalizer");
+      await mkdir(gitDir, { recursive: true });
+      await writeFile(join(args[6], ".git"), `gitdir: ${gitDir}\n`);
       return "";
+    }
+    if (args[2] === "rev-parse" && args[3] === "--git-common-dir") {
+      return `${join(setup.primary, ".git")}\n`;
     }
     if (args[2] === "rev-parse" && args[3] === "--git-dir") return ".atelier-git\n";
     if (args[2] === "rev-parse" && args[3] === "HEAD") return `${FIXTURE_BASE_COMMIT}\n`;
@@ -2356,7 +2362,13 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
     assert.equal(file, "git");
     if (args[2] === "worktree") {
       await mkdir(args[6], { recursive: true });
+      const gitDir = join(setup.primary, ".git", "worktrees", "fixture-finalizer");
+      await mkdir(gitDir, { recursive: true });
+      await writeFile(join(args[6], ".git"), `gitdir: ${gitDir}\n`);
       return "";
+    }
+    if (args[2] === "rev-parse" && args[3] === "--git-common-dir") {
+      return `${join(setup.primary, ".git")}\n`;
     }
     if (args[2] === "rev-parse" && args[3] === "--git-dir") return ".atelier-git\n";
     if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
@@ -2384,6 +2396,57 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
     record.exitSummary,
     "Atelier could not finalize completed Codex result [ERESULT_GIT]: Result finalization git command failed: git " +
       `-C ${record.worktreePath} commit -m chore(dispatch): finalize result [atelier-finalized] -- . :(exclude).beads: identity unavailable`,
+  );
+});
+
+test("shutdown during deferred result finalization cannot resurrect a failed dispatch", async (t) => {
+  const setup = await fixture(t, { tracker: "none" });
+  stubPreparation();
+  _setSpawner(() => successfulChild());
+  let announceStarted;
+  let releaseFinalizer;
+  const started = new Promise((resolvePromise) => {
+    announceStarted = resolvePromise;
+  });
+  const gate = new Promise((resolvePromise) => {
+    releaseFinalizer = resolvePromise;
+  });
+  _setResultFinalizer(async ({ baseCommit, expectedCommonDir }) => {
+    assert.equal(expectedCommonDir, join(setup.primary, ".git"));
+    announceStarted();
+    await gate;
+    return {
+      resultCommit: FIXTURE_BASE_COMMIT,
+      resultTree: FIXTURE_RESULT_TREE,
+      baseCommit,
+      manifest: [],
+      workspaceClean: true,
+      commitCreated: false,
+    };
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const events = [];
+  const removeListener = dispatcher.onEvent((event) => events.push(event));
+  t.after(removeListener);
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "finish slowly" });
+  await started;
+
+  await dispatcher.shutdown({ graceMs: 0 });
+  assert.equal(dispatcher.get(id).state, "failed");
+  releaseFinalizer();
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+
+  const record = dispatcher.get(id);
+  assert.equal(record.state, "failed");
+  assert.equal(record.result, null);
+  assert.equal(record.verify, null);
+  assert.deepEqual(
+    events
+      .filter((event) => event.dispatchId === id && event.type === "status")
+      .map((event) => event.state)
+      .filter((state) => ["verifying", "completed"].includes(state)),
+    [],
   );
 });
 

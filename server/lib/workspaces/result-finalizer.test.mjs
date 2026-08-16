@@ -28,11 +28,28 @@ async function repository(t) {
   return { root, baseCommit };
 }
 
+async function linkedRepository(t) {
+  const container = await mkdtemp(join(tmpdir(), "atelier-result-linked-"));
+  const primary = join(container, "primary");
+  const root = join(container, "worktree");
+  t.after(() => rm(container, { recursive: true, force: true }));
+  await runGit(["init", "-q", "--initial-branch=main", primary]);
+  await runGit(["-C", primary, "config", "user.name", "Atelier Test"]);
+  await runGit(["-C", primary, "config", "user.email", "atelier@example.invalid"]);
+  await writeFile(join(primary, "code.mjs"), "export const value = 1;\n");
+  await runGit(["-C", primary, "add", "code.mjs"]);
+  await runGit(["-C", primary, "commit", "-q", "-m", "base"]);
+  const baseCommit = (await runGit(["-C", primary, "rev-parse", "HEAD"])).trim();
+  await runGit(["-C", primary, "worktree", "add", "-q", "-b", "result", root, baseCommit]);
+  return { root, primary, baseCommit, expectedCommonDir: join(primary, ".git") };
+}
+
 function finalizationInput(fixture) {
   return {
     worktreePath: fixture.root,
     baseCommit: fixture.baseCommit,
     runGit,
+    ...(fixture.expectedCommonDir ? { expectedCommonDir: fixture.expectedCommonDir } : {}),
   };
 }
 
@@ -154,7 +171,7 @@ test("a provider commit followed by dirt produces a new final result commit", as
   assert.equal((await runGit(["-C", fixture.root, "rev-list", "--count", `${providerCommit}..HEAD`])).trim(), "1");
 });
 
-test("an already-clean workspace identifies HEAD without an empty commit", async (t) => {
+test("an already-clean standalone repository identifies HEAD without an empty commit", async (t) => {
   const fixture = await repository(t);
   const beforeCount = await runGit(["-C", fixture.root, "rev-list", "--count", "HEAD"]);
 
@@ -165,4 +182,113 @@ test("an already-clean workspace identifies HEAD without an empty commit", async
   assert.equal(result.workspaceClean, true);
   assert.deepEqual(result.manifest, []);
   assert.equal(await runGit(["-C", fixture.root, "rev-list", "--count", "HEAD"]), beforeCount);
+});
+
+test("an honest linked worktree validates against its primary common directory", async (t) => {
+  const fixture = await linkedRepository(t);
+
+  const result = await finalizeResult(finalizationInput(fixture));
+
+  assert.equal(result.resultCommit, fixture.baseCommit);
+  assert.equal(result.workspaceClean, true);
+});
+
+test("a gitfile pointing at a foreign repository fails linkage validation", async (t) => {
+  const fixture = await linkedRepository(t);
+  const expected = await repository(t);
+  fixture.expectedCommonDir = join(expected.root, ".git");
+
+  await assertTypedFailure(finalizeResult(finalizationInput(fixture)), "ERESULT_GIT_LINKAGE");
+});
+
+test("a symlinked top-level .git entry fails before invoking git", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-result-symlinked-git-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, "git-target");
+  await mkdir(target);
+  await symlink(target, join(root, ".git"));
+  let gitCalls = 0;
+
+  await assertTypedFailure(finalizeResult({
+    worktreePath: root,
+    baseCommit: "1111111111111111111111111111111111111111",
+    runGit: async () => {
+      gitCalls += 1;
+      return "";
+    },
+  }), "ERESULT_SYMLINK_ESCAPE");
+
+  assert.equal(gitCalls, 0);
+});
+
+test("provider-committed code and .beads changes both appear in the complete manifest", async (t) => {
+  const fixture = await repository(t);
+  await mkdir(join(fixture.root, ".beads"));
+  await writeFile(join(fixture.root, ".beads", "issues.jsonl"), "committed tracker state\n");
+  await writeFile(join(fixture.root, "provider.mjs"), "export const provider = true;\n");
+  await runGit(["-C", fixture.root, "add", ".beads/issues.jsonl", "provider.mjs"]);
+  await runGit(["-C", fixture.root, "commit", "-q", "-m", "provider result"]);
+
+  const result = await finalizeResult(finalizationInput(fixture));
+
+  assert.deepEqual(result.manifest.map(({ path }) => path), [
+    ".beads/issues.jsonl",
+    "provider.mjs",
+  ]);
+  assert.equal(result.manifest[0].tracker, true);
+  assert.equal("tracker" in result.manifest[1], false);
+});
+
+test("deleted manifest paths carry an explicit deleted marker", async (t) => {
+  const fixture = await repository(t);
+  await rm(join(fixture.root, "code.mjs"));
+
+  const result = await finalizeResult(finalizationInput(fixture));
+
+  assert.deepEqual(result.manifest, [{ path: "code.mjs", deleted: true }]);
+});
+
+test("an untracked embedded repository fails before staging", async (t) => {
+  const fixture = await repository(t);
+  const embedded = join(fixture.root, "vendor", "embedded");
+  await mkdir(embedded, { recursive: true });
+  await runGit(["init", "-q", embedded]);
+  await writeFile(join(fixture.root, "code.mjs"), "export const value = 7;\n");
+
+  await assertTypedFailure(finalizeResult(finalizationInput(fixture)), "ERESULT_EMBEDDED_REPO");
+
+  assert.equal(await runGit(["-C", fixture.root, "diff", "--cached", "--name-only"]), "");
+});
+
+test("a tracked submodule is manifested as a gitlink, never a blob hash", async (t) => {
+  const fixture = await repository(t);
+  const dependency = await repository(t);
+  await runGit([
+    "-c",
+    "protocol.file.allow=always",
+    "-C",
+    fixture.root,
+    "submodule",
+    "add",
+    "-q",
+    dependency.root,
+    "vendor/dependency",
+  ]);
+  await runGit(["-C", fixture.root, "commit", "-q", "-am", "add submodule"]);
+  const dependencyCommit = (await runGit([
+    "-C",
+    fixture.root,
+    "rev-parse",
+    "HEAD:vendor/dependency",
+  ])).trim();
+
+  const result = await finalizeResult(finalizationInput(fixture));
+  const gitlink = result.manifest.find(({ path }) => path === "vendor/dependency");
+
+  assert.deepEqual(gitlink, {
+    path: "vendor/dependency",
+    type: "gitlink",
+    objectId: dependencyCommit,
+  });
+  assert.equal("blobHash" in gitlink, false);
 });

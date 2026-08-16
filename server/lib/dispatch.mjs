@@ -5085,7 +5085,15 @@ export function createDispatcher({
         worktreePath: entry.record.worktreePath,
         baseCommit: entry.record.baseCommit,
         runGit: (args) => commandRunner("git", args),
+        expectedCommonDir: join(project.path, ".git"),
       });
+      if (entry.record.state === "stopping") {
+        transition(entry, "stopped", { exitSummary: "stopped by user" });
+        await settleQueueOutcome(entry, project);
+        await releaseClaim(entry, project);
+        return;
+      }
+      if (TERMINAL_STATES.has(entry.record.state)) return;
       const previousVersion = Number.isInteger(entry.record.result?.version)
         ? entry.record.result.version
         : 1;
@@ -5102,6 +5110,7 @@ export function createDispatcher({
       };
       persist(entry);
     } catch (error) {
+      if (TERMINAL_STATES.has(entry.record.state)) return;
       if (entry.record.state === "stopping") {
         transition(entry, "stopped", { exitSummary: "stopped by user" });
       } else {
