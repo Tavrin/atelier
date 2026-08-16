@@ -616,6 +616,9 @@ test("atelier reply reads the live daemon bearer from its disposable state direc
     },
   };
   const { port, atelierStateDir } = await serverFixture(t, { dispatcher });
+  // A live daemon holds the instance lock; the fixture starts the server directly,
+  // so mirror the lock the CLI command-client checks before connecting.
+  await writeFile(join(atelierStateDir, "atelier.lock"), `${process.pid}\n`);
   const { stdout } = await execFileAsync(
     process.execPath,
     [join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "atelier.mjs"),
@@ -3005,6 +3008,8 @@ test("move-tracker CLI uses the state-dir bearer against the guarded daemon", as
     brExecutable: "/fixture/br",
   });
   for (const record of setup.dispatcher._records) record.state = "completed";
+  // A live daemon holds the instance lock; mirror it so the CLI command-client connects.
+  await writeFile(join(setup.atelierStateDir, "atelier.lock"), `${process.pid}\n`);
 
   const { stdout } = await execFileAsync(
     process.execPath,
