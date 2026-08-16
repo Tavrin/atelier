@@ -28,6 +28,7 @@ import {
   _setPostMergeHooks,
   _setProbe,
   _setPushFetch,
+  _setResultFinalizer,
   _setRunFile,
   _setSpawner,
   createDispatcher,
@@ -62,10 +63,19 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
     defaults: { concurrentDispatchCap: 3, ...defaults },
     projects: [configuredProject],
   };
+  _setResultFinalizer(async ({ baseCommit }) => ({
+    resultCommit: "1111111111111111111111111111111111111111",
+    resultTree: "2222222222222222222222222222222222222222",
+    baseCommit: baseCommit ?? "1111111111111111111111111111111111111111",
+    manifest: [],
+    workspaceClean: true,
+    commitCreated: false,
+  }));
   t.after(async () => {
     _setBrResolver();
     _setSpawner();
     _setRunFile();
+    _setResultFinalizer();
     _setProbe();
     _setCompanionResolver();
     _setCodexModelFileOps();

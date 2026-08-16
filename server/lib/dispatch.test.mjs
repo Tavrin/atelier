@@ -56,6 +56,7 @@ import {
   _setPostMergeFileOps,
   _setPostMergeHooks,
   _setProbe,
+  _setResultFinalizer,
   _setRunFile,
   _setSpawner,
   _resolveDispatchLane,
@@ -98,10 +99,21 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
     projects: [configuredProject],
   };
   _setCodexModelFileOps({ readFileSync: () => 'model = "gpt-5.6-fixture"\n' });
+  _setResultFinalizer(async ({ baseCommit }) => ({
+    resultCommit: FIXTURE_BASE_COMMIT,
+    resultTree: FIXTURE_RESULT_TREE,
+    baseCommit: /^[0-9a-f]{7,64}$/i.test(String(baseCommit ?? ""))
+      ? baseCommit
+      : FIXTURE_BASE_COMMIT,
+    manifest: [],
+    workspaceClean: true,
+    commitCreated: false,
+  }));
   t.after(async () => {
     _setBrResolver();
     _setSpawner();
     _setRunFile();
+    _setResultFinalizer();
     _setProbe();
     _setCompanionResolver();
     _setCodexPollIntervalMs();
@@ -387,14 +399,25 @@ async function spawnZombieProcess(t) {
 // loud. Only the exact probe shape is intercepted; every other git call falls
 // through to the stub it wraps.
 const PROBE_CHANGED_FILE = "src/changed.txt\n";
+const FIXTURE_BASE_COMMIT = "1111111111111111111111111111111111111111";
+const FIXTURE_RESULT_TREE = "2222222222222222222222222222222222222222";
 
 function isOutcomeDiffProbe(args) {
   return args[2] === "diff" && args[3] === "--no-ext-diff" && args[4] === "--name-only";
 }
 
 function withDispatchChanges(runner, changed = PROBE_CHANGED_FILE) {
-  return async (file, args, options = {}) =>
-    isOutcomeDiffProbe(args) ? changed : runner(file, args, options);
+  return async (file, args, options = {}) => {
+    if (isOutcomeDiffProbe(args)) return changed;
+    if (file === "git" && args[2] === "status" && args.includes("--ignored=matching")) {
+      return "";
+    }
+    if (file === "git" && args[2] === "diff" && args[3] === "--name-only") return "";
+    if (file === "git" && args[2] === "rev-parse" && args[3] === "--verify") {
+      return `${args[4].endsWith("^{tree}") ? FIXTURE_RESULT_TREE : FIXTURE_BASE_COMMIT}\n`;
+    }
+    return runner(file, args, options);
+  };
 }
 
 function stubPreparation({ dirtyCount = 0, strandedStatus = "", onCommand = () => {} } = {}) {
@@ -405,6 +428,7 @@ function stubPreparation({ dirtyCount = 0, strandedStatus = "", onCommand = () =
     assert.equal(file, "git");
     if (args[2] === "status") return strandedStatus;
     if (args[2] === "log") return "";
+    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
     assert.deepEqual(args.slice(0, 5), ["-C", args[1], "worktree", "add", "-b"]);
     const primary = args[1];
     const worktreePath = args[6];
@@ -429,6 +453,7 @@ function stubTrackedPreparation(setup, calls) {
       return "";
     }
     if (["status", "log"].includes(args[2])) return "";
+    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
     return "";
   }));
 }
@@ -501,6 +526,7 @@ function stubBakeoffRuntime(
       return "";
     }
     if (args[2] === "rev-parse" && args[3] === "--git-dir") return ".atelier-git\n";
+    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
     if (["status", "log"].includes(args[2])) return "";
     return "";
   }));
@@ -1084,16 +1110,26 @@ test("reply resumes the captured Claude session, accumulates usage, and re-runs 
   const first = await waitForState(dispatcher, dispatchId, ["completed"]);
   assert.equal(first.sessionId, "fixture-session");
   assert.equal(verifyRuns, 1);
+  assert.equal(first.result.version, 1);
 
   const replyText = "Continue with token=supersecretvalue";
   const resumed = await dispatcher.reply(dispatchId, { text: replyText });
   assert.equal(resumed.state, "running");
+  assert.equal(resumed.result.version, 2);
+  assert.equal(resumed.result.invalidationReason, "dispatch resumed for new work");
+  assert.deepEqual(resumed.verify, {
+    state: "invalidated",
+    detail: "dispatch resumed for new work",
+    steps: [],
+  });
   const completed = await waitForState(dispatcher, dispatchId, ["completed"]);
 
   assert.equal(completed.turns, 5);
   assert.equal(completed.costUSD, 1.75);
   assert.equal(completed.exitSummary, "resumed work done");
   assert.equal(completed.verify.state, "passed");
+  assert.equal(completed.result.version, 2);
+  assert.equal(completed.result.invalidationReason, undefined);
   assert.equal(verifyRuns, 2);
   const claudeLaunches = launches.filter(({ command }) => command === "claude");
   assert.deepEqual(claudeLaunches[1].args, [
@@ -2183,11 +2219,13 @@ test("codex lane stays warning-free when its resolved git dir is writable", asyn
 
 test("Atelier commits completed Codex changes before worktree verification", async (t) => {
   const setup = await fixture(t, { verifyCommands: ["node --test"] });
+  _setResultFinalizer();
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const order = [];
   const gitCalls = [];
+  let finalizerStatusCalls = 0;
   _setSpawner((file, args) => {
     if (file === "node" && args[0] === "/fixture/codex-companion.mjs") {
       order.push("agent");
@@ -2210,8 +2248,19 @@ test("Atelier commits completed Codex changes before worktree verification", asy
       await mkdir(args[6], { recursive: true });
       return "";
     }
-    if (args[2] === "rev-parse") return ".atelier-git\n";
-    if (args[2] === "status") return " M server/lib/dispatch.mjs\n?? new-file.mjs\n";
+    if (args[2] === "rev-parse" && args[3] === "--git-dir") return ".atelier-git\n";
+    if (args[2] === "rev-parse" && args[3] === "HEAD") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "rev-parse" && args[3] === "--verify") {
+      return `${args[4].endsWith("^{tree}") ? FIXTURE_RESULT_TREE : FIXTURE_BASE_COMMIT}\n`;
+    }
+    if (args[2] === "status" && args.includes("--ignored=matching")) {
+      finalizerStatusCalls += 1;
+      return finalizerStatusCalls === 1
+        ? " M server/lib/dispatch.mjs\n?? new-file.mjs\n"
+        : "";
+    }
+    if (args[2] === "status") return "";
+    if (args[2] === "diff" && args[3] === "--name-only") return "";
     if (args[2] === "add") {
       order.push("add");
       return "";
@@ -2236,6 +2285,17 @@ test("Atelier commits completed Codex changes before worktree verification", asy
   const record = dispatcher.get(id);
 
   assert.equal(record.verify.state, "passed");
+  assert.deepEqual(record.result, {
+    commit: FIXTURE_BASE_COMMIT,
+    tree: FIXTURE_RESULT_TREE,
+    base: FIXTURE_BASE_COMMIT,
+    manifest: [],
+    workspaceClean: true,
+    selfCommitted: false,
+    commitCreated: true,
+    finalizedAt: record.result.finalizedAt,
+    version: 1,
+  });
   assert.deepEqual(order, ["agent", "add", "commit", "verify"]);
   assert.deepEqual(gitCalls.find((args) => args[2] === "status"), [
     "-C",
@@ -2243,6 +2303,8 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
+    "--ignored=matching",
+    "-z",
     "--",
     ".",
     ":(exclude).beads",
@@ -2261,9 +2323,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     record.worktreePath,
     "commit",
     "-m",
-    "chore(dispatch): fixture-42 - work by codex [atelier-committed]",
-    "-m",
-    "implemented safely",
+    "chore(dispatch): finalize result [atelier-finalized]",
     "--",
     ".",
     ":(exclude).beads",
@@ -2272,6 +2332,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
 
 test("a failed Atelier-owned commit fails the dispatch before verification", async (t) => {
   const setup = await fixture(t, { verifyCommands: ["node --test"] });
+  _setResultFinalizer();
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
@@ -2283,6 +2344,7 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
     verifyRuns += 1;
     return verifyChild();
   });
+  let finalizerStatusCalls = 0;
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
     if (file === "node" && args[1] === "status") {
@@ -2296,8 +2358,13 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
       await mkdir(args[6], { recursive: true });
       return "";
     }
-    if (args[2] === "rev-parse") return ".atelier-git\n";
-    if (args[2] === "status") return " M changed.mjs\n";
+    if (args[2] === "rev-parse" && args[3] === "--git-dir") return ".atelier-git\n";
+    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "status" && args.includes("--ignored=matching")) {
+      finalizerStatusCalls += 1;
+      return " M changed.mjs\n";
+    }
+    if (args[2] === "status") return "";
     if (args[2] === "add") return "";
     if (args[2] === "commit") throw new Error("identity unavailable");
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
@@ -2315,7 +2382,8 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
   assert.equal(verifyRuns, 0);
   assert.equal(
     record.exitSummary,
-    "Atelier could not commit completed Codex work: identity unavailable",
+    "Atelier could not finalize completed Codex result [ERESULT_GIT]: Result finalization git command failed: git " +
+      `-C ${record.worktreePath} commit -m chore(dispatch): finalize result [atelier-finalized] -- . :(exclude).beads: identity unavailable`,
   );
 });
 
@@ -10322,8 +10390,84 @@ test("integration: a real git worktree is added for a dispatch", async (t) => {
   assert.equal((await readFile(join(record.worktreePath, "README.md"), "utf8")), "fixture\n");
 });
 
+test("integration: a self-committing agent's dirty result is clean, attested, and survives worktree deletion", async (t) => {
+  const setup = await fixture(t);
+  _setResultFinalizer();
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: setup.primary });
+  execFileSync("git", ["config", "user.name", "Atelier Test"], { cwd: setup.primary });
+  execFileSync("git", ["config", "user.email", "atelier@example.invalid"], {
+    cwd: setup.primary,
+  });
+  await writeFile(join(setup.primary, "README.md"), "fixture\n");
+  execFileSync("git", ["add", "README.md"], { cwd: setup.primary });
+  execFileSync("git", ["commit", "-q", "-m", "fixture"], { cwd: setup.primary });
+  _setProbe();
+  _setRunFile();
+  _setSpawner((_file, _args, options) =>
+    successfulChild(async () => {
+      await writeFile(join(options.cwd, "feature.mjs"), "export const ready = true;\n");
+      await writeFile(join(options.cwd, "feature.test.mjs"), "assert.equal(ready, true);\n");
+    }));
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({
+    project: "fixture",
+    prompt: "leave dirty implementation and test output",
+    lane: "claude",
+  });
+  const record = await waitForState(dispatcher, id, ["completed", "failed"]);
+  assert.equal(record.state, "completed", record.exitSummary);
+
+  const cleanStatus = execFileSync(
+    "git",
+    [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--",
+      ".",
+      ":(exclude).beads",
+    ],
+    { cwd: record.worktreePath, encoding: "utf8" },
+  );
+  const changedPaths = execFileSync(
+    "git",
+    ["diff", "--name-only", record.result.base, record.result.commit],
+    { cwd: record.worktreePath, encoding: "utf8" },
+  ).trim().split("\n");
+  const independentTree = execFileSync(
+    "git",
+    ["rev-parse", `${record.result.commit}^{tree}`],
+    { cwd: record.worktreePath, encoding: "utf8" },
+  ).trim();
+
+  assert.equal(cleanStatus, "");
+  assert.deepEqual(changedPaths, ["feature.mjs", "feature.test.mjs"]);
+  assert.equal(record.result.tree, independentTree);
+  assert.equal(record.result.workspaceClean, true);
+  assert.equal(record.result.selfCommitted, true);
+  assert.equal(record.result.commitCreated, true);
+  assert.deepEqual(
+    record.result.manifest.map(({ path }) => path),
+    ["feature.mjs", "feature.test.mjs"],
+  );
+
+  execFileSync("git", ["worktree", "remove", "--force", record.worktreePath], {
+    cwd: setup.primary,
+  });
+  assert.equal(existsSync(record.worktreePath), false);
+  assert.equal(
+    execFileSync("git", ["show", `${record.result.commit}:feature.mjs`], {
+      cwd: setup.primary,
+      encoding: "utf8",
+    }),
+    "export const ready = true;\n",
+  );
+});
+
 test("integration: Atelier commits real Codex work without committing .beads", async (t) => {
   const setup = await fixture(t);
+  _setResultFinalizer();
   execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: setup.primary });
   execFileSync("git", ["config", "user.name", "Atelier Test"], { cwd: setup.primary });
   execFileSync("git", ["config", "user.email", "atelier@example.invalid"], {
@@ -10382,10 +10526,18 @@ test("integration: Atelier commits real Codex work without committing .beads", a
 
   assert.equal(
     message,
-    "chore(dispatch): fixture-real - work by codex [atelier-committed]\nreal implementation\n\n",
+    "chore(dispatch): finalize result [atelier-finalized]\n\n",
   );
   assert.equal(committedPaths.trim(), "feature.mjs");
   assert.equal(trackerStatus, "?? .beads/\n");
+  assert.equal(record.result.workspaceClean, true);
+  assert.equal(record.result.selfCommitted, false);
+  assert.equal(record.result.commitCreated, true);
+  assert.equal(record.result.commit, execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: record.worktreePath,
+    encoding: "utf8",
+  }).trim());
+  assert.deepEqual(record.result.manifest.map(({ path }) => path), ["feature.mjs"]);
 });
 
 test("terminal transitions fire one redacted push to the configured notifyUrl", async (t) => {

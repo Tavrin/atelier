@@ -73,6 +73,7 @@ import {
   runTrackerMutation,
   trackerDirectory,
 } from "./tracker.mjs";
+import { finalizeResult } from "./workspaces/result-finalizer.mjs";
 import { gatesFor } from "./world-contract.mjs";
 
 const ACTIVE_STATES = new Set(["preparing", "resuming", "running", "verifying"]);
@@ -101,6 +102,26 @@ const TERMINAL_STATES = new Set([
 
 function actionActor(value) {
   return isRequestActor(value) ? value : "dispatcher";
+}
+
+export function invalidateResult(entry, reason) {
+  const detail = String(reason || "result invalidated by new work");
+  if (entry.record.result) {
+    const version = Number.isInteger(entry.record.result.version)
+      ? entry.record.result.version
+      : 1;
+    entry.record.result = {
+      ...entry.record.result,
+      version: version + 1,
+      invalidatedAt: new Date().toISOString(),
+      invalidationReason: detail,
+    };
+  }
+  entry.record.verify = {
+    state: "invalidated",
+    detail,
+    steps: [],
+  };
 }
 const CONVOY_FAILURE_STATES = new Set([
   "completed_empty",
@@ -301,6 +322,7 @@ const INTERRUPTED_UNPROVEN_VERIFIER_DETAIL =
 
 let spawner = spawnTracked;
 let commandRunner = runFile;
+let resultFinalizer = finalizeResult;
 let capabilityProbe = probeProject;
 let pushFetch = globalThis.fetch;
 let brResolver = resolveBrExecutable;
@@ -464,6 +486,7 @@ function publicRecord(record) {
     // terminal run - including a clean `completed` one - so "the detector ran and
     // cleared this" is auditable rather than inferred from an absence.
     outcome: record.outcome ?? null,
+    result: record.result ?? null,
     verify: record.verify ?? null,
     postMerge: record.postMerge ?? null,
     review: reviewState(record),
@@ -4880,46 +4903,6 @@ export function createDispatcher({
     return exposedRecord(entry.record);
   }
 
-  async function commitCompletedAgentWork(entry, agent, exitSummary) {
-    if (agent.capabilities.commitsOwnWork || !entry.record.worktreePath) return false;
-    const worktree = entry.record.worktreePath;
-    const status = await commandRunner("git", [
-      "-C",
-      worktree,
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-      "--",
-      ...NON_TRACKER_PATHS,
-    ]);
-    if (!status.trim()) return false;
-
-    const ticket = String(entry.record.ticketId ?? entry.record.id).trim().replace(/\s+/g, " ");
-    const agentId = String(agent.id).trim().replace(/\s+/g, " ");
-    const subject = `chore(dispatch): ${ticket} - work by ${agentId} [atelier-committed]`;
-    const body = redactText(exitSummary).trim() || "completed";
-    await commandRunner("git", [
-      "-C",
-      worktree,
-      "add",
-      "--all",
-      "--",
-      ...NON_TRACKER_PATHS,
-    ]);
-    await commandRunner("git", [
-      "-C",
-      worktree,
-      "commit",
-      "-m",
-      subject,
-      "-m",
-      body,
-      "--",
-      ...NON_TRACKER_PATHS,
-    ]);
-    return true;
-  }
-
   async function checkStrandedWrites(entry, project) {
     if (project.tracker === "none" || !entry.record.worktreePath) return;
     // Stranded means the AGENT wrote tracker state inside the worktree: any
@@ -5098,13 +5081,32 @@ export function createDispatcher({
     }
     const agent = getAgent(entry.record.lane);
     try {
-      await commitCompletedAgentWork(entry, agent, entry.result?.summary || exitSummary);
+      const finalized = await resultFinalizer({
+        worktreePath: entry.record.worktreePath,
+        baseCommit: entry.record.baseCommit,
+        runGit: (args) => commandRunner("git", args),
+      });
+      const previousVersion = Number.isInteger(entry.record.result?.version)
+        ? entry.record.result.version
+        : 1;
+      entry.record.result = {
+        commit: finalized.resultCommit,
+        tree: finalized.resultTree,
+        base: finalized.baseCommit,
+        manifest: finalized.manifest,
+        workspaceClean: finalized.workspaceClean,
+        selfCommitted: agent.capabilities.commitsOwnWork === true,
+        commitCreated: finalized.commitCreated,
+        finalizedAt: new Date().toISOString(),
+        version: previousVersion,
+      };
+      persist(entry);
     } catch (error) {
       if (entry.record.state === "stopping") {
         transition(entry, "stopped", { exitSummary: "stopped by user" });
       } else {
         transition(entry, "failed", {
-          exitSummary: `Atelier could not commit completed ${agent.displayName} work: ${error.message}`,
+          exitSummary: `Atelier could not finalize completed ${agent.displayName} result [${error.code || "ERESULT_UNKNOWN"}]: ${error.message}`,
         });
       }
       await settleQueueOutcome(entry, project);
@@ -6335,6 +6337,7 @@ export function createDispatcher({
       plan: opts.planFirst ? { state: "planning", text: "" } : null,
       strandedBrWrites: false,
       outcome: null,
+      result: null,
       verify: null,
       postMerge: null,
       review: null,
@@ -7404,10 +7407,10 @@ ${diff}`;
       // until a new turn is genuinely running, so a resume that never spawns still
       // shows the operator what was asked.
       if (entry.record.outcome) entry.clearOutcomeOnRunning = true;
+      invalidateResult(entry, "dispatch resumed for new work");
       transition(entry, "resuming", {
         endedAt: null,
         exitSummary: "",
-        verify: null,
         restartResumeConflict: null,
         // A restart during THIS resumed turn must never let a future boot
         // reattach the OLD (already-finished) companion job (finding 4) - the
@@ -7557,10 +7560,10 @@ ${diff}`;
       entry.result = undefined;
       entry.stderrLines = [];
       if (entry.record.outcome) entry.clearOutcomeOnRunning = true;
+      invalidateResult(entry, `plan ${action} continued into new work`);
       transition(entry, "resuming", {
         endedAt: null,
         exitSummary: "",
-        verify: null,
       });
       emit(entry, { type: "reply", text: resumeText });
       logEvent("dispatch.plan", {
@@ -9883,6 +9886,10 @@ export function _setSpawner(nextSpawner = spawnTracked) {
 
 export function _setRunFile(nextRunner = runFile) {
   commandRunner = nextRunner;
+}
+
+export function _setResultFinalizer(nextFinalizer = finalizeResult) {
+  resultFinalizer = nextFinalizer;
 }
 
 export function _setProbe(nextProbe = probeProject) {

@@ -25,6 +25,7 @@ import {
   _setPostMergeFileOps,
   _setPostMergeHooks,
   _setProbe,
+  _setResultFinalizer,
   _setRunFile,
   _setSpawner,
   createDispatcher,
@@ -68,6 +69,14 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
   // flake in CI.
   const dispatchers = [];
   _setCodexModelFileOps({ readFileSync: () => 'model = "gpt-5.6-fixture"\n' });
+  _setResultFinalizer(async ({ baseCommit }) => ({
+    resultCommit: "1111111111111111111111111111111111111111",
+    resultTree: "2222222222222222222222222222222222222222",
+    baseCommit: baseCommit ?? "1111111111111111111111111111111111111111",
+    manifest: [],
+    workspaceClean: true,
+    commitCreated: false,
+  }));
   t.after(async () => {
     for (const dispatcher of dispatchers) {
       await dispatcher.shutdown({ graceMs: 0 }).catch(() => {});
@@ -75,6 +84,7 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
     _setBrResolver();
     _setSpawner();
     _setRunFile();
+    _setResultFinalizer();
     _setProbe();
     _setCompanionResolver();
     _setCodexModelFileOps();
