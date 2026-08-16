@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Atelier fake-agent scenario",
+  "type": "object",
+  "required": ["steps"],
+  "additionalProperties": false,
+  "properties": {
+    "sessionRef": { "type": "string", "minLength": 1 },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "enum": [
+              "write", "stage", "commit", "amend", "reset", "leave_dirty",
+              "request_input", "sleep", "spawn_child", "spawn_detached", "crash",
+              "resume_marker", "mutate_during_verify", "emit", "forge_review",
+              "report_usage"
+            ]
+          },
+          "path": { "type": "string" },
+          "content": { "type": "string" },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "content"],
+              "properties": {
+                "path": { "type": "string" },
+                "content": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "paths": { "type": "array", "items": { "type": "string" } },
+          "message": { "type": "string" },
+          "mode": { "enum": ["soft", "mixed", "hard"] },
+          "ref": { "type": "string" },
+          "ms": { "type": "integer", "minimum": 0 },
+          "code": { "type": "integer", "minimum": 1, "maximum": 255 },
+          "signal": { "type": "string" },
+          "sessionRef": { "type": "string" },
+          "watcherPath": { "type": "string" },
+          "receiptPath": { "type": "string" },
+          "writes": { "type": "array" },
+          "event": {},
+          "turns": { "type": "number" },
+          "costUSD": { "type": "number" },
+          "inputTokens": { "type": "number" },
+          "outputTokens": { "type": "number" },
+          "result": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

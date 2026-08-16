@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Browser tests are intentionally excluded: this first proof rail has no Chrome dependency.
+env:
+  ATELIER_TEST_NO_REAL_PROVIDER: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          # Minor floating within the maintained Node 24 LTS line is deliberate.
+          node-version: 24.x
+      - name: Run full Node test suite
+        run: node --test
+
+  packed-artifact:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          # Minor floating within the maintained Node 24 LTS line is deliberate.
+          node-version: 24.x
+      - name: Pack and smoke-test the installed artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack_dir="$(mktemp -d)"
+          install_dir="$(mktemp -d)"
+          config_dir="$(mktemp -d)"
+          state_dir="$(mktemp -d)"
+          shim_dir="$(mktemp -d)"
+          npm pack --pack-destination "$pack_dir"
+          cd "$install_dir"
+          npm init --yes >/dev/null
+          npm install --ignore-scripts --no-audit --no-fund "$pack_dir"/*.tgz
+          ./node_modules/.bin/atelier --help
+          ATELIER_CONFIG_DIR="$config_dir" ATELIER_STATE_DIR="$state_dir" \
+            ./node_modules/.bin/atelier init
+          printf '#!/bin/sh\nprintf "test shim 1.0\\n"\n' >"$shim_dir/br"
+          printf '#!/bin/sh\nprintf "test shim 1.0\\n"\n' >"$shim_dir/claude"
+          chmod +x "$shim_dir/br" "$shim_dir/claude"
+          PATH="$shim_dir:$PATH" ATELIER_CONFIG_DIR="$config_dir" ATELIER_STATE_DIR="$state_dir" \
+            ./node_modules/.bin/atelier doctor
