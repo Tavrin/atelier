@@ -9,6 +9,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { clientBearerToken, ensureAuthSecret } from "./lib/auth.mjs";
 import { probeProjectPath } from "./lib/capabilities.mjs";
 import { createDispatcher } from "./lib/dispatch.mjs";
 import { addProject, loadRegistry } from "./lib/registry.mjs";
@@ -18,6 +19,11 @@ import {
 } from "./lib/tracker.mjs";
 
 const execFileAsync = promisify(execFile);
+
+function authHeaders(setup, extra = {}, label = "cli") {
+  const token = clientBearerToken(label, { directory: setup.state, env: {} });
+  return { Authorization: `Bearer ${token}`, ...extra };
+}
 
 function emptyRegistry(projects = []) {
   return { version: 1, defaults: {}, groups: [], projects };
@@ -172,9 +178,9 @@ async function filesystemLayout(root, relative = "") {
   return layout;
 }
 
-async function waitForTerminal(url, id) {
+async function waitForTerminal(url, id, headers) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const response = await fetch(`${url}/api/dispatch/${encodeURIComponent(id)}`);
+    const response = await fetch(`${url}/api/dispatch/${encodeURIComponent(id)}`, { headers });
     assert.equal(response.status, 200);
     const record = await response.json();
     if (["prepare_failed", "failed", "rejected"].includes(record.state)) return record;
@@ -196,7 +202,7 @@ test("live daemon owns simultaneous CLI and HTTP dispatch record creation", asyn
   );
   const httpDispatch = fetch(`${daemon.url}/api/dispatch`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Atelier-Actor": "test" },
+    headers: authHeaders(setup, { "Content-Type": "application/json", "X-Atelier-Actor": "test" }, "api"),
     body: JSON.stringify({ project: "fixture", prompt: "http fixture" }),
   });
   const [{ stdout }, httpResponse] = await Promise.all([cliDispatch, httpDispatch]);
@@ -207,8 +213,8 @@ test("live daemon owns simultaneous CLI and HTTP dispatch record creation", asyn
   assert.notEqual(cliId, httpId);
 
   const [cliRecord, httpRecord] = await Promise.all([
-    waitForTerminal(daemon.url, cliId),
-    waitForTerminal(daemon.url, httpId),
+    waitForTerminal(daemon.url, cliId, authHeaders(setup)),
+    waitForTerminal(daemon.url, httpId, authHeaders(setup)),
   ]);
   assert.equal(cliRecord.state, "prepare_failed");
   assert.equal(httpRecord.state, "prepare_failed");
@@ -248,7 +254,8 @@ test("live daemon owns simultaneous CLI and HTTP dispatch record creation", asyn
       .map((event) => [event.dispatchId, event.actor]),
   );
   assert.equal(creationActors.get(cliId), "cli");
-  assert.equal(creationActors.get(httpId), "test");
+  // Actor derives from the bearer credential (api), not the spoofed X-Atelier-Actor header.
+  assert.equal(creationActors.get(httpId), "api");
   t.diagnostic(
     `ATT-001 proof: daemon PID ${daemon.child.pid}; CLI ${cliId} seq ${eventSequences[cliId]}; ` +
     `HTTP ${httpId} seq ${eventSequences[httpId]}; second writer ${secondWriter.code}, index unchanged`,
@@ -276,6 +283,9 @@ test("dispatch distinguishes a live lock owner from an absent daemon", async (t)
   const project = await gitProject(setup.root, "fixture");
   await writeFile(join(setup.config, "projects.json"), `${JSON.stringify(emptyRegistry([project]))}\n`);
   await mkdir(setup.state, { recursive: true });
+  // A real live daemon owns the lock AND has written its auth secret; mirror that
+  // so token minting succeeds and the client reaches the reachability check.
+  ensureAuthSecret(setup.state);
   const port = await unusedPort();
   const url = `http://127.0.0.1:${port}`;
   await writeFile(join(setup.state, "atelier.lock"), `${process.pid}\n`);
@@ -360,7 +370,7 @@ test("dispatch --follow fails promptly when SSE ends before a nonterminal dispat
   const failure = await execFileAsync(
     process.execPath,
     [resolve("bin", "atelier.mjs"), "dispatch", "fixture", "--prompt", "follow", "--follow"],
-    { cwd: resolve("."), env: cliEnv(setup), timeout: 3_000 },
+    { cwd: resolve("."), env: cliEnv(setup, { ATELIER_AUTH_TOKEN: "follow-test-token" }), timeout: 3_000 },
   ).catch((error) => error);
   assert.equal(failure.code, 1);
   assert.match(failure.stderr, /event stream ended before completion \(daemon stopped\?\)/);
@@ -400,7 +410,8 @@ test("track --yes registers through the daemon with old-path equivalent storage"
   assert.match(stdout, /Registered new-project/);
   const stored = JSON.parse(await readFile(join(setup.config, "projects.json"), "utf8"));
   assert.deepEqual(stored.projects[0], expected);
-  const projects = await fetch(`${daemon.url}/api/projects`).then((response) => response.json());
+  const projects = await fetch(`${daemon.url}/api/projects`, { headers: authHeaders(setup) })
+    .then((response) => response.json());
   assert.ok(projects.projects.some((candidate) => candidate.name === "new-project"));
   await stopDaemon(daemon);
 });
@@ -460,7 +471,7 @@ test("external trackerLocation registration matches old entry and filesystem lay
   });
   const response = await fetch(`${daemon.url}/api/projects`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Atelier-Actor": "cli" },
+    headers: authHeaders(setup, { "Content-Type": "application/json", "X-Atelier-Actor": "cli" }),
     body: JSON.stringify({
       ...project,
       archetype: "full",

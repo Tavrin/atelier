@@ -1,6 +1,6 @@
 # Atelier Security Model
 
-Atelier is a single-user, single-machine tool with no authentication. Its server
+Atelier is a single-user, single-machine tool with local authentication. Its server
 is safe to use only while it remains bound to the loopback interface. The
 threat model covers hostile web pages attempting localhost requests,
 user-controlled strings reaching subprocesses, accidental project-tree writes,
@@ -8,8 +8,13 @@ unexpected API billing, and credentials appearing in operator-visible output.
 
 ## Enforced controls
 
-1. **Loopback binding.** The server binds `127.0.0.1`, never `0.0.0.0`. Remote
-   exposure is forbidden unless an authentication design is added first.
+1. **Loopback binding and local authentication.** The server binds `127.0.0.1`,
+   never `0.0.0.0`. On first start it writes a 0600 installation secret to
+   `${ATELIER_STATE_DIR:-~/.local/state/atelier}/auth-secret`. API reads require
+   a signed bearer or browser session. Mutations additionally enforce the exact
+   loopback Host and same-origin Origin; browser mutations require the session's
+   CSRF token. Remote exposure remains forbidden.
+   This authentication does not defend against another process running as the same OS user; that boundary requires the ATT-008 OS sandbox and ATT-010 human break-glass policy.
 2. **No shell execution.** Subprocesses use `execFile` or `spawn` with explicit
    argv arrays. User strings remain single arguments and are never interpolated
    into a shell command.
@@ -20,7 +25,8 @@ unexpected API billing, and credentials appearing in operator-visible output.
 4. **Browser mutation gate.** POST and PATCH requests require
    `Content-Type: application/json` and bodies are capped at 256KB. This forces
    ordinary cross-origin browser mutations through a CORS preflight Atelier does not
-   answer.
+   answer. The UI bootstraps an HttpOnly, SameSite=Strict session cookie and
+   attaches `X-Atelier-CSRF` to mutations.
 5. **Project-tree invisibility.** Atelier keeps registry, runtime records,
    worktrees, and default tracker-only stores under XDG config/state roots. An
    explicitly selected tracker-only folder is Atelier-owned and is the sole

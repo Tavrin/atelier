@@ -157,8 +157,8 @@ exists. See the [theme author handbook](docs/THEMES.md).
 Atelier runs agents that execute code on your machine, so its boundaries are
 deliberate and documented in [SECURITY.md](docs/SECURITY.md):
 
-- Binds `127.0.0.1` explicitly. **There is no authentication** — exposing it
-  remotely is unsupported, not merely discouraged.
+- Binds `127.0.0.1` explicitly and authenticates local API clients with a
+  state-directory bearer or signed browser session. Remote exposure remains unsupported.
 - Subprocesses are executed with argv arrays. A shell is never invoked on user
   input.
 - The HTTP core enforces a JSON content-type gate, a 256 KB body cap, and
@@ -172,7 +172,7 @@ deliberate and documented in [SECURITY.md](docs/SECURITY.md):
 Atelier is **working software in active single-maintainer use**, not a 1.0. Be
 aware that:
 
-- There is no authentication, by design. It is a single-user local tool.
+- Authentication is local and single-user; it is not a remote-access design.
 - Windows support is written for but not verified end to end.
 - The `cozy-village` theme's optional Moss WebGPU renderer is a preview build
   and is opt-in; the default renderer is three.js.

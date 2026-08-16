@@ -1839,6 +1839,14 @@ async function runBrowserProbe(t, {
         response.end(page);
         return;
       }
+      if (path === "/api/session") {
+        response.writeHead(200, {
+          "content-type": "application/json; charset=utf-8",
+          "set-cookie": "atelier_session=browser-fixture; HttpOnly; SameSite=Strict; Path=/",
+        });
+        response.end('{"csrfToken":"browser-csrf-fixture"}');
+        return;
+      }
       if (path === "/api/async-owner") {
         if (asyncOwnerResponseDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, asyncOwnerResponseDelayMs));

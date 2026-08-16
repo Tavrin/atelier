@@ -1,6 +1,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
+import { clientBearerToken } from "./auth.mjs";
 import { liveInstanceOwner } from "./instance-lock.mjs";
 import { stateDir } from "./paths.mjs";
 
@@ -72,14 +73,17 @@ async function fetchDaemon(baseUrl, directory, path, options = {}) {
   }
 }
 
-async function latestEventSeq(baseUrl, directory, id) {
+async function latestEventSeq(baseUrl, directory, id, authorization) {
   const controller = new AbortController();
   try {
     const response = await fetchDaemon(
       baseUrl,
       directory,
       `/api/dispatch/${encodeURIComponent(id)}/events`,
-      { headers: { Accept: "text/event-stream" }, signal: controller.signal },
+      {
+        headers: { Accept: "text/event-stream", Authorization: authorization },
+        signal: controller.signal,
+      },
     );
     if (!response.ok) {
       await responseJson(response);
@@ -114,13 +118,18 @@ export function createCommandClient({
       "no daemon; start it with `atelier serve` / systemctl --user start atelier",
     );
   }
-  // The live filesystem lock proves daemon authority, but the HTTP responder is
-  // not authenticated against same-user spoofing until ATT-005 lands.
+  // The live filesystem lock proves daemon authority; the bearer authenticates
+  // this client to the daemon. Same-user spoofing of the HTTP responder remains
+  // out of scope for a bearer file (see ATT-008 sandbox / ATT-010 break-glass).
   baseUrl ??= atelierServerUrl({ directory });
+  const authorization = `Bearer ${clientBearerToken("cli")}`;
   let sinceSeq = 0;
   let dispatchId;
-  const request = async (path, options) =>
-    responseJson(await fetchDaemon(baseUrl, directory, path, options));
+  const request = async (path, options = {}) =>
+    responseJson(await fetchDaemon(baseUrl, directory, path, {
+      ...options,
+      headers: { Authorization: authorization, ...options.headers },
+    }));
   const post = (path, body) => request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Atelier-Actor": "cli" },
@@ -141,7 +150,7 @@ export function createCommandClient({
     },
     async reply(id, body) {
       dispatchId = id;
-      if (followReplies) sinceSeq = await latestEventSeq(baseUrl, directory, id);
+      if (followReplies) sinceSeq = await latestEventSeq(baseUrl, directory, id, authorization);
       return post(`/api/dispatch/${encodeURIComponent(id)}/reply`, body);
     },
     async plan(id, body) {
@@ -157,7 +166,7 @@ export function createCommandClient({
     onEvent(listener, onError, onEnd) {
       const controller = new AbortController();
       void (async () => {
-        const headers = { Accept: "text/event-stream" };
+        const headers = { Accept: "text/event-stream", Authorization: authorization };
         if (sinceSeq > 0) headers["Last-Event-ID"] = String(sinceSeq);
         const response = await fetchDaemon(
           baseUrl,

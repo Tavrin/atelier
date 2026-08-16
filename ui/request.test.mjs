@@ -1,18 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createThemeActionClient, atelierRequestOptions } from "./request.mjs";
+import {
+  createThemeActionClient,
+  atelierRequestOptions,
+  setAtelierCsrfToken,
+} from "./request.mjs";
 
 test("UI request wrapper attributes every mutating method and leaves reads unattributed", () => {
+  setAtelierCsrfToken("csrf-fixture");
   for (const method of ["POST", "PUT", "PATCH", "DELETE", "post"]) {
     const request = atelierRequestOptions({ method, body: { ok: true } });
     assert.equal(request.headers.get("X-Atelier-Actor"), "ui");
+    assert.equal(request.headers.get("X-Atelier-CSRF"), "csrf-fixture");
     assert.equal(request.headers.get("Content-Type"), "application/json");
     assert.equal(request.body, '{"ok":true}');
   }
 
   const read = atelierRequestOptions();
   assert.equal(read.headers.has("X-Atelier-Actor"), false, "GET is the negative control");
+  assert.equal(read.headers.has("X-Atelier-CSRF"), false);
   assert.equal(read.headers.has("Content-Type"), false);
 });
 
@@ -33,6 +40,7 @@ test("theme action client reuses Atelier request encoding and attributes mutatio
 
   assert.equal(calls[0].path, "/api/dispatch/one/merge");
   assert.equal(calls[0].options.headers.get("X-Atelier-Actor"), "theme:forest-town");
+  assert.equal(calls[0].options.headers.get("X-Atelier-CSRF"), "csrf-fixture");
   assert.equal(calls[0].options.headers.get("Content-Type"), "application/json");
   assert.equal(calls[0].options.body, '{"force":false}');
   assert.equal(

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -9,9 +9,11 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { _clearProbeCache } from "./lib/capabilities.mjs";
 import { _setModelFileOps } from "./lib/agents/codex.mjs";
+import { ensureAuthSecret, mintBearerToken } from "./lib/auth.mjs";
 import {
   createDispatcher,
   _setProbe as _setDispatchProbe,
@@ -27,6 +29,22 @@ import { CHRONICLE_LIMIT } from "./lib/world-contract.mjs";
 import { createServer, listenLoopback, shutdownServer } from "./server.mjs";
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "ui");
+const execFileAsync = promisify(execFile);
+const authByPort = new Map();
+
+function registerServerAuth(port, directory) {
+  const secret = ensureAuthSecret(directory);
+  const tokens = Object.fromEntries(
+    ["api", "cli", "mcp"].map((label) => [label, mintBearerToken(secret, label)]),
+  );
+  authByPort.set(port, tokens);
+  return tokens;
+}
+
+function authenticatedHeaders(port, headers = {}) {
+  const token = authByPort.get(port)?.api;
+  return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers };
+}
 
 async function gitProject(root, name, tracker) {
   const path = join(root, name);
@@ -305,7 +323,12 @@ function boardEventsStub() {
 
 function readSseReplay(port, path, headers = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const request = httpRequest({ host: "127.0.0.1", port, path, headers }, (response) => {
+    const request = httpRequest({
+      host: "127.0.0.1",
+      port,
+      path,
+      headers: authenticatedHeaders(port, headers),
+    }, (response) => {
       let data = "";
       response.on("data", (chunk) => {
         data += chunk.toString("utf8");
@@ -321,11 +344,26 @@ function readSseReplay(port, path, headers = {}) {
   });
 }
 
-function send(port, { method = "GET", path = "/", body, contentType, actor } = {}) {
+function send(port, {
+  method = "GET",
+  path = "/",
+  body,
+  contentType,
+  actor,
+  authenticated = true,
+  credential = "api",
+  cookie,
+  csrf,
+  headers: suppliedHeaders = {},
+} = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const headers = {};
+    const headers = { ...suppliedHeaders };
+    const token = authByPort.get(port)?.[credential];
+    if (authenticated && token) headers.Authorization = `Bearer ${token}`;
     if (contentType) headers["Content-Type"] = contentType;
     if (actor !== undefined) headers["X-Atelier-Actor"] = actor;
+    if (cookie !== undefined) headers.Cookie = cookie;
+    if (csrf !== undefined) headers["X-Atelier-CSRF"] = csrf;
     if (body !== undefined) headers["Content-Length"] = Buffer.byteLength(body);
     const request = httpRequest(
       { host: "127.0.0.1", port, method, path, headers },
@@ -373,6 +411,8 @@ async function serverFixture(
     uiDir,
     themesDir,
     codexSweepIntervalMs,
+    eventStreamGlobalLimit,
+    eventStreamPerCredentialLimit,
     beforeCreateServer,
   } = {},
 ) {
@@ -409,8 +449,11 @@ async function serverFixture(
     uiDir,
     themesDir,
     ...(codexSweepIntervalMs === undefined ? {} : { codexSweepIntervalMs }),
+    ...(eventStreamGlobalLimit === undefined ? {} : { eventStreamGlobalLimit }),
+    ...(eventStreamPerCredentialLimit === undefined ? {} : { eventStreamPerCredentialLimit }),
   });
   const address = await listenLoopback(server, 0);
+  registerServerAuth(address.port, atelierStateDir);
   _setModelFileOps({ readFileSync: () => 'model = "gpt-5.6-server-fixture"\n' });
   _clearProbeCache();
   t.after(async () => {
@@ -418,6 +461,7 @@ async function serverFixture(
     _setTrackerBrResolver();
     _setModelFileOps();
     _clearProbeCache();
+    authByPort.delete(address.port);
     server.close();
     await once(server, "close").catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -434,8 +478,162 @@ async function serverFixture(
     boardEvents,
     tracked,
     degraded,
+    auth: authByPort.get(address.port),
   };
 }
+
+async function browserSession(port) {
+  const response = await send(port, { path: "/api/session", authenticated: false });
+  assert.equal(response.status, 200);
+  const setCookie = Array.isArray(response.headers["set-cookie"])
+    ? response.headers["set-cookie"][0]
+    : response.headers["set-cookie"];
+  return {
+    cookie: setCookie.split(";", 1)[0],
+    csrf: JSON.parse(response.text).csrfToken,
+  };
+}
+
+test("API authentication enforces the bearer, browser CSRF, Host, and Origin matrix", async (t) => {
+  const actors = [];
+  const dispatcher = {
+    ...dispatcherStub(),
+    async dispatch(_body, context) {
+      actors.push(context.actor);
+      return { id: `dispatch-${actors.length}`, actor: context.actor };
+    },
+  };
+  const { port } = await serverFixture(t, { dispatcher });
+
+  assert.equal((await send(port, { path: "/", authenticated: false })).status, 200);
+  assert.equal((await send(port, { path: "/api/projects", authenticated: false })).status, 401);
+  assert.equal((await send(port, { path: "/api/projects" })).status, 200);
+
+  const unauthenticated = await send(port, {
+    method: "POST",
+    path: "/api/dispatch",
+    body: JSON.stringify({ project: "tracked", prompt: "blocked" }),
+    contentType: "application/json",
+    authenticated: false,
+  });
+  assert.equal(unauthenticated.status, 401);
+
+  const bearer = await send(port, {
+    method: "POST",
+    path: "/api/dispatch",
+    body: JSON.stringify({ project: "tracked", prompt: "allowed" }),
+    contentType: "application/json",
+  });
+  assert.equal(bearer.status, 202);
+  assert.equal(JSON.parse(bearer.text).actor, "api");
+
+  const session = await browserSession(port);
+  assert.equal((await send(port, {
+    path: "/api/projects",
+    authenticated: false,
+    cookie: session.cookie,
+  })).status, 200);
+  for (const csrf of [undefined, "wrong-token"]) {
+    const rejected = await send(port, {
+      method: "POST",
+      path: "/api/dispatch",
+      body: JSON.stringify({ project: "tracked", prompt: "blocked browser" }),
+      contentType: "application/json",
+      authenticated: false,
+      cookie: session.cookie,
+      csrf,
+    });
+    assert.equal(rejected.status, 401);
+  }
+  const browser = await send(port, {
+    method: "POST",
+    path: "/api/dispatch",
+    body: JSON.stringify({ project: "tracked", prompt: "allowed browser" }),
+    contentType: "application/json",
+    authenticated: false,
+    cookie: session.cookie,
+    csrf: session.csrf,
+    headers: { Origin: `http://127.0.0.1:${port}` },
+  });
+  assert.equal(browser.status, 202);
+  assert.equal(JSON.parse(browser.text).actor, "human-ui");
+
+  for (const headers of [
+    { Host: `evil.invalid:${port}` },
+    { Origin: "http://evil.invalid" },
+  ]) {
+    const hostile = await send(port, {
+      method: "POST",
+      path: "/api/dispatch",
+      body: JSON.stringify({ project: "tracked", prompt: "hostile" }),
+      contentType: "application/json",
+      headers,
+    });
+    assert.equal(hostile.status, 403);
+  }
+
+  const spoofedMcp = await send(port, {
+    method: "POST",
+    path: "/api/dispatch",
+    body: JSON.stringify({ project: "tracked", prompt: "mcp" }),
+    contentType: "application/json",
+    credential: "mcp",
+    actor: "human",
+  });
+  assert.equal(spoofedMcp.status, 202);
+  assert.equal(JSON.parse(spoofedMcp.text).actor, "mcp");
+  assert.deepEqual(actors, ["api", "human-ui", "mcp"]);
+});
+
+test("MCP bearer cannot exercise server-side force authority", async (t) => {
+  const { port, dispatcher } = await serverFixture(t);
+  const response = await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/merge",
+    body: JSON.stringify({
+      force: true,
+      forcedBy: "spoofed-human",
+      reason: "override",
+      dispositionRef: "none",
+    }),
+    contentType: "application/json",
+    credential: "mcp",
+    actor: "human",
+  });
+
+  assert.equal(response.status, 409);
+  assert.match(JSON.parse(response.text).error, /human break-glass policy/);
+  assert.deepEqual(dispatcher._merges, []);
+});
+
+test("atelier reply reads the live daemon bearer from its disposable state directory", async (t) => {
+  const replies = [];
+  const dispatcher = {
+    ...dispatcherStub(),
+    async reply(id, options) {
+      replies.push({ id, ...options });
+      return { id, state: "running" };
+    },
+  };
+  const { port, atelierStateDir } = await serverFixture(t, { dispatcher });
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "atelier.mjs"),
+      "reply", "dispatch-1", "continue"],
+    {
+      cwd: join(dirname(fileURLToPath(import.meta.url)), ".."),
+      env: {
+        ...process.env,
+        PORT: String(port),
+        ATELIER_STATE_DIR: atelierStateDir,
+        ATELIER_AUTH_TOKEN: "",
+      },
+    },
+  );
+
+  assert.match(stdout, /"state":"running"/);
+  assert.deepEqual(replies, [{ id: "dispatch-1", text: "continue", actor: "cli" }]);
+});
 
 test("server enforces JSON gates, body cap, API 404s and degraded tracker gate", async (t) => {
   const { port, address } = await serverFixture(t);
@@ -1460,7 +1658,9 @@ test("fresh install serves, probes, creates, and uses a project without hand-edi
     atelierStateDir,
   });
   const address = await listenLoopback(server, 0);
+  registerServerAuth(address.port, atelierStateDir);
   t.after(async () => {
+    authByPort.delete(address.port);
     server.close();
     await once(server, "close").catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -1754,6 +1954,39 @@ test("project PATCH atomically updates only mutable settings and mutates the liv
   );
 });
 
+test("MCP credentials cannot change gate-critical settings but retain benign settings", async (t) => {
+  const { port, registry } = await serverFixture(t);
+  const gateFields = [
+    ["requireReview", true],
+    ["reviewPolicy", "tiered"],
+    ["budgetUSDPerDay", 10],
+    ["unpricedDispatchCapPerDay", 3],
+  ];
+
+  for (const [field, value] of gateFields) {
+    const response = await send(port, {
+      method: "PATCH",
+      path: "/api/projects/tracked",
+      body: JSON.stringify({ [field]: value }),
+      contentType: "application/json",
+      credential: "mcp",
+    });
+    assert.equal(response.status, 403, field);
+    assert.match(JSON.parse(response.text).error, /human\/UI authority/);
+    assert.equal(Object.hasOwn(registry.projects[0], field), false);
+  }
+
+  const benign = await send(port, {
+    method: "PATCH",
+    path: "/api/projects/tracked",
+    body: JSON.stringify({ notes: "Updated through MCP" }),
+    contentType: "application/json",
+    credential: "mcp",
+  });
+  assert.equal(benign.status, 200);
+  assert.equal(registry.projects[0].notes, "Updated through MCP");
+});
+
 test("queueFailureLimit parking changes immediately reach board SSE without a tracker write", async (t) => {
   const boardEvents = boardEventsStub();
   const setup = await serverFixture(t, {
@@ -1785,7 +2018,12 @@ test("queueFailureLimit parking changes immediately reach board SSE without a tr
   let patchPromise;
   const boardEvent = new Promise((resolvePromise, rejectPromise) => {
     const request = httpRequest(
-      { host: "127.0.0.1", port: setup.port, path: "/api/board/events" },
+      {
+        host: "127.0.0.1",
+        port: setup.port,
+        path: "/api/board/events",
+        headers: authenticatedHeaders(setup.port),
+      },
       (response) => {
         let data = "";
         response.on("data", (chunk) => {
@@ -2273,14 +2511,14 @@ test("review route creates a linked read-only dispatch and forwards force", asyn
   assert.deepEqual(dispatcher._reviews, [{ id: "dispatch-1", force: true, actor: "api" }]);
 });
 
-test("review disposition API requires and round-trips an explicit human actor", async (t) => {
+test("review disposition records only the authenticated credential identity", async (t) => {
   const { port, dispatcher } = await serverFixture(t);
   const body = {
     findingRef: "round-2:finding-3",
     disposition: "redirected",
     redirectTicket: "atelier-gg0",
     note: "This subsystem is owned by the redirect ticket.",
-    actor: "maintainer",
+    actor: "different-body-identity",
   };
   const response = await send(port, {
     method: "POST",
@@ -2289,10 +2527,21 @@ test("review disposition API requires and round-trips an explicit human actor", 
     contentType: "application/json",
   });
   assert.equal(response.status, 200);
-  assert.deepEqual(dispatcher._reviewDispositions, [{ id: "dispatch-1", ...body }]);
+  assert.deepEqual(dispatcher._reviewDispositions, [{
+    id: "dispatch-1",
+    findingRef: body.findingRef,
+    disposition: body.disposition,
+    redirectTicket: body.redirectTicket,
+    note: body.note,
+    actor: "api",
+  }]);
   assert.deepEqual(JSON.parse(response.text).reviewDispositions[0], {
     ref: "disposition-1",
-    ...body,
+    findingRef: body.findingRef,
+    disposition: body.disposition,
+    redirectTicket: body.redirectTicket,
+    note: body.note,
+    actor: "api",
     at: "2026-07-31T00:00:00.000Z",
   });
 
@@ -2321,14 +2570,15 @@ test("review disposition API requires and round-trips an explicit human actor", 
     "the API appends a superseding ruling without rewriting history",
   );
 
-  const missingActor = await send(port, {
+  const credentialOnly = await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/review-disposition",
     body: JSON.stringify({ ...body, actor: undefined }),
     contentType: "application/json",
+    credential: "mcp",
   });
-  assert.equal(missingActor.status, 400);
-  assert.match(JSON.parse(missingActor.text).error, /actor/);
+  assert.equal(credentialOnly.status, 200);
+  assert.equal(JSON.parse(credentialOnly.text).reviewDispositions[2].actor, "mcp");
 });
 
 test("verify route admits a re-run, reports it as started, and rejects unknown fields", async (t) => {
@@ -2747,6 +2997,32 @@ test("move-tracker route moves both directions, smokes br, and returns user-owne
   assert.equal(calls.some((call) => call.file === "git"), false);
   const stored = JSON.parse(await readFile(setup.registryPath, "utf8"));
   assert.equal("trackerPath" in stored.projects.find((project) => project.name === "tracked"), false);
+});
+
+test("move-tracker CLI uses the state-dir bearer against the guarded daemon", async (t) => {
+  const setup = await serverFixture(t, {
+    commandRunner: async () => "",
+    brExecutable: "/fixture/br",
+  });
+  for (const record of setup.dispatcher._records) record.state = "completed";
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "atelier.mjs"),
+      "move-tracker", "tracked", "--to", "external"],
+    {
+      cwd: join(dirname(fileURLToPath(import.meta.url)), ".."),
+      env: {
+        ...process.env,
+        PORT: String(setup.port),
+        ATELIER_STATE_DIR: setup.atelierStateDir,
+        ATELIER_AUTH_TOKEN: "",
+      },
+    },
+  );
+
+  assert.match(stdout, /Moved tracked tracker to external/);
+  assert.equal(setup.registry.projects[0].tracker, "personal");
 });
 
 test("move-tracker route refuses active dispatches and a running queue drain", async (t) => {
@@ -3709,7 +3985,12 @@ test("dispatch SSE has replay headers and an immediate heartbeat frame", async (
   const { port } = await serverFixture(t);
   const firstChunk = await new Promise((resolvePromise, rejectPromise) => {
     const request = httpRequest(
-      { host: "127.0.0.1", port, path: "/api/dispatch/dispatch-1/events" },
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/api/dispatch/dispatch-1/events",
+        headers: authenticatedHeaders(port),
+      },
       (response) => {
         let data = "";
         response.on("data", (chunk) => {
@@ -3735,7 +4016,7 @@ test("dispatch SSE has replay headers and an immediate heartbeat frame", async (
         host: "127.0.0.1",
         port,
         path: "/api/dispatch/dispatch-1/events",
-        headers: { "Last-Event-ID": "1" },
+        headers: authenticatedHeaders(port, { "Last-Event-ID": "1" }),
       },
       (response) => {
         let data = "";
@@ -3753,6 +4034,58 @@ test("dispatch SSE has replay headers and an immediate heartbeat frame", async (
     request.end();
   });
   assert.match(heartbeat, /: heartbeat/);
+});
+
+test("event streams enforce per-credential and global connection caps", async (t) => {
+  const setup = await serverFixture(t, {
+    eventStreamGlobalLimit: 2,
+    eventStreamPerCredentialLimit: 1,
+  });
+  const openStream = (path, credential) => new Promise((resolvePromise, rejectPromise) => {
+    const request = httpRequest({
+      host: "127.0.0.1",
+      port: setup.port,
+      path,
+      headers: {
+        Authorization: `Bearer ${setup.auth[credential]}`,
+        Accept: "text/event-stream",
+      },
+    }, (response) => {
+      let data = "";
+      response.on("data", (chunk) => {
+        data += chunk.toString("utf8");
+        if (data.includes(": heartbeat\n\n")) resolvePromise({ request, response });
+      });
+    });
+    request.on("error", rejectPromise);
+    request.end();
+  });
+
+  const first = await openStream("/api/dispatch/dispatch-1/events", "api");
+  const sameCredential = await send(setup.port, {
+    path: "/api/board/events",
+    credential: "api",
+  });
+  assert.equal(sameCredential.status, 429);
+  assert.match(JSON.parse(sameCredential.text).error, /credential limit/);
+
+  const second = await openStream("/api/board/events", "mcp");
+  const global = await send(setup.port, {
+    path: "/api/dispatches/events",
+    credential: "cli",
+  });
+  assert.equal(global.status, 429);
+  assert.match(JSON.parse(global.text).error, /connection limit/);
+
+  const liveEvent = new Promise((resolvePromise) => {
+    second.response.on("data", (chunk) => {
+      if (chunk.toString("utf8").includes('\"project\":\"tracked\"')) resolvePromise();
+    });
+  });
+  setup.boardEvents.emit({ type: "board", project: "tracked" });
+  await liveEvent;
+  first.response.destroy();
+  second.response.destroy();
 });
 
 test("board SSE emits the new channel shape and an immediate heartbeat", async (t) => {
@@ -3776,7 +4109,12 @@ test("board SSE emits the new channel shape and an immediate heartbeat", async (
 
   const received = await new Promise((resolvePromise, rejectPromise) => {
     const request = httpRequest(
-      { host: "127.0.0.1", port, path: "/api/board/events" },
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/api/board/events",
+        headers: authenticatedHeaders(port),
+      },
       (response) => {
         let data = "";
         response.on("data", (chunk) => {
@@ -3805,6 +4143,8 @@ test("board SSE emits the new channel shape and an immediate heartbeat", async (
 });
 
 test("graceful shutdown ends SSE streams and closes board event resources", async (t) => {
+  const atelierStateDir = await mkdtemp(join(tmpdir(), "atelier-server-shutdown-"));
+  t.after(() => rm(atelierStateDir, { recursive: true, force: true }));
   const boardEvents = boardEventsStub();
   let boardCloseCalls = 0;
   boardEvents.close = () => {
@@ -3814,14 +4154,22 @@ test("graceful shutdown ends SSE streams and closes board event resources", asyn
     registry: { version: 1, defaults: {}, groups: [], projects: [] },
     dispatcher: dispatcherStub(),
     boardEvents,
+    atelierStateDir,
   });
   const { port } = await listenLoopback(server, 0);
+  registerServerAuth(port, atelierStateDir);
   t.after(async () => {
+    authByPort.delete(port);
     if (server.listening) await shutdownServer(server);
   });
 
   const openStream = (path) => new Promise((resolvePromise, rejectPromise) => {
-    const request = httpRequest({ host: "127.0.0.1", port, path }, (response) => {
+    const request = httpRequest({
+      host: "127.0.0.1",
+      port,
+      path,
+      headers: authenticatedHeaders(port),
+    }, (response) => {
       response.on("data", (chunk) => {
         if (chunk.toString("utf8").includes(": heartbeat\n\n")) resolvePromise(response);
       });
@@ -3845,7 +4193,9 @@ test("graceful shutdown ends SSE streams and closes board event resources", asyn
   assert.equal(server.listening, false);
 });
 
-test("graceful shutdown asks the dispatcher to stop children and awaits it", async () => {
+test("graceful shutdown asks the dispatcher to stop children and awaits it", async (t) => {
+  const atelierStateDir = await mkdtemp(join(tmpdir(), "atelier-server-shutdown-"));
+  t.after(() => rm(atelierStateDir, { recursive: true, force: true }));
   let releaseDispatcher;
   let receivedGraceMs;
   let eventLogFlushes = 0;
@@ -3863,6 +4213,7 @@ test("graceful shutdown asks the dispatcher to stop children and awaits it", asy
     registry: { version: 1, defaults: {}, groups: [], projects: [] },
     dispatcher,
     boardEvents: boardEventsStub(),
+    atelierStateDir,
     eventLog: {
       append() {},
       _flush() {
@@ -3887,7 +4238,9 @@ test("graceful shutdown asks the dispatcher to stop children and awaits it", asy
   assert.equal(server.listening, false);
 });
 
-test("graceful shutdown stops accepting connections before the dispatcher's async shutdown resolves (finding 5)", async () => {
+test("graceful shutdown stops accepting connections before the dispatcher's async shutdown resolves (finding 5)", async (t) => {
+  const atelierStateDir = await mkdtemp(join(tmpdir(), "atelier-server-shutdown-"));
+  t.after(() => rm(atelierStateDir, { recursive: true, force: true }));
   let releaseDispatcher;
   const dispatcherStopped = new Promise((resolvePromise) => {
     releaseDispatcher = resolvePromise;
@@ -3902,6 +4255,7 @@ test("graceful shutdown stops accepting connections before the dispatcher's asyn
     registry: { version: 1, defaults: {}, groups: [], projects: [] },
     dispatcher,
     boardEvents: boardEventsStub(),
+    atelierStateDir,
   });
   const { port } = await listenLoopback(server, 0);
 
@@ -4442,7 +4796,7 @@ test("GET /api/logs exposes the processing cap without truncating an in-cap resu
   assert.equal(newest.truncated, undefined, "complete in-cap searches omit the warning");
 });
 
-test("a settings change is logged with its actor and a redacted field diff", async (t) => {
+test("a settings change is logged with its credential actor and a redacted field diff", async (t) => {
   const { port, atelierStateDir } = await serverFixture(t);
   const { createEventLog } = await import("./lib/event-log.mjs");
 
@@ -4460,7 +4814,7 @@ test("a settings change is logged with its actor and a redacted field diff", asy
 
   const events = createEventLog({ stateDir: atelierStateDir }).read({ kind: "registry.change" });
   assert.equal(events.length, 1);
-  assert.equal(events[0].actor, "ui");
+  assert.equal(events[0].actor, "api");
   assert.equal(events[0].action, "update");
   assert.equal(events[0].project, "tracked");
   assert.deepEqual(Object.keys(events[0].changes).sort(), ["budgetUSDPerDay", "notes"]);
@@ -4485,7 +4839,7 @@ test("an unrecognized actor header degrades to api instead of being persisted", 
   assert.equal(events[0].actor, "api");
 });
 
-test("theme actor headers retain bounded theme:<id> provenance", async (t) => {
+test("theme actor headers cannot replace the authenticated identity", async (t) => {
   const { port, atelierStateDir } = await serverFixture(t);
   const { createEventLog } = await import("./lib/event-log.mjs");
 
@@ -4498,7 +4852,7 @@ test("theme actor headers retain bounded theme:<id> provenance", async (t) => {
   });
   assert.equal(patched.status, 200);
   const events = createEventLog({ stateDir: atelierStateDir }).read({ kind: "registry.change" });
-  assert.equal(events[0].actor, "theme:forest-town");
+  assert.equal(events[0].actor, "api");
 });
 
 test("every dispatch mutation route threads one validated actor context", async (t) => {
@@ -4544,15 +4898,15 @@ test("every dispatch mutation route threads one validated actor context", async 
   assert.deepEqual(
     calls.map(([method, context]) => [method, context.actor]),
     [
-      ["dispatch", "theme:forest-town"],
-      ["stop", "theme:forest-town"],
-      ["reply", "theme:forest-town"],
-      ["plan", "theme:forest-town"],
-      ["merge", "theme:forest-town"],
-      ["review", "theme:forest-town"],
-      ["rerunVerification", "theme:forest-town"],
-      ["dismiss", "theme:forest-town"],
-      ["acknowledgePostMergeFailure", "theme:forest-town"],
+      ["dispatch", "api"],
+      ["stop", "api"],
+      ["reply", "api"],
+      ["plan", "api"],
+      ["merge", "api"],
+      ["review", "api"],
+      ["rerunVerification", "api"],
+      ["dismiss", "api"],
+      ["acknowledgePostMergeFailure", "api"],
       ["stop", "api"],
     ],
   );
@@ -4583,6 +4937,7 @@ test("queue toggles carry the requesting actor into the dispatcher", async (t) =
     path: "/api/projects/tracked/queue",
     body: JSON.stringify({ enabled: false }),
     contentType: "application/json",
+    credential: "mcp",
     actor: "mcp",
   });
   await send(port, {
@@ -4611,12 +4966,14 @@ test("project add and remove are recorded with their actor", async (t) => {
       notes: "openai_api_key=must-not-survive-removal",
     }),
     contentType: "application/json",
+    credential: "cli",
     actor: "cli",
   });
   assert.equal(created.status, 201);
   const removed = await send(port, {
     method: "DELETE",
     path: "/api/projects/logged-project",
+    credential: "mcp",
     actor: "mcp",
   });
   assert.equal(removed.status, 200);

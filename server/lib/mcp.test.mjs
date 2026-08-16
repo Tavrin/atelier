@@ -21,6 +21,7 @@ async function exchange(messages, fetchImpl = async () => {
     output,
     fetchImpl,
     baseUrl: "http://127.0.0.1:55170",
+    authToken: "fixture-token",
   });
   input.end(`${messages.map((message) => JSON.stringify(message)).join("\n")}\n`);
   await done;
@@ -118,6 +119,24 @@ test("MCP tool inventory and annotations match the shared agent/UI parity manife
       .inputSchema.properties.fields.description,
     /queueFailureLimit/,
   );
+  for (const name of [
+    "atelier_dispatch_start",
+    "atelier_bakeoff_start",
+    "atelier_reply",
+    "atelier_plan_action",
+    "atelier_review",
+    "atelier_merge",
+  ]) {
+    assert.equal(
+      Object.hasOwn(tools.find((tool) => tool.name === name).inputSchema.properties, "force"),
+      false,
+      `${name} must not advertise force authority`,
+    );
+    assert.deepEqual(
+      AGENT_UI_CAPABILITY_MANIFEST.find((capability) => capability.tool === name).mcpExcluded,
+      ["force"],
+    );
+  }
 });
 
 test("atelier_settings_patch fields schema covers every MUTABLE_SETTINGS key (atelier-def anti-drift)", async () => {
@@ -224,7 +243,6 @@ test("parity tools proxy chronicle, ticket action, bake-off, main-health, agents
     toolCall(8, "atelier_bakeoff_start", {
       project: "atelier fixture",
       ticketId: "atelier-3",
-      force: true,
     }),
     toolCall(9, "atelier_main_health_ack", { id: "dispatch one" }),
   ), async (url, options) => {
@@ -265,7 +283,6 @@ test("parity tools proxy chronicle, ticket action, bake-off, main-health, agents
         project: "atelier fixture",
         ticketId: "atelier-3",
         lanes: ["claude", "codex"],
-        force: true,
       },
     },
     {
@@ -481,10 +498,13 @@ test("atelier_verify_rerun proxies the verification re-run endpoint and validate
   assert.match(responses[3].error.message, /Unknown argument field: force/);
 });
 
-test("atelier_review proxies the linked review endpoint", async () => {
+test("atelier_review proxies normally and rejects force before HTTP", async () => {
   const requests = [];
   const responses = await exchange(
-    handshake(toolCall(2, "atelier_review", { id: "dispatch-1", force: true })),
+    handshake(
+      toolCall(2, "atelier_review", { id: "dispatch-1" }),
+      toolCall(3, "atelier_review", { id: "dispatch-1", force: true }),
+    ),
     async (url, options) => {
       requests.push({ url, options });
       return new Response(JSON.stringify({ id: "review-1" }), {
@@ -496,11 +516,13 @@ test("atelier_review proxies the linked review endpoint", async () => {
 
   assert.equal(requests[0].url, "http://127.0.0.1:55170/api/dispatch/dispatch-1/review");
   assert.equal(requests[0].options.method, "POST");
-  assert.deepEqual(JSON.parse(requests[0].options.body), { force: true });
+  assert.deepEqual(JSON.parse(requests[0].options.body), {});
   assert.equal(responses[1].result.isError, false);
+  assert.equal(responses[2].error.code, -32602);
+  assert.match(responses[2].error.message, /Unknown argument field: force/);
 });
 
-test("atelier_review_disposition round-trips the mandatory actor and append payload", async () => {
+test("atelier_review_disposition omits caller-supplied actor identity", async () => {
   const requests = [];
   const disposition = {
     ref: "disposition-1",
@@ -517,13 +539,13 @@ test("atelier_review_disposition round-trips the mandatory actor and append payl
         findingRef: disposition.findingRef,
         disposition: disposition.disposition,
         note: disposition.note,
-        actor: disposition.actor,
       }),
       toolCall(3, "atelier_review_disposition", {
         id: "dispatch-1",
         findingRef: disposition.findingRef,
         disposition: "accepted",
-        note: "Missing actor must fail schema validation.",
+        note: "Credential identity is sufficient.",
+        actor: disposition.actor,
       }),
     ),
     async (url, options) => {
@@ -547,30 +569,26 @@ test("atelier_review_disposition round-trips the mandatory actor and append payl
     findingRef: disposition.findingRef,
     disposition: disposition.disposition,
     note: disposition.note,
-    actor: disposition.actor,
   });
   assert.deepEqual(
     JSON.parse(responses[1].result.content[0].text).reviewDispositions,
     [disposition],
   );
-  assert.match(responses[2].error.message, /Missing required argument field: actor/);
+  assert.match(responses[2].error.message, /Unknown argument field: actor/);
 });
 
-test("atelier_merge proxies the mandatory force audit triple", async () => {
+test("atelier_merge proxies ordinary merges and rejects force before HTTP", async () => {
   const requests = [];
-  const audit = {
-    force: true,
-    forcedBy: "maintainer",
-    reason: "Human authority accepts the open finding.",
-    dispositionRef: "ticket-comment-75",
-  };
   const responses = await exchange(
-    handshake(toolCall(2, "atelier_merge", { id: "dispatch-1", ...audit })),
+    handshake(
+      toolCall(2, "atelier_merge", { id: "dispatch-1" }),
+      toolCall(3, "atelier_merge", { id: "dispatch-1", force: true }),
+    ),
     async (url, options) => {
       requests.push({ url, options });
       return new Response(JSON.stringify({
         id: "dispatch-1",
-        merged: audit,
+        merged: { commit: "merged" },
       }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -578,8 +596,10 @@ test("atelier_merge proxies the mandatory force audit triple", async () => {
     },
   );
   assert.equal(requests[0].url, "http://127.0.0.1:55170/api/dispatch/dispatch-1/merge");
-  assert.deepEqual(JSON.parse(requests[0].options.body), audit);
+  assert.deepEqual(JSON.parse(requests[0].options.body), {});
   assert.equal(responses[1].result.isError, false);
+  assert.equal(responses[2].error.code, -32602);
+  assert.match(responses[2].error.message, /Unknown argument field: force/);
 });
 
 test("tools/call proxies successful JSON requests to the running loopback service", async () => {
@@ -603,6 +623,7 @@ test("tools/call proxies successful JSON requests to the running loopback servic
   assert.equal(requests[0].url, "http://127.0.0.1:55170/api/projects/atelier%20fixture/create");
   assert.equal(requests[0].options.method, "POST");
   assert.equal(requests[0].options.headers["Content-Type"], "application/json");
+  assert.equal(requests[0].options.headers.Authorization, "Bearer fixture-token");
   assert.deepEqual(JSON.parse(requests[0].options.body), {
     title: "MCP bridge",
     desc: "Proxy the service",
