@@ -685,6 +685,40 @@ function localDay(daysAgo) {
   ].join("-");
 }
 
+test("dispatcher rejects a foreign live writer before state creation while observer remains lock-free", async (t) => {
+  const setup = await fixture(t);
+  await mkdir(setup.state, { recursive: true });
+  const owner = spawn(
+    process.execPath,
+    ["-e", 'console.log("ready");setInterval(() => {}, 1000)'],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  t.after(async () => {
+    if (owner.exitCode === null && owner.signalCode === null) {
+      owner.kill("SIGKILL");
+      await once(owner, "exit").catch(() => {});
+    }
+  });
+  await once(owner.stdout, "data");
+  const lockPath = join(setup.state, "atelier.lock");
+  await writeFile(lockPath, `${owner.pid}\n`);
+
+  assert.throws(
+    () => createDispatcher({ registry: setup.registry, stateDir: setup.state }),
+    (error) => error.code === "EATELIERLOCKED" && error.message.includes(`PID ${owner.pid}`),
+  );
+  assert.equal(existsSync(join(setup.state, "dispatches")), false);
+
+  const observer = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    observer: true,
+  });
+  assert.equal(await readFile(lockPath, "utf8"), `${owner.pid}\n`);
+  await observer.shutdown({ graceMs: 0 });
+  assert.equal(await readFile(lockPath, "utf8"), `${owner.pid}\n`);
+});
+
 test("dispatch runs queued -> preparing -> running -> completed with prompt posture", async (t) => {
   const setup = await fixture(t, {
     tracker: "committed",

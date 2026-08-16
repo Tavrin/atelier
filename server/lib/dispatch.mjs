@@ -54,6 +54,7 @@ import {
   runFile,
   spawnTracked,
 } from "./exec.mjs";
+import { acquireInstanceLock, liveInstanceOwner } from "./instance-lock.mjs";
 import {
   normalizeLine,
   questionShapedText,
@@ -1467,6 +1468,12 @@ export function createDispatcher({
   // which has to be side-effect-free.
   observer = false,
 }) {
+  let ownedInstanceLock;
+  if (!observer && liveInstanceOwner(stateDir) !== process.pid) {
+    // Same-process second Dispatchers deliberately remain possible. The audited
+    // defect is competing cross-process writers, and serve already owns this PID's lock.
+    ownedInstanceLock = acquireInstanceLock(stateDir);
+  }
   const dispatchDir = join(stateDir, "dispatches");
   const indexPath = join(dispatchDir, "index.jsonl");
   const queuePath = join(stateDir, "queue.json");
@@ -9806,7 +9813,7 @@ ${diff}`;
           new Promise((resolvePromise) => setTimeout(resolvePromise, remainingMs)),
         ]);
       }
-    })();
+    })().finally(() => ownedInstanceLock?.release());
     return shutdownPromise;
   }
 

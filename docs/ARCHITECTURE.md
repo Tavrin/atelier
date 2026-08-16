@@ -13,12 +13,12 @@ exact cost, headless parity, no cloud).
 - bin/atelier.mjs - CLI: init | serve | mcp | projects | track | move-tracker |
   dispatch | reply | plan | logs | doctor. `doctor
   --gc` explicitly dismisses old terminal dispatches and sweeps orphan Atelier
-  worktree directories; boot never performs this destructive cleanup. The
-  dispatch command uses the SAME code path as POST /api/dispatch (headless
-  parity is a feature, not an accident). `atelier reply` uses the running
-  loopback server's `POST /api/dispatch/:id/reply` route (port 5170, or `PORT`)
-  so it never opens a competing dispatcher over live state; `--follow` resumes
-  the dispatch SSE stream after the reply boundary.
+  worktree directories; boot never performs this destructive cleanup. Mutating
+  CLI commands including `dispatch` and project registration call the running
+  daemon's loopback API, so that daemon is the sole persistence writer. Clients
+  resolve `PORT`, then the daemon-written `atelier.url`, then port 5170.
+  `atelier reply` uses `POST /api/dispatch/:id/reply`; `--follow` resumes the
+  dispatch SSE stream after the reply boundary.
 - server/server.mjs - http router, static UI, SSE endpoints. Loopback only. At
   server construction it reads every explicitly allowlisted UI asset into one
   immutable boot snapshot, so a checkout update cannot mix new browser modules
@@ -576,10 +576,13 @@ that landed during the wait refuses rather than spawning into a closing server.
 Reaps are serialized per record, so an awaited one also awaits any terminal reap
 still finishing.
 
-**`atelier doctor --gc` is not a second reaper.** A local gc refuses outright while
-the instance lock shows a live owner and points at the API (`atelier_doctor_gc` /
-`POST /api/doctor/gc`), which reaches the live dispatcher and its interlocks; two
-reapers on one state directory share no single-flight. `--dry-run` stays available
+**`atelier doctor --gc` is not a second reaper.** Mutating local collection requires
+the explicit `--offline-maintenance` flag. Its Dispatcher holds the instance lock
+for the whole operation and refuses while the daemon owns it; operators stop the
+service first with `systemctl --user stop atelier`. Starting the daemon during that
+offline window fails the service unit until it is retried. The live API
+(`atelier_doctor_gc` / `POST /api/doctor/gc`) instead reaches the daemon's own
+dispatcher and interlocks. `--dry-run` stays available
 and is side-effect-free by construction: it builds its Dispatcher in **observer
 mode**, which schedules no boot pass that could signal (orphan fencing, post-merge
 child termination, codex sweeps) or mutate (queue settlement and reconciliation,

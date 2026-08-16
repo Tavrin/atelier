@@ -1,27 +1,26 @@
 #!/usr/bin/env node
 
 import { once } from "node:events";
-import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { probeProject, probeProjectPath, trackerMode } from "../server/lib/capabilities.mjs";
 import { createBoardEvents } from "../server/lib/board-events.mjs";
+import { CommandClientError, createCommandClient } from "../server/lib/command-client.mjs";
 import { createDispatcher } from "../server/lib/dispatch.mjs";
-import { createEventLog, fieldDiff } from "../server/lib/event-log.mjs";
+import { createEventLog } from "../server/lib/event-log.mjs";
 import { resolveBrExecutable, runFile } from "../server/lib/exec.mjs";
-import { acquireInstanceLock, liveInstanceOwner } from "../server/lib/instance-lock.mjs";
+import { acquireInstanceLock } from "../server/lib/instance-lock.mjs";
 import { configDir, stateDir } from "../server/lib/paths.mjs";
 import {
-  addProject,
   loadRegistry,
   RegistryError,
   STARTER_REGISTRY,
-  validateProjectAddition,
 } from "../server/lib/registry.mjs";
 import { installService, restartServiceSafely } from "../server/lib/service.mjs";
 import { createBootStamp } from "../server/lib/version.mjs";
-import { initializeTrackerDirectory } from "../server/lib/tracker.mjs";
 import {
   createServer,
   listenLoopback,
@@ -43,7 +42,7 @@ function usage() {
     "  atelier reply <dispatchId> <text...> [--follow]",
     "  atelier plan <dispatchId> --approve | --revise \"text\"",
     "  atelier logs [--follow] [--kind K[,K]] [--project NAME] [--dispatch ID] [--ticket ID] [--actor A] [--since ISO] [--limit N]",
-    "  atelier doctor [--install-service | --gc [--older-than-days N] | --safe-restart [--port N]] [--dry-run]",
+    "  atelier doctor [--install-service | --gc [--older-than-days N] [--offline-maintenance] | --safe-restart [--port N]] [--dry-run]",
   ].join("\n");
 }
 
@@ -51,7 +50,11 @@ function subcommandUsage(command) {
   const line = usage()
     .split("\n")
     .find((candidate) => candidate.startsWith(`  atelier ${command}`));
-  return line ? `Usage:\n${line}` : undefined;
+  if (!line) return undefined;
+  const note = command === "doctor"
+    ? "\nStarting the daemon during --offline-maintenance fails the service unit until it is retried."
+    : "";
+  return `Usage:\n${line}${note}`;
 }
 
 async function init(args) {
@@ -118,6 +121,7 @@ async function serve(args) {
     throw new Error("port must be an integer between 0 and 65535");
   }
   const atelierStateDir = stateDir();
+  const urlPath = join(atelierStateDir, "atelier.url");
   const lock = acquireInstanceLock(atelierStateDir);
   let boardEvents;
   let server;
@@ -145,7 +149,9 @@ async function serve(args) {
       process.exitCode = 1;
       return;
     }
-    console.log(`Atelier listening at http://127.0.0.1:${address.port}`);
+    const listenUrl = `http://127.0.0.1:${address.port}`;
+    await writeFile(urlPath, `${listenUrl}\n`, "utf8");
+    console.log(`Atelier listening at ${listenUrl}`);
     eventLog.append("service.start", {
       actor: "cli",
       port: address.port,
@@ -170,7 +176,9 @@ async function serve(args) {
       process.off("SIGTERM", onSigterm);
     }
   } finally {
+    if (server?.listening) await shutdownServer(server);
     boardEvents?.close();
+    await rm(urlPath, { force: true });
     lock.release();
     // Logged in the finally so an abnormal exit path still records the stop -
     // the pairing with service.start is what makes a restart legible later.
@@ -227,18 +235,12 @@ async function track(args) {
   const entry = { path: probe.path, ...probe.inferred };
   console.log(JSON.stringify(entry, null, 2));
   if (!values.yes) {
-    console.log(`Edit ${join(configDir(), "projects.json")} or use the UI to confirm this project.`);
+    console.log("Use `atelier track <path> --yes` or the UI to confirm this project.");
     return;
   }
-  validateProjectAddition(registry, entry);
-  if (entry.archetype === "tracker-only") await initializeTrackerDirectory(entry);
-  const created = await addProject(registry, entry, join(configDir(), "projects.json"));
-  createEventLog({ stateDir: stateDir() }).append("registry.change", {
-    actor: "cli",
-    action: "add",
-    project: created.name,
-    changes: fieldDiff({}, created),
-  });
+  // Preserve the inferred entry verbatim. `trackerLocation` is an interactive
+  // choice; deriving it from detection could relocate an existing personal tracker.
+  const created = await createCommandClient().createProject(entry);
   console.log(`Registered ${created.name}`);
 }
 
@@ -248,14 +250,7 @@ async function moveTracker(args) {
   if (!new Set(["external", "in-repo"]).has(values.to)) {
     throw new Error("move-tracker --to must be external or in-repo");
   }
-  const project = encodeURIComponent(positionals[0]);
-  const result = await responseJson(
-    await fetch(`${atelierServerUrl()}/api/projects/${project}/move-tracker`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Atelier-Actor": "cli" },
-      body: JSON.stringify({ to: values.to }),
-    }),
-  );
+  const result = await createCommandClient().moveTracker(positionals[0], { to: values.to });
   console.log(`Moved ${positionals[0]} tracker to ${values.to}: ${result.to}`);
   console.log(result.nextSteps);
 }
@@ -296,110 +291,8 @@ async function follow(dispatcher, id) {
   }
 }
 
-function atelierServerUrl() {
-  const port = Number(process.env.PORT || 5170);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("PORT must be an integer between 1 and 65535");
-  }
-  return `http://127.0.0.1:${port}`;
-}
-
-async function responseJson(response) {
-  const text = await response.text();
-  let body;
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = {};
-  }
-  if (!response.ok) throw new Error(body.error || `Atelier server returned HTTP ${response.status}`);
-  return body;
-}
-
-async function latestEventSeq(baseUrl, id) {
-  const controller = new AbortController();
-  try {
-    const response = await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}/events`, {
-      headers: { Accept: "text/event-stream" },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      await responseJson(response);
-      return 0;
-    }
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for await (const chunk of response.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      if (buffer.includes(": heartbeat\n\n")) break;
-    }
-    return [...buffer.matchAll(/^id: (\d+)$/gm)]
-      .reduce((highest, match) => Math.max(highest, Number(match[1])), 0);
-  } finally {
-    controller.abort();
-  }
-}
-
 function serverDispatcher({ followReplies = false } = {}) {
-  const baseUrl = atelierServerUrl();
-  let sinceSeq = 0;
-  let dispatchId;
-  return {
-    async reply(id, body) {
-      dispatchId = id;
-      if (followReplies) sinceSeq = await latestEventSeq(baseUrl, id);
-      return responseJson(await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}/reply`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }));
-    },
-    async plan(id, body) {
-      dispatchId = id;
-      return responseJson(await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}/plan`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }));
-    },
-    async get(id) {
-      return responseJson(await fetch(`${baseUrl}/api/dispatch/${encodeURIComponent(id)}`));
-    },
-    getEvents() {
-      return [];
-    },
-    onEvent(listener, onError) {
-      const controller = new AbortController();
-      void (async () => {
-        const headers = { Accept: "text/event-stream" };
-        if (sinceSeq > 0) headers["Last-Event-ID"] = String(sinceSeq);
-        const response = await fetch(
-          `${baseUrl}/api/dispatch/${encodeURIComponent(dispatchId)}/events`,
-          { headers, signal: controller.signal },
-        );
-        if (!response.ok) throw new Error(`Atelier server returned HTTP ${response.status}`);
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for await (const chunk of response.body) {
-          buffer += decoder.decode(chunk, { stream: true });
-          let boundary;
-          while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-            const frame = buffer.slice(0, boundary);
-            buffer = buffer.slice(boundary + 2);
-            const data = frame
-              .split("\n")
-              .filter((line) => line.startsWith("data: "))
-              .map((line) => line.slice(6))
-              .join("\n");
-            if (data) listener(JSON.parse(data));
-          }
-        }
-      })().catch((error) => {
-        if (error.name !== "AbortError") onError?.(error);
-      });
-      return () => controller.abort();
-    },
-  };
+  return createCommandClient({ followReplies });
 }
 
 async function dispatch(args) {
@@ -415,21 +308,32 @@ async function dispatch(args) {
     throw new Error("choose either a ticket id or --prompt");
   }
   const registry = await loadRegistry();
-  const atelierStateDir = stateDir();
-  const dispatcher = createDispatcher({
-    registry,
-    stateDir: atelierStateDir,
-    eventLog: createEventLog({ stateDir: atelierStateDir }),
-  });
-  const result = await dispatcher.dispatch({
-    project: projectName,
-    ticketId: positionals[0],
-    prompt: values.prompt,
-    model: values.model,
-    effort: values.effort,
-    lane: values.lane,
-    maxTurns: values["max-turns"],
-  });
+  const dispatcher = createCommandClient();
+  let result;
+  try {
+    result = await dispatcher.dispatch({
+      project: projectName,
+      ticketId: positionals[0],
+      prompt: values.prompt,
+      model: values.model,
+      effort: values.effort,
+      lane: values.lane,
+      maxTurns: values["max-turns"],
+    });
+  } catch (error) {
+    const localProject = registry.projects.find((project) => project.name === projectName);
+    if (
+      error instanceof CommandClientError &&
+      error.status === 404 &&
+      localProject &&
+      existsSync(localProject.path)
+    ) {
+      throw new Error(
+        "project exists in projects.json but the running daemon predates it — restart the daemon (systemctl --user restart atelier) or register via `atelier track --yes`",
+      );
+    }
+    throw error;
+  }
   console.log(result.id);
   if (!values.follow) return;
   const record = await follow(dispatcher, result.id);
@@ -535,7 +439,7 @@ async function doctor(args) {
   const { values, positionals } = parseOptions(
     args,
     new Set(["older-than-days", "port"]),
-    new Set(["install-service", "gc", "safe-restart", "dry-run"]),
+    new Set(["install-service", "gc", "safe-restart", "dry-run", "offline-maintenance"]),
   );
   if (positionals.length > 0) throw new Error("doctor does not accept positional arguments");
   const modes = ["install-service", "gc", "safe-restart"].filter((mode) => values[mode]);
@@ -550,6 +454,9 @@ async function doctor(args) {
   }
   if (values.port !== undefined && !values["safe-restart"]) {
     throw new Error("--port requires --safe-restart");
+  }
+  if (values["offline-maintenance"] && !values.gc) {
+    throw new Error("--offline-maintenance requires --gc");
   }
   if (values["install-service"]) {
     await installService({
@@ -603,59 +510,45 @@ async function doctor(args) {
       throw new Error("--older-than-days must be a non-negative integer");
     }
     const dryRun = values["dry-run"] === true;
-    // A local gc cannot safely ACT behind a running server's back: the server owns
-    // the dispatch records, the worktrees and the companion process trees, and two
-    // reapers on one state directory have no shared single-flight. So a non-dry-run
-    // local gc REFUSES while the instance lock shows a live owner, and points at the
-    // API - `atelier_doctor_gc` / POST /api/doctor/gc reach the live dispatcher, which
-    // does have the interlocks (atelier-za6 round 3, blocker 2).
-    if (!dryRun) {
-      const owner = liveInstanceOwner(stateDir());
-      if (owner !== undefined) {
-        console.error(
-          `A Atelier server is running (PID ${owner}); a local --gc would collect behind it.`,
-        );
-        console.error(
-          "Use the running server instead: atelier_doctor_gc (MCP) or POST /api/doctor/gc, or add --dry-run to inspect read-only.",
-        );
-        process.exitCode = 1;
-        return;
-      }
+    if (!dryRun && !values["offline-maintenance"]) {
+      throw new Error("non-dry-run --gc requires --offline-maintenance");
     }
     // Observer mode under --dry-run: constructing a Dispatcher is itself an action
     // otherwise (boot orphan fencing signals, post-merge recovery kills children,
     // reattach polls and transitions, queue settlement writes the tracker), and a
-    // read-only command must do none of it. The non-dry-run path has already proven
-    // no server is live, so it constructs a normal Dispatcher - it needs the boot
-    // passes to be honest about the state it is collecting - but still never sweeps
-    // from the constructor.
-    // Re-probe immediately before construction. The check above and this line used
-    // to straddle an await, and a server can start in between - narrowing the
-    // window to the two statements is cheap. The residual race (a server starting
-    // between this probe and the constructor's first boot pass) is accepted: it
-    // needs a start inside microseconds, and observer mode already makes the
-    // --dry-run path harmless whatever the timing.
-    if (!dryRun && liveInstanceOwner(stateDir()) !== undefined) {
-      console.error("A Atelier server started while this command was preparing; refusing to collect.");
-      process.exitCode = 1;
-      return;
-    }
+    // read-only command must do none of it. The non-dry-run constructor acquires
+    // and holds the real instance lock across collection, closing the old probe race.
     const atelierStateDir = stateDir();
     const eventLog = createEventLog({ stateDir: atelierStateDir });
-    const dispatcher = createDispatcher({
-      registry,
-      stateDir: atelierStateDir,
-      sweepCodexProcessesAtBoot: false,
-      observer: dryRun,
-      eventLog,
-    });
+    let dispatcher;
+    try {
+      dispatcher = createDispatcher({
+        registry,
+        stateDir: atelierStateDir,
+        sweepCodexProcessesAtBoot: false,
+        observer: dryRun,
+        eventLog,
+      });
+    } catch (error) {
+      eventLog.shutdown();
+      if (error.code === "EATELIERLOCKED") {
+        console.error(`systemctl --user stop atelier first; ${error.message}.`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
     let result;
     try {
       result = await dispatcher.gc({ olderThanDays, dryRun });
     } finally {
       // doctor is a short-lived process; make bulk dismissal events durable
       // before it prints its handoff and exits.
-      eventLog.shutdown();
+      try {
+        await dispatcher.shutdown({ graceMs: 0 });
+      } finally {
+        eventLog.shutdown();
+      }
     }
     const verb = result.dryRun ? "would dismiss" : "dismissed";
     const orphanVerb = result.dryRun ? "would remove orphan" : "removed orphan";
