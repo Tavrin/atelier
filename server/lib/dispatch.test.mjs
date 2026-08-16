@@ -1214,7 +1214,7 @@ test("reply resumes the captured Claude session, accumulates usage, and re-runs 
   ]);
   assert.equal(claudeLaunches[1].options.cwd, first.worktreePath);
   assert.deepEqual(claudeLaunches[1].options.stdio, ["pipe", "pipe", "pipe"]);
-  assert.strictEqual(claudeLaunches[1].options.env, claudeLaunches[0].options.env);
+  assert.notStrictEqual(claudeLaunches[1].options.env, claudeLaunches[0].options.env);
 
   const events = dispatcher.getEvents(dispatchId);
   const reply = events.find((event) => event.type === "reply");
@@ -1874,7 +1874,7 @@ test("dispatchEnv merges project over defaults, stays hygienic, and reaches veri
     assert.equal(launch.options.env.ANTHROPIC_API_KEY, undefined);
     assert.equal(launch.options.env.ATELIER_PRIMARY_CHECKOUT, setup.primary);
   }
-  assert.equal(launches[0].options.env, launches[1].options.env);
+  assert.notEqual(launches[0].options.env, launches[1].options.env);
 });
 
 test("project defaultAgent beats the defaults lane and Codex tolerates a read-only git dir", async (t) => {
@@ -2063,14 +2063,14 @@ test("Codex review delivers an oversized brief through a file without oversized 
   const setup = await fixture(t);
   const receiptPath = join(setup.root, "codex-prompt-receipt.json");
   const companionPath = join(setup.root, "codex-companion-fixture.mjs");
-  setup.project.dispatchEnv = { CODEX_RECEIPT_PATH: receiptPath };
+  setup.project.dispatchEnv = { MY_APP_RECEIPT_PATH: receiptPath };
   await writeFile(
     companionPath,
     `import { readFileSync, writeFileSync } from "node:fs";
 const instruction = process.argv.at(-1);
 const promptPath = instruction.split("\\n").at(-1);
 const prompt = readFileSync(promptPath, "utf8");
-writeFileSync(process.env.CODEX_RECEIPT_PATH, JSON.stringify({ instruction, prompt, promptPath }));
+writeFileSync(process.env.MY_APP_RECEIPT_PATH, JSON.stringify({ instruction, prompt, promptPath }));
 process.stdout.write(JSON.stringify({ jobId: "oversized-review-job" }) + "\\n");
 `,
   );
@@ -2272,7 +2272,7 @@ test("codex lane stays warning-free when its resolved git dir is writable", asyn
   );
   assert.equal(launch.command, "node");
   assert.equal(launch.options.env.DEFAULT_ENV, "inherited");
-  assert.equal(launch.options.env.CODEX_ENV, "project");
+  assert.equal(launch.options.env.CODEX_ENV, undefined);
   assert.equal(launch.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(launch.options.env.ATELIER_PRIMARY_CHECKOUT, setup.primary);
   assert.equal(launch.options.stdio, undefined);

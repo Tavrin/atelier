@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { configDir } from "./paths.mjs";
 import { agents } from "./agents/index.mjs";
 import { SECRET_ENV_KEY } from "./exec.mjs";
+import { assertAllowedDispatchEnvKey } from "./execution/environment-policy.mjs";
 
 const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const DISPATCH_ENV_KEY = /^[A-Z][A-Z0-9_]*$/;
@@ -96,6 +97,11 @@ function validateDispatchEnv(dispatchEnv, prefix) {
     }
     if (SECRET_ENV_KEY.test(key)) {
       problems.push(`${prefix}.${key} is secret-shaped; secrets do not belong in the registry`);
+    }
+    try {
+      assertAllowedDispatchEnvKey(key);
+    } catch (error) {
+      problems.push(`${prefix}.${error.message}`);
     }
     if (typeof value !== "string") {
       problems.push(`${prefix}.${key} must be a string`);

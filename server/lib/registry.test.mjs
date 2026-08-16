@@ -396,6 +396,27 @@ test("loadRegistry rejects every SECRET_ENV_KEY pattern alternative as a dispatc
   }
 });
 
+test("dispatchEnv rejects execution controls while allowing application flags", async (t) => {
+  const denied = [
+    "PATH", "HOME", "GIT_DIR", "NODE_OPTIONS", "http_proxy", "SSH_ASKPASS",
+    "KRB5_CONFIG", "KRB5CCNAME", "GLIBC_TUNABLES",
+  ];
+  for (const key of denied) {
+    const { projectPath } = await fixture(t);
+    const problems = validateProject({
+      ...validProject(projectPath),
+      dispatchEnv: { [key]: "hostile" },
+    }).join("\n");
+    assert.match(problems, new RegExp(`${key} controls execution; not permitted in dispatchEnv`, "i"));
+  }
+
+  const { projectPath } = await fixture(t);
+  assert.deepEqual(
+    validateProject({ ...validProject(projectPath), dispatchEnv: { MY_APP_FLAG: "enabled" } }),
+    [],
+  );
+});
+
 test("loadRegistry validates dispatchEnv key and string value shape", async (t) => {
   const { projectPath, registryPath } = await fixture(t);
   await writeFile(

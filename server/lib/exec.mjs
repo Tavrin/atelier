@@ -3,10 +3,16 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 
+import {
+  gitChildEnv,
+  sanitizeChildEnv,
+  SECRET_ENV_KEY,
+} from "./execution/environment-policy.mjs";
+
 const COMMAND_TIMEOUT_MS = 15_000;
 export const GIT_TIMEOUT_MS = 60_000;
 export const LONG_GIT_TIMEOUT_MS = 300_000;
-export const SECRET_ENV_KEY = /key|token|secret|password|credential/i;
+export { SECRET_ENV_KEY };
 const MAX_COMMAND_BUFFER = 8 * 1024 * 1024;
 let execFileRunner = execFile;
 
@@ -44,11 +50,13 @@ export function resolveBrExecutable() {
 export function runFile(
   file,
   args,
-  { cwd, env, timeout, maxBuffer = MAX_COMMAND_BUFFER } = {},
+  { cwd, env, timeout, maxBuffer = MAX_COMMAND_BUFFER, allowDenied = [] } = {},
 ) {
   const git = isGitExecutable(file);
   const effectiveTimeout = timeout ?? (git ? GIT_TIMEOUT_MS : COMMAND_TIMEOUT_MS);
-  const effectiveEnv = git ? { ...process.env, ...env, LC_ALL: "C" } : env;
+  const effectiveEnv = git
+    ? gitChildEnv(env, { allowDenied })
+    : env === undefined ? sanitizeChildEnv(process.env, { class: "tracker" }) : env;
   return new Promise((resolvePromise, rejectPromise) => {
     execFileRunner(
       file,
@@ -108,7 +116,10 @@ export function killTracked(child, { graceMs = 5_000 } = {}) {
     return execFile(
       "taskkill",
       ["/pid", String(child.pid), "/T", "/F"],
-      { windowsHide: true },
+      {
+        env: sanitizeChildEnv(process.env, { class: "tracker" }),
+        windowsHide: true,
+      },
       () => {},
     );
   }

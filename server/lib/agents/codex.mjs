@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { killTracked } from "../exec.mjs";
+import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
 import { stateDir } from "../paths.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput } from "../stream.mjs";
 
@@ -483,10 +484,14 @@ function validate({ effort }) {
 }
 
 function companionEnv(env) {
-  return {
+  return sanitizeChildEnv({
     ...env,
     CLAUDE_PLUGIN_DATA: join(stateDir(), "codex-companion"),
-  };
+  }, {
+    class: "provider",
+    // The Codex adapter owns this companion IPC root; project env cannot set it.
+    allowDenied: ["CLAUDE_PLUGIN_DATA"],
+  });
 }
 
 function companionErrorMessage(payload) {

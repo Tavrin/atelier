@@ -833,6 +833,14 @@ test("project artifacts are path-safe boot snapshots and reject encoded project 
 
 test("chronicle boot batches merge-commit numstat with per-entry null fallback", async (t) => {
   const calls = [];
+  const hostileKeys = ["GIT_DIR", "LD_AUDIT", "SSH_ASKPASS"];
+  const previousHostile = Object.fromEntries(hostileKeys.map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previousHostile)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
   const missingCommit = "0".repeat(40);
   let resolvedCommit;
   let historyCommit;
@@ -948,10 +956,13 @@ test("chronicle boot batches merge-commit numstat with per-entry null fallback",
         mergedAt: "2026-07-29T11:00:00.000Z",
       },
     });
+    process.env.GIT_DIR = "/hostile/repository";
+    process.env.LD_AUDIT = "/hostile/audit.so";
+    process.env.SSH_ASKPASS = "/hostile/askpass";
     return stub;
   };
   const chronicleGitRunner = (file, args, options) => {
-    calls.push({ file, args });
+    calls.push({ file, args, options });
     return execFileSync(file, args, options);
   };
   const { port } = await serverFixture(t, { dispatcher, chronicleGitRunner });
@@ -1000,6 +1011,16 @@ test("chronicle boot batches merge-commit numstat with per-entry null fallback",
     new Set(numstatCalls[0].args.slice(-3)),
     new Set([resolvedCommit, missingCommit, historyCommit]),
   );
+  const historyCalls = calls.filter(({ args }) => args.includes("--merges"));
+  assert.ok(historyCalls.length > 0, "chronicle history must use the injected Git runner");
+  for (const { options } of [...historyCalls, ...numstatCalls]) {
+    assert.equal(options.env.GIT_DIR, undefined);
+    assert.equal(options.env.LD_AUDIT, undefined);
+    assert.equal(options.env.SSH_ASKPASS, undefined);
+    assert.equal(options.env.PATH, process.env.PATH);
+    assert.equal(options.env.HOME, process.env.HOME);
+    assert.equal(options.env.LC_ALL, "C");
+  }
 });
 
 test("aggregate chronicle merges registered projects chronologically at the shared bound", async (t) => {
@@ -2589,6 +2610,10 @@ test("open-editor routes use only server-resolved project and worktree paths", a
       },
     ],
   );
+  for (const { options } of calls) {
+    assert.equal(options.env.PATH, process.env.PATH);
+    assert.equal(options.env.HOME, process.env.HOME);
+  }
 
   const clientPath = await send(configured.port, {
     method: "POST",

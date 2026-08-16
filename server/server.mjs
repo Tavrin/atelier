@@ -22,6 +22,10 @@ import {
   spawnTracked,
 } from "./lib/exec.mjs";
 import {
+  gitChildEnv,
+  sanitizeChildEnv,
+} from "./lib/execution/environment-policy.mjs";
+import {
   HttpError,
   jsonResponse,
   optionalString,
@@ -422,7 +426,7 @@ function chronicleDiffStats(project, records, gitRunner) {
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, LC_ALL: "C" },
+        env: gitChildEnv(),
         timeout: LONG_GIT_TIMEOUT_MS,
         maxBuffer: CHRONICLE_GIT_BUFFER,
         windowsHide: true,
@@ -496,7 +500,7 @@ function chronicleMergeHistory(project, gitRunner) {
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, LC_ALL: "C" },
+        env: gitChildEnv(),
         timeout: LONG_GIT_TIMEOUT_MS,
         maxBuffer: CHRONICLE_GIT_BUFFER,
         windowsHide: true,
@@ -706,7 +710,7 @@ async function openPathInEditor(registry, targetPath, spawner, missingMessage) {
   if (!details.isDirectory()) throw new HttpError(409, `${missingMessage}: target is not a directory`);
   const child = spawner(editorCommand, [targetPath], {
     cwd: targetPath,
-    env: process.env,
+    env: sanitizeChildEnv(process.env, { class: "editor" }),
     stdio: "ignore",
   });
   // Editor launch is intentionally fire-and-forget. Attach the error listener
