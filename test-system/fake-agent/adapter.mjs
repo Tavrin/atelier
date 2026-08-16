@@ -22,6 +22,18 @@ function requireTestGuard(env) {
   return scenario;
 }
 
+function fakeChildEnvironment(env) {
+  const childEnv = {
+    HOME: env.HOME,
+    PATH: env.PATH,
+    LC_ALL: env.LC_ALL || "C",
+  };
+  for (const [key, value] of Object.entries(env)) {
+    if (key.startsWith("ATELIER_TEST_")) childEnv[key] = value;
+  }
+  return childEnv;
+}
+
 function options() {
   return {
     models: [{ value: "fake", label: "Fake" }],
@@ -117,7 +129,7 @@ function launch({ entry, project, worktreePath, env, spawner, callbacks }) {
   const scenario = requireTestGuard(env);
   const child = spawner(FAKE_AGENT, [scenario], {
     cwd: worktreePath,
-    env,
+    env: fakeChildEnvironment(env),
     stdio: ["pipe", "pipe", "pipe"],
   });
   consume({ entry, project, child, callbacks, accumulateUsage: false });
@@ -127,7 +139,7 @@ function resume({ entry, project, worktreePath, env, spawner, callbacks }) {
   const scenario = requireTestGuard(env);
   const child = spawner(FAKE_AGENT, [scenario, "--resume", entry.record.sessionId], {
     cwd: worktreePath,
-    env,
+    env: fakeChildEnvironment(env),
     stdio: ["pipe", "pipe", "pipe"],
   });
   consume({ entry, project, child, callbacks, accumulateUsage: true });

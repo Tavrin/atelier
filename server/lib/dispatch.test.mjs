@@ -28,6 +28,7 @@ import test from "node:test";
 
 import { LONG_GIT_TIMEOUT_MS } from "./exec.mjs";
 import { createEventLog } from "./event-log.mjs";
+import { acquireInstanceLock } from "./instance-lock.mjs";
 import { stateDir } from "./paths.mjs";
 import { normalizeProject } from "./registry.mjs";
 import { chronicleFor, gatesFor } from "./world-contract.mjs";
@@ -684,6 +685,102 @@ function localDay(daysAgo) {
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
 }
+
+test("dispatcher rejects a foreign live writer before state creation while observer remains lock-free", async (t) => {
+  const setup = await fixture(t);
+  await mkdir(setup.state, { recursive: true });
+  const owner = spawn(
+    process.execPath,
+    ["-e", 'console.log("ready");setInterval(() => {}, 1000)'],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  t.after(async () => {
+    if (owner.exitCode === null && owner.signalCode === null) {
+      owner.kill("SIGKILL");
+      await once(owner, "exit").catch(() => {});
+    }
+  });
+  await once(owner.stdout, "data");
+  const lockPath = join(setup.state, "atelier.lock");
+  await writeFile(lockPath, `${owner.pid}\n`);
+
+  assert.throws(
+    () => createDispatcher({ registry: setup.registry, stateDir: setup.state }),
+    (error) => error.code === "EATELIERLOCKED" && error.message.includes(`PID ${owner.pid}`),
+  );
+  assert.equal(existsSync(join(setup.state, "dispatches")), false);
+
+  const observer = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    observer: true,
+  });
+  assert.equal(await readFile(lockPath, "utf8"), `${owner.pid}\n`);
+  await observer.shutdown({ graceMs: 0 });
+  assert.equal(await readFile(lockPath, "utf8"), `${owner.pid}\n`);
+});
+
+test("observer construction against empty state creates nothing", async (t) => {
+  const setup = await fixture(t);
+  await mkdir(setup.state);
+  const before = await readdir(setup.state);
+
+  const observer = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    observer: true,
+  });
+  await observer.shutdown({ graceMs: 0 });
+
+  assert.deepEqual(await readdir(setup.state), before);
+});
+
+test("observer skips a large unterminated index tail without repair or compaction", async (t) => {
+  const setup = await fixture(t);
+  const dispatchDir = join(setup.state, "dispatches");
+  const indexPath = join(dispatchDir, "index.jsonl");
+  await mkdir(dispatchDir, { recursive: true });
+  const record = JSON.stringify({
+    id: "observer-seed",
+    project: "fixture",
+    state: "failed",
+    ticketId: null,
+  });
+  const contents = `${Array.from({ length: 1_001 }, () => record).join("\n")}\n{"id":`;
+  await writeFile(indexPath, contents);
+  const before = await stat(indexPath);
+  const warnings = [];
+  _setPersistenceLogger({ error: (message) => warnings.push(message) });
+
+  const observer = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    observer: true,
+  });
+  await observer.shutdown({ graceMs: 0 });
+
+  const after = await stat(indexPath);
+  assert.equal(await readFile(indexPath, "utf8"), contents);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
+  assert.ok(warnings.some((message) => /skipped 1 malformed index line/.test(message)));
+});
+
+test("dispatcher construction failure releases a lock it acquired", async (t) => {
+  const setup = await fixture(t);
+  await mkdir(setup.state);
+  await writeFile(join(setup.state, "dispatches"), "not a directory\n");
+
+  assert.throws(
+    () => createDispatcher({ registry: setup.registry, stateDir: setup.state }),
+    (error) => error.code === "EEXIST",
+  );
+  assert.equal(existsSync(join(setup.state, "atelier.lock")), false);
+
+  const lock = acquireInstanceLock(setup.state);
+  lock.release();
+  assert.equal(existsSync(join(setup.state, "atelier.lock")), false);
+});
 
 test("dispatch runs queued -> preparing -> running -> completed with prompt posture", async (t) => {
   const setup = await fixture(t, {

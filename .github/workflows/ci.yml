@@ -13,25 +13,31 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - name: Use Node.js 24.x
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
+          # Minor floating within the maintained Node 24 LTS line is deliberate.
           node-version: 24.x
       - name: Run full Node test suite
         run: node --test
 
   packed-artifact:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - name: Use Node.js 24.x
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
+          # Minor floating within the maintained Node 24 LTS line is deliberate.
           node-version: 24.x
       - name: Pack and smoke-test the installed artifact
         shell: bash
@@ -45,7 +51,7 @@ jobs:
           npm pack --pack-destination "$pack_dir"
           cd "$install_dir"
           npm init --yes >/dev/null
-          npm install "$pack_dir"/*.tgz
+          npm install --ignore-scripts --no-audit --no-fund "$pack_dir"/*.tgz
           ./node_modules/.bin/atelier --help
           ATELIER_CONFIG_DIR="$config_dir" ATELIER_STATE_DIR="$state_dir" \
             ./node_modules/.bin/atelier init

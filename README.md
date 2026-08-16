@@ -131,8 +131,10 @@ Atelier exposes the same capabilities three ways, deliberately:
 
 - **The web UI** at `127.0.0.1:5170` — board, dispatch views, live transcripts,
   event log, styleguide.
-- **The CLI** — `atelier dispatch`, `reply`, `plan`, `logs`, `projects`,
-  `doctor`, and more.
+- **The CLI** — `atelier dispatch`, `track --yes`, `reply`, and `plan` mutate
+  through the running loopback daemon; `doctor --gc --offline-maintenance` is
+  the explicit locked offline exception. Read-only commands include `logs` and
+  `projects`.
 - **[MCP](docs/MCP.md)** — `atelier mcp` bridges MCP-capable agents to the
   running cockpit over loopback, so an agent can operate the board itself.
 

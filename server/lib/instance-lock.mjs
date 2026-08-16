@@ -1,6 +1,7 @@
 import {
   closeSync,
   existsSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -38,6 +39,24 @@ function writeLock(path, pid) {
   }
 }
 
+function lockedError(message) {
+  const error = new Error(message);
+  error.code = "EATELIERLOCKED";
+  return error;
+}
+
+function confirmLockOwner(path, pid) {
+  let owner;
+  try {
+    owner = Number(readFileSync(path, "utf8").trim());
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (owner !== pid) {
+    throw lockedError("Atelier instance lock changed during acquisition; possible contention");
+  }
+}
+
 // Read-only counterpart to acquireInstanceLock: who, if anyone, currently owns the
 // instance lock. Returns undefined when the lock is absent or its owner is gone, so
 // a caller can distinguish "a Atelier server is live here" from "stale lock file"
@@ -58,12 +77,14 @@ export function liveInstanceOwner(directory, { killProcess = process.kill } = {}
 export function acquireInstanceLock(directory, {
   pid = process.pid,
   killProcess = process.kill,
+  beforeTakeoverRename,
 } = {}) {
   mkdirSync(directory, { recursive: true });
   const path = join(directory, "atelier.lock");
 
   try {
     writeLock(path, pid);
+    confirmLockOwner(path, pid);
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
     let owner;
@@ -73,15 +94,14 @@ export function acquireInstanceLock(directory, {
       if (readError.code !== "ENOENT") throw readError;
     }
     if (ownerIsAlive(owner, killProcess)) {
-      const locked = new Error(`Another Atelier instance is already running (PID ${owner})`);
-      locked.code = "EATELIERLOCKED";
-      throw locked;
+      throw lockedError(`Another Atelier instance is already running (PID ${owner})`);
     }
     // Atomic stale takeover: rename the stale lock to a per-contender
     // graveyard name - rename succeeds for exactly ONE contender, so two
     // racers can no longer both delete-and-own. If the rename captured a
     // DIFFERENT (freshly written, live) lock, hand it back and yield.
     const graveyard = `${path}.takeover.${pid}`;
+    beforeTakeoverRename?.({ path, stalePid: owner });
     try {
       renameSync(path, graveyard);
     } catch (renameError) {
@@ -94,29 +114,37 @@ export function acquireInstanceLock(directory, {
       } catch {
         captured = undefined;
       }
-      if (captured !== undefined && captured !== owner && ownerIsAlive(captured, killProcess)) {
-        if (!existsSync(path)) {
-          try {
-            renameSync(graveyard, path);
-          } catch {
-            rmSync(graveyard, { force: true });
-          }
-        } else {
+      if (captured !== owner) {
+        try {
+          // link+unlink is the no-clobber equivalent of restoring by rename:
+          // unlike POSIX rename(), it cannot overwrite a third contender.
+          linkSync(graveyard, path);
           rmSync(graveyard, { force: true });
+        } catch (restoreError) {
+          if (restoreError.code !== "EEXIST") throw restoreError;
+          // An exact triple race can still strand this evidence. Lease
+          // generations (ATT-017/P1) are the durable fix.
+          const stolen = `${path}.stolen-${captured}`;
+          try {
+            renameSync(graveyard, stolen);
+          } catch {
+            // Preserve the graveyard under its takeover name if the evidence
+            // path itself raced; authority still fails closed below.
+          }
+          throw lockedError(
+            `Atelier instance lock changed during stale takeover (PID ${captured}); possible contention`,
+          );
         }
-        const locked = new Error(`Another Atelier instance is already running (PID ${captured})`);
-        locked.code = "EATELIERLOCKED";
-        throw locked;
+        throw lockedError(`Another Atelier instance is already running (PID ${captured})`);
       }
       rmSync(graveyard, { force: true });
     }
     try {
       writeLock(path, pid);
+      confirmLockOwner(path, pid);
     } catch (retryError) {
       if (retryError.code !== "EEXIST") throw retryError;
-      const locked = new Error("Another Atelier instance acquired the server lock");
-      locked.code = "EATELIERLOCKED";
-      throw locked;
+      throw lockedError("Another Atelier instance acquired the server lock");
     }
   }
 

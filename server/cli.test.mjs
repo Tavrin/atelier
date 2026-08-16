@@ -11,6 +11,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+async function liveFakeDaemonState(t) {
+  const root = await mkdtemp(join(tmpdir(), "atelier-cli-fake-daemon-"));
+  const state = join(root, "state");
+  await mkdir(state);
+  await writeFile(join(state, "atelier.lock"), `${process.pid}\n`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return state;
+}
+
 // The same spelling dispatch.mjs persists, so a seeded tree member is
 // identity-corroborated when the CLI's sweep classifies it.
 function cliProcessStartIdentity(pid) {
@@ -276,7 +285,7 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   }
 });
 
-test("atelier doctor --gc refuses to collect locally while a Atelier server holds the instance lock", async (t) => {
+test("atelier doctor --gc --offline-maintenance refuses while an instance lock is live", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "atelier-cli-gc-lock-"));
   const projectPath = join(root, "project");
   await mkdir(projectPath);
@@ -319,7 +328,7 @@ test("atelier doctor --gc refuses to collect locally while a Atelier server hold
 
   const refused = await execFileAsync(
     process.execPath,
-    [resolve("bin", "atelier.mjs"), "doctor", "--gc"],
+    [resolve("bin", "atelier.mjs"), "doctor", "--gc", "--offline-maintenance"],
     {
       cwd: resolve("."),
       env: { ...process.env, ATELIER_CONFIG_DIR: root, ATELIER_STATE_DIR: atelierState },
@@ -329,8 +338,8 @@ test("atelier doctor --gc refuses to collect locally while a Atelier server hold
     (error) => error,
   );
   assert.equal(refused.code, 1);
-  assert.match(refused.stderr, new RegExp(`A Atelier server is running \\(PID ${process.pid}\\)`));
-  assert.match(refused.stderr, /atelier_doctor_gc|POST \/api\/doctor\/gc/);
+  assert.match(refused.stderr, /systemctl --user stop atelier first/);
+  assert.match(refused.stderr, new RegExp(`Another Atelier instance is already running \\(PID ${process.pid}\\)`));
 
   // --dry-run stays available: it is read-only, and observer mode means even
   // constructing its Dispatcher does nothing.
@@ -409,7 +418,7 @@ test("atelier doctor --gc passes the event log through bulk dismissals", async (
 
   const collected = await execFileAsync(
     process.execPath,
-    [resolve("bin", "atelier.mjs"), "doctor", "--gc", "--older-than-days", "7"],
+    [resolve("bin", "atelier.mjs"), "doctor", "--gc", "--offline-maintenance", "--older-than-days", "7"],
     options,
   );
   assert.match(collected.stdout, /dismissed: gc-dismissed/);
@@ -519,7 +528,7 @@ test("atelier init writes a starter registry and refuses to overwrite it", async
   );
 });
 
-test("atelier init, serve, and mcp expose side-effect-free subcommand help", async (t) => {
+test("atelier init, serve, mcp, and doctor expose side-effect-free subcommand help", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "atelier-cli-help-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const options = {
@@ -542,10 +551,17 @@ test("atelier init, serve, and mcp expose side-effect-free subcommand help", asy
     [resolve("bin", "atelier.mjs"), "mcp", "--help"],
     options,
   );
+  const doctorHelp = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor", "--help"],
+    options,
+  );
 
   assert.match(initHelp.stdout, /atelier init/);
   assert.match(serveHelp.stdout, /atelier serve \[--port N\]/);
   assert.match(mcpHelp.stdout, /atelier mcp \[--port N\]/);
+  assert.match(doctorHelp.stdout, /--offline-maintenance/);
+  assert.match(doctorHelp.stdout, /fails the service unit until it is retried/);
   await assert.rejects(readFile(join(root, "config", "projects.json"), "utf8"), /ENOENT/);
 });
 
@@ -678,6 +694,7 @@ async function assertGracefulSignalShutdown(t, shutdownSignal) {
   assert.equal(signal, null);
   assert.ok(Date.now() - startedAt < 2_000, "shutdown exceeded two seconds");
   await assert.rejects(readFile(join(state, "atelier.lock"), "utf8"), /ENOENT/);
+  await assert.rejects(readFile(join(state, "atelier.url"), "utf8"), /ENOENT/);
 
   // atelier-e5x: the service lifecycle pair is what makes a restart legible later,
   // so it is asserted on the real signal path rather than assumed.
@@ -698,11 +715,11 @@ async function assertGracefulSignalShutdown(t, shutdownSignal) {
 }
 
 for (const shutdownSignal of ["SIGTERM", "SIGINT"]) {
-  test(`atelier serve closes SSE and releases its lock promptly on ${shutdownSignal}`, (t) =>
+  test(`atelier serve flushes lifecycle events before releasing authority on ${shutdownSignal}`, (t) =>
     assertGracefulSignalShutdown(t, shutdownSignal));
 }
 
-test("atelier track probes and registers an unregistered path with --yes", async (t) => {
+test("atelier track previews an unregistered path locally without hand-edit guidance", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "atelier-cli-track-"));
   const projectPath = join(root, "New Project");
   const config = join(root, "config");
@@ -727,26 +744,18 @@ test("atelier track probes and registers an unregistered path with --yes", async
     [resolve("bin", "atelier.mjs"), "track", projectPath],
     options,
   );
-  assert.ok(preview.stdout.includes(join(config, "projects.json")));
+  assert.match(preview.stdout, /"name": "new-project"/);
+  assert.match(preview.stdout, /"npm test"/);
+  assert.match(preview.stdout, /atelier track <path> --yes/);
+  assert.doesNotMatch(preview.stdout, /Edit .*projects\.json/);
 
-  const { stdout } = await execFileAsync(
-    process.execPath,
-    [resolve("bin", "atelier.mjs"), "track", projectPath, "--yes"],
-    options,
-  );
-  assert.match(stdout, /"name": "new-project"/);
-  assert.match(stdout, /"npm test"/);
-  assert.match(stdout, /Registered new-project/);
-
-  const registry = JSON.parse(await readFile(join(config, "projects.json"), "utf8"));
-  assert.equal(registry.projects.length, 1);
-  assert.equal(registry.projects[0].path, projectPath);
-  assert.equal(registry.projects[0].archetype, "git-only");
+  await assert.rejects(readFile(join(config, "projects.json"), "utf8"), /ENOENT/);
   await assert.rejects(readFile(join(projectPath, ".atelier.json"), "utf8"), /ENOENT/);
   await assert.rejects(readFile(join(projectPath, ".beads", "issues.jsonl"), "utf8"), /ENOENT/);
 });
 
 test("atelier reply joins text and follows new events through the loopback API", async (t) => {
+  const state = await liveFakeDaemonState(t);
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -809,7 +818,11 @@ test("atelier reply joins text and follows new events through the loopback API",
     [resolve("bin", "atelier.mjs"), "reply", "dispatch-1", "please", "continue", "--follow"],
     {
       cwd: resolve("."),
-      env: { ...process.env, PORT: String(server.address().port) },
+      env: {
+        ...process.env,
+        ATELIER_STATE_DIR: state,
+        PORT: String(server.address().port),
+      },
     },
   );
 
@@ -821,6 +834,7 @@ test("atelier reply joins text and follows new events through the loopback API",
 });
 
 test("atelier --follow stops on needs_input and exits non-zero", async (t) => {
+  const state = await liveFakeDaemonState(t);
   // atelier-8r6: an unfinished outcome is terminal, so `--follow` must settle on it
   // instead of waiting forever on a dispatch that is already asking a question -
   // and the exit code must not claim success.
@@ -861,7 +875,14 @@ test("atelier --follow stops on needs_input and exits non-zero", async (t) => {
   const failure = await execFileAsync(
     process.execPath,
     [resolve("bin", "atelier.mjs"), "reply", "dispatch-2", "answer", "later", "--follow"],
-    { cwd: resolve("."), env: { ...process.env, PORT: String(server.address().port) } },
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_STATE_DIR: state,
+        PORT: String(server.address().port),
+      },
+    },
   ).then(
     (result) => ({ code: 0, ...result }),
     (error) => error,
@@ -873,6 +894,7 @@ test("atelier --follow stops on needs_input and exits non-zero", async (t) => {
 });
 
 test("atelier plan sends approve or revision feedback through the loopback API", async (t) => {
+  const state = await liveFakeDaemonState(t);
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -894,7 +916,11 @@ test("atelier plan sends approve or revision feedback through the loopback API",
   });
   const options = {
     cwd: resolve("."),
-    env: { ...process.env, PORT: String(server.address().port) },
+    env: {
+      ...process.env,
+      ATELIER_STATE_DIR: state,
+      PORT: String(server.address().port),
+    },
   };
 
   const approved = await execFileAsync(
@@ -932,6 +958,7 @@ test("atelier plan sends approve or revision feedback through the loopback API",
 });
 
 test("atelier move-tracker delegates to the loopback API and prints next steps", async (t) => {
+  const state = await liveFakeDaemonState(t);
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -961,7 +988,11 @@ test("atelier move-tracker delegates to the loopback API and prints next steps",
     [resolve("bin", "atelier.mjs"), "move-tracker", "fixture", "--to", "external"],
     {
       cwd: resolve("."),
-      env: { ...process.env, PORT: String(server.address().port) },
+      env: {
+        ...process.env,
+        ATELIER_STATE_DIR: state,
+        PORT: String(server.address().port),
+      },
     },
   );
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -36,7 +36,31 @@ async function writeFiles(workspace, step) {
 }
 
 function git(workspace, args) {
-  execFileSync("git", args, { cwd: workspace, stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("git", [
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "user.name=Atelier Fake",
+    "-c", "user.email=fake@atelier.invalid",
+    ...args,
+  ], {
+    cwd: workspace,
+    env: {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      LC_ALL: "C",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+async function recordChild(child, detached) {
+  const receiptPath = process.env.ATELIER_TEST_CHILD_RECEIPTS;
+  if (!receiptPath || !isAbsolute(receiptPath)) {
+    throw new Error("ATELIER_TEST_CHILD_RECEIPTS must be an absolute path for child scenarios");
+  }
+  await mkdir(dirname(receiptPath), { recursive: true });
+  await appendFile(receiptPath, `${JSON.stringify({ pid: child.pid, detached })}\n`, "utf8");
 }
 
 async function stdinLine() {
@@ -116,8 +140,14 @@ async function main() {
           detached,
           stdio: "ignore",
         });
-        child.unref();
+        try {
+          await recordChild(child, detached);
+        } catch (error) {
+          child.kill("SIGKILL");
+          throw error;
+        }
         log({ type: "fake.child", pid: child.pid, detached });
+        child.unref();
         break;
       }
       case "crash":
@@ -134,7 +164,10 @@ async function main() {
       }
       case "mutate_during_verify": {
         const target = workspacePath(workspace, step.watcherPath || ".fake-verify-watcher.json");
-        await writeFile(target, `${JSON.stringify({ writes: step.writes || [] })}\n`, "utf8");
+        await writeFile(target, `${JSON.stringify({
+          writes: step.writes || [],
+          receiptPath: step.receiptPath || ".fake-verify-receipt.json",
+        })}\n`, "utf8");
         log({ type: "fake.verify-armed", path: relative(workspace, target) });
         break;
       }

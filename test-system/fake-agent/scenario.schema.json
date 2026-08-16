@@ -43,6 +43,7 @@
           "signal": { "type": "string" },
           "sessionRef": { "type": "string" },
           "watcherPath": { "type": "string" },
+          "receiptPath": { "type": "string" },
           "writes": { "type": "array" },
           "event": {},
           "turns": { "type": "number" },

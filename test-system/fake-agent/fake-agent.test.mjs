@@ -7,13 +7,28 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { fakeAgent } from "./adapter.mjs";
+import { poisonAgent, REAL_PROVIDER_DISABLED_CODE } from "./poison-adapter.mjs";
 
 const execFileAsync = promisify(execFile);
 const script = resolve("test-system/fake-agent/fake-agent.mjs");
 const verifyHook = resolve("test-system/fake-agent/verification-hook.mjs");
 
 async function git(cwd, args) {
-  return execFileAsync("git", args, { cwd });
+  return execFileAsync("git", [
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "user.name=Atelier Fake",
+    "-c", "user.email=fake@atelier.invalid",
+    ...args,
+  ], {
+    cwd,
+    env: {
+      HOME: cwd,
+      PATH: process.env.PATH,
+      LC_ALL: "C",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
+  });
 }
 
 async function fixture(t) {
@@ -34,7 +49,12 @@ async function runScenario(root, scenario, { input, args = [] } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, [script, scenarioPath, ...args], {
       cwd: root,
-      env: { PATH: process.env.PATH },
+      env: {
+        HOME: root,
+        PATH: process.env.PATH,
+        LC_ALL: "C",
+        ATELIER_TEST_CHILD_RECEIPTS: join(root, "child-pids.jsonl"),
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -118,6 +138,10 @@ test("fake agent supports input, resume markers, usage, arbitrary events, and ve
   assert.match(stdout, /"type":"fake.review","result":"not-json"/);
   await execFileAsync(process.execPath, [verifyHook, ".watcher.json"], { cwd: root });
   assert.equal(await readFile(join(root, "verified-mutation.txt"), "utf8"), "mutated\n");
+  assert.deepEqual(JSON.parse(await readFile(join(root, ".fake-verify-receipt.json"))), {
+    ran: true,
+    exitCode: 0,
+  });
 });
 
 test("fake adapter executable and scenario schema are shipped as test fixtures", async () => {
@@ -128,6 +152,10 @@ test("fake adapter executable and scenario schema are shipped as test fixtures",
   await assert.rejects(
     fakeAgent.preLaunchChecks({ entry: { env: {} } }),
     /ATELIER_TEST_NO_REAL_PROVIDER=1/,
+  );
+  assert.throws(
+    () => poisonAgent("claude").start(),
+    (error) => error.code === REAL_PROVIDER_DISABLED_CODE && error.status === 409,
   );
 });
 
