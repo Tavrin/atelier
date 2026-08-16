@@ -33,6 +33,37 @@ test("runFile gives git a locale-stable timeout with per-call overrides", async 
   assert.equal(calls[2].options.env, undefined);
 });
 
+test("runFile excludes hostile parent Git controls and preserves explicit caller env", async (t) => {
+  const previous = {
+    GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+    GIT_DIR: process.env.GIT_DIR,
+  };
+  process.env.GIT_CONFIG_GLOBAL = "/hostile/global-config";
+  process.env.GIT_DIR = "/hostile/repository";
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    _setExecFileRunner();
+  });
+
+  let captured;
+  _setExecFileRunner((_file, _args, options, callback) => {
+    captured = options.env;
+    callback(null, "ok\n", "");
+  });
+  await runFile("git", ["status"], {
+    env: { MY_APP_FLAG: "enabled", GIT_CONFIG_COUNT: "0" },
+  });
+
+  assert.equal(captured.GIT_CONFIG_GLOBAL, undefined);
+  assert.equal(captured.GIT_DIR, undefined);
+  assert.equal(captured.MY_APP_FLAG, "enabled");
+  assert.equal(captured.GIT_CONFIG_COUNT, "0");
+  assert.equal(captured.LC_ALL, "C");
+});
+
 test("envHygiene copies the environment without secret-shaped keys", () => {
   const source = {
     ANTHROPIC_API_KEY: "anthropic-secret",

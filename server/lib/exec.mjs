@@ -3,6 +3,8 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 
+import { minimalChildPath } from "./execution/environment-policy.mjs";
+
 const COMMAND_TIMEOUT_MS = 15_000;
 export const GIT_TIMEOUT_MS = 60_000;
 export const LONG_GIT_TIMEOUT_MS = 300_000;
@@ -48,7 +50,18 @@ export function runFile(
 ) {
   const git = isGitExecutable(file);
   const effectiveTimeout = timeout ?? (git ? GIT_TIMEOUT_MS : COMMAND_TIMEOUT_MS);
-  const effectiveEnv = git ? { ...process.env, ...env, LC_ALL: "C" } : env;
+  const gitBaseEnv = {
+    PATH: minimalChildPath(),
+    ...(process.env.LANG === undefined ? {} : { LANG: process.env.LANG }),
+    ...(process.env.TERM === undefined ? {} : { TERM: process.env.TERM }),
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => /^LC_[A-Z0-9_]+$/.test(key)),
+    ),
+    ...(process.platform === "win32" && process.env.SystemRoot
+      ? { SystemRoot: process.env.SystemRoot }
+      : {}),
+  };
+  const effectiveEnv = git ? { ...gitBaseEnv, ...env, LC_ALL: "C" } : env;
   return new Promise((resolvePromise, rejectPromise) => {
     execFileRunner(
       file,

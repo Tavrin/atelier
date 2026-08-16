@@ -21,6 +21,7 @@ import {
   runFile,
   spawnTracked,
 } from "./lib/exec.mjs";
+import { sanitizeChildEnv } from "./lib/execution/environment-policy.mjs";
 import {
   HttpError,
   jsonResponse,
@@ -706,7 +707,7 @@ async function openPathInEditor(registry, targetPath, spawner, missingMessage) {
   if (!details.isDirectory()) throw new HttpError(409, `${missingMessage}: target is not a directory`);
   const child = spawner(editorCommand, [targetPath], {
     cwd: targetPath,
-    env: process.env,
+    env: sanitizeChildEnv(process.env, { class: "editor" }),
     stdio: "ignore",
   });
   // Editor launch is intentionally fire-and-forget. Attach the error listener

@@ -1,4 +1,5 @@
 import { killTracked } from "../exec.mjs";
+import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput, userMessageLine } from "../stream.mjs";
 
 const MODELS = Object.freeze([
@@ -28,7 +29,7 @@ const CAPABILITIES = Object.freeze({
 function spawnOptions(worktreePath, env) {
   return {
     cwd: worktreePath,
-    env,
+    env: sanitizeChildEnv(env, { class: "provider" }),
     ...(CAPABILITIES.liveInput ? { stdio: ["pipe", "pipe", "pipe"] } : {}),
   };
 }

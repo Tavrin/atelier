@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { killTracked } from "../exec.mjs";
+import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
 import { stateDir } from "../paths.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput } from "../stream.mjs";
 
@@ -484,7 +485,7 @@ function validate({ effort }) {
 
 function companionEnv(env) {
   return {
-    ...env,
+    ...sanitizeChildEnv(env, { class: "provider" }),
     CLAUDE_PLUGIN_DATA: join(stateDir(), "codex-companion"),
   };
 }
