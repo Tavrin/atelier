@@ -121,11 +121,16 @@ test("F2 golden run ignores hostile ambient git config and hooks", async (t) => 
   });
 
   const harness = await createGoldenHarness(t, { scenario: committedScenario("hermetic.txt", "safe\n") });
+  await git(harness.projectPath, ["config", "--local", "core.hooksPath", hooks]);
   const admitted = await harness.dispatch({ prompt: "prove hermetic git" });
   const completed = await harness.waitRecord(admitted.id);
   assert.equal(completed.verify.state, "passed");
   await harness.api(`/api/dispatch/${admitted.id}/merge`, { method: "POST", body: {} });
-  assert.equal(await fileContents(receipt), undefined, "F2 hostile parent hook wrote a receipt");
+  assert.equal(
+    await fileContents(receipt),
+    undefined,
+    "F2 hostile parent or repo-local hook wrote a receipt",
+  );
 });
 
 test("F3 registration failure after daemon start tears down the partial harness", async (t) => {

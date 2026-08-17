@@ -16,6 +16,11 @@ import { StringDecoder } from "node:string_decoder";
 
 import { killTracked } from "../exec.mjs";
 import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
+import {
+  createExecutionProfile,
+  pinnedCompanionPath,
+  pinnedExecutable,
+} from "../execution/execution-profile.mjs";
 import { stateDir } from "../paths.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput } from "../stream.mjs";
 
@@ -494,6 +499,22 @@ function companionEnv(env) {
   });
 }
 
+function executionProfile({ entry, env, resolveCurrent = false }) {
+  const companionPath = resolveCurrent
+    ? companionResolver() ?? null
+    : entry.companionPath ?? companionResolver() ?? null;
+  return createExecutionProfile({
+    agentLane: entry.record.lane,
+    command: "node",
+    companionPath,
+    env: companionEnv(env),
+  });
+}
+
+function companionCommand(entry) {
+  return pinnedExecutable(entry, "node");
+}
+
 function companionErrorMessage(payload) {
   return [
     payload?.job?.errorMessage,
@@ -520,7 +541,7 @@ function companionSummaryMessage(payload) {
 }
 
 function attachCompanion(entry) {
-  const companionPath = entry.companionPath ?? companionResolver();
+  const companionPath = entry.companionPath ?? pinnedCompanionPath(entry) ?? companionResolver();
   if (!companionPath) {
     throw new Error("Codex lane unavailable: codex-companion.mjs was not found");
   }
@@ -580,7 +601,7 @@ async function poll(
   if (entry.record.state !== "running") return;
   try {
     const raw = await commandRunner(
-      "node",
+      companionCommand(entry),
       [entry.companionPath, "status", entry.codexJobId, "--json"],
       { cwd: entry.record.codexWorkspace ?? entry.record.worktreePath, env: entry.env },
     );
@@ -669,7 +690,7 @@ async function poll(
       let rawOutput;
       try {
         const resultRaw = await commandRunner(
-          "node",
+          companionCommand(entry),
           [entry.companionPath, "result", entry.codexJobId, "--json"],
           { cwd: entry.record.codexWorkspace ?? entry.record.worktreePath, env: entry.env },
         );
@@ -799,7 +820,7 @@ function launchCompanion({
     promptArgument,
   ];
   const child = spawner(
-    "node",
+    resume ? companionCommand(entry) : "node",
     args,
     { cwd: worktreePath, env: durableEnv },
   );
@@ -883,7 +904,7 @@ async function stop({ entry, commandRunner }) {
   if (entry.codexJobId) {
     try {
       await commandRunner(
-        "node",
+        companionCommand(entry),
         [entry.companionPath, "cancel", entry.codexJobId, "--json"],
         { cwd: entry.record.codexWorkspace ?? entry.record.worktreePath, env: entry.env },
       );
@@ -918,6 +939,7 @@ export const codexAgent = Object.freeze({
   detach,
   stop,
   preLaunchChecks,
+  executionProfile,
 });
 
 export function _setCompanionResolver(nextResolver = resolveCompanionPath) {

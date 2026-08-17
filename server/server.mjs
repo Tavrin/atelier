@@ -843,10 +843,13 @@ export function createServer({
       const postBody = ["POST", "PATCH"].includes(request.method)
         ? await readJsonBody(request)
         : undefined;
-      if (authContext.actor === "mcp" && postBody?.force === true) {
+      if (
+        authContext.actor === "mcp" &&
+        (postBody?.force === true || postBody?.acceptExecutionProfile === true)
+      ) {
         throw new HttpError(
           409,
-          "MCP force overrides are forbidden; use the human break-glass policy",
+          "MCP operator overrides are forbidden; use the human break-glass policy",
         );
       }
 
@@ -1490,6 +1493,9 @@ export function createServer({
             jsonResponse(response, 200, await dispatcher.reply(id, dispatchActionContext(request, {
               text,
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.acceptExecutionProfile !== undefined
+                ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
+                : {}),
             })));
           } catch (error) {
             throw dispatchHttpError(error);

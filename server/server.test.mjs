@@ -135,9 +135,14 @@ function dispatcherStub() {
       return { id: records[0].id };
     },
     stop: async () => ({ ...records[0], state: "stopped" }),
-    reply: async (id, { text, force }) => {
+    reply: async (id, { text, force, acceptExecutionProfile }) => {
       const record = records.find((candidate) => candidate.id === id);
-      replies.push({ id, text, ...(force !== undefined ? { force } : {}) });
+      replies.push({
+        id,
+        text,
+        ...(force !== undefined ? { force } : {}),
+        ...(acceptExecutionProfile !== undefined ? { acceptExecutionProfile } : {}),
+      });
       return { ...record, state: "running", replyText: text };
     },
     plan: async (id, body) => {
@@ -2719,6 +2724,18 @@ test("reply route validates its text cap and delegates to the dispatcher", async
     force: true,
   });
 
+  await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/reply",
+    body: JSON.stringify({ text: "accept profile", acceptExecutionProfile: true }),
+    contentType: "application/json",
+  });
+  assert.deepEqual(dispatcher._replies.at(-1), {
+    id: "dispatch-1",
+    text: "accept profile",
+    acceptExecutionProfile: true,
+  });
+
   for (const text of ["   ", "-leading-option", "x".repeat(32 * 1024 + 1)]) {
     const rejected = await send(port, {
       method: "POST",
@@ -2728,7 +2745,7 @@ test("reply route validates its text cap and delegates to the dispatcher", async
     });
     assert.equal(rejected.status, 400);
   }
-  assert.equal(dispatcher._replies.length, 2);
+  assert.equal(dispatcher._replies.length, 3);
 });
 
 test("plan route delegates approve and revise actions through the resume endpoint", async (t) => {

@@ -76,16 +76,20 @@ test("runFile strips denied caller Git env while preserving allowed overrides an
     allowDenied: ["GIT_CONFIG_COUNT"],
   });
 
-  assert.equal(captured[0].GIT_CONFIG_GLOBAL, undefined);
+  assert.equal(captured[0].GIT_CONFIG_GLOBAL, "/dev/null");
   assert.equal(captured[0].GIT_DIR, undefined);
   assert.equal(captured[0].LD_AUDIT, undefined);
   assert.equal(captured[0].SSH_ASKPASS, undefined);
   assert.equal(captured[0].MY_APP_FLAG, "enabled");
-  assert.equal(captured[0].GIT_CONFIG_COUNT, undefined);
+  assert.equal(captured[0].GIT_CONFIG_COUNT, "1");
+  assert.equal(captured[0].GIT_CONFIG_KEY_0, "core.hooksPath");
+  assert.equal(captured[0].GIT_CONFIG_VALUE_0, "/dev/null");
+  assert.equal(captured[0].GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(captured[0].GIT_PAGER, "cat");
   assert.equal(captured[0].HOME, process.env.HOME);
   assert.equal(captured[0].PATH, process.env.PATH);
   assert.equal(captured[0].LC_ALL, "C");
-  assert.equal(captured[1].GIT_CONFIG_COUNT, "0");
+  assert.equal(captured[1].GIT_CONFIG_COUNT, "1");
 });
 
 test("runFile sanitizes the default tracker child environment", async (t) => {

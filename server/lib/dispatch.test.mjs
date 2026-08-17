@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
@@ -23,11 +24,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import { LONG_GIT_TIMEOUT_MS } from "./exec.mjs";
+import { envHygiene, LONG_GIT_TIMEOUT_MS } from "./exec.mjs";
+import { sanitizeChildEnv } from "./execution/environment-policy.mjs";
+import { createExecutionProfile } from "./execution/execution-profile.mjs";
 import { createEventLog } from "./event-log.mjs";
 import { acquireInstanceLock } from "./instance-lock.mjs";
 import { stateDir } from "./paths.mjs";
@@ -72,6 +75,17 @@ const FORCE_AUDIT = Object.freeze({
   dispositionRef: "fixture-disposition-ref",
 });
 const seededSyntheticBranches = new Set();
+
+function isCommand(file, name) {
+  return basename(String(file)).toLowerCase().replace(/\.exe$/, "") === name;
+}
+
+function executionEnvDigest(env) {
+  const sorted = Object.fromEntries(
+    Object.keys(env).sort().map((key) => [key, env[key]]),
+  );
+  return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+}
 
 // Most dispatch fixtures use a synthetic branch rather than a real repository.
 // Once merge became bound to the finalized result, that fake branch must resolve
@@ -561,17 +575,17 @@ function stubBakeoffRuntime(
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner((file) => {
-    if (file === "claude") return claudeFails ? failedChild() : successfulChild();
-    if (file === "node") return codexLaunchChild();
+    if (isCommand(file, "claude")) return claudeFails ? failedChild() : successfulChild();
+    if (isCommand(file, "node")) return codexLaunchChild();
     throw new Error(`unexpected spawn: ${file}`);
   });
   _setRunFile(withDispatchChanges(async (file, args, options = {}) => {
     calls.push({ file, args, cwd: options.cwd });
     if (file === "/fixture/br") return "";
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: codexStatus, summary: `codex ${codexStatus}` });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: `codex ${codexStatus}` } });
     }
     assert.equal(file, "git");
@@ -933,6 +947,26 @@ test("dispatch runs queued -> preparing -> running -> completed with prompt post
   assert.doesNotMatch(prompt, /Prior attempts/);
   assert.equal(launches[0].options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(launches[0].options.env.ATELIER_PRIMARY_CHECKOUT, setup.primary);
+  assert.equal(record.executionProfile.version, 1);
+  assert.equal(record.executionProfile.agentLane, record.lane);
+  assert.equal(record.executionProfile.class, "provider");
+  assert.equal(record.executionProfile.executable.command, "claude");
+  assert.equal(isAbsolute(record.executionProfile.executable.resolvedPath), true);
+  assert.equal(record.executionProfile.companionPath, null);
+  assert.equal(record.executionProfile.envDigest, executionEnvDigest(launches[0].options.env));
+  assert.deepEqual(record.executionProfile.envKeys, Object.keys(launches[0].options.env).sort());
+  assert.equal(record.executionProfile.path, launches[0].options.env.PATH);
+  assert.equal(record.executionProfile.home, launches[0].options.env.HOME);
+  assert.equal(record.executionProfile.envKeys.includes("ANTHROPIC_API_KEY"), false);
+  assert.doesNotMatch(JSON.stringify(record.executionProfile), /must-not-pass/);
+  assert.deepEqual(record.executionProfile.gitPosture, {
+    hooks: "disabled",
+    pager: "disabled",
+    globalConfig: "ignored",
+    systemConfig: "ignored",
+  });
+  assert.equal(Number.isNaN(Date.parse(record.executionProfile.capturedAt)), false);
+  assert.deepEqual(rawRecord(setup, record.id).executionProfile, record.executionProfile);
   assert.deepEqual(
     dispatcher.getEvents(id).filter((event) => event.type === "status").map((event) => event.state),
     ["queued", "preparing", "running", "running", "completed"],
@@ -1061,7 +1095,7 @@ test("plan-first runs read-only, supports revision, then approves with full tool
   let verifyRuns = 0;
   _setSpawner((command, args, options) => {
     launches.push({ command, args, options });
-    if (command === "claude") {
+    if (isCommand(command, "claude")) {
       const summaries = [firstPlan, revisedPlan, "implementation complete"];
       const child = claudeResultChild({ summary: summaries[claudeRuns] });
       claudeRuns += 1;
@@ -1151,7 +1185,7 @@ test("boot preserves plan_ready and it does not hold the concurrent cap", async 
   const summaries = ["other work complete", "approved work complete"];
   let launches = 0;
   _setSpawner((command) => {
-    assert.equal(command, "claude");
+    assert.ok(isCommand(command, "claude"));
     const child = claudeResultChild({ summary: summaries[launches] });
     launches += 1;
     return child;
@@ -1252,7 +1286,7 @@ test("reply resumes the captured Claude session, accumulates usage, and re-runs 
   let dispatchId;
   _setSpawner((command, args, options) => {
     launches.push({ command, args, options });
-    if (command === "claude") {
+    if (isCommand(command, "claude")) {
       claudeRuns += 1;
       if (claudeRuns === 2) {
         assert.equal(dispatcher.getEvents(dispatchId).at(-1).type, "reply");
@@ -1293,7 +1327,7 @@ test("reply resumes the captured Claude session, accumulates usage, and re-runs 
   assert.equal(completed.result.version, 2);
   assert.equal(completed.result.invalidationReason, undefined);
   assert.equal(verifyRuns, 2);
-  const claudeLaunches = launches.filter(({ command }) => command === "claude");
+  const claudeLaunches = launches.filter(({ command }) => isCommand(command, "claude"));
   assert.deepEqual(claudeLaunches[1].args, [
     "-p",
     "--resume",
@@ -1314,8 +1348,11 @@ test("reply resumes the captured Claude session, accumulates usage, and re-runs 
     "high",
   ]);
   assert.equal(claudeLaunches[1].options.cwd, first.worktreePath);
+  assert.equal(claudeLaunches[1].command, first.executionProfile.executable.resolvedPath);
   assert.deepEqual(claudeLaunches[1].options.stdio, ["pipe", "pipe", "pipe"]);
-  assert.notStrictEqual(claudeLaunches[1].options.env, claudeLaunches[0].options.env);
+  assert.deepEqual(claudeLaunches[1].options.env, claudeLaunches[0].options.env);
+  assert.equal(executionEnvDigest(claudeLaunches[0].options.env), first.executionProfile.envDigest);
+  assert.equal(executionEnvDigest(claudeLaunches[1].options.env), first.executionProfile.envDigest);
 
   const events = dispatcher.getEvents(dispatchId);
   const reply = events.find((event) => event.type === "reply");
@@ -1329,6 +1366,124 @@ test("reply resumes the captured Claude session, accumulates usage, and re-runs 
     .map(JSON.parse)
     .at(-1);
   assert.equal(persisted.sessionId, "fixture-session");
+  assert.deepEqual(completed.executionProfile, first.executionProfile);
+});
+
+test("reply refuses dispatchEnv drift and an operator acceptance re-stamps with audit history", async (t) => {
+  const setup = await fixture(t, { dispatchEnv: { PROFILE_FLAG: "before" } });
+  stubPreparation();
+  const launches = [];
+  _setSpawner((command, args, options) => {
+    launches.push({ command, args, options });
+    return successfulChild();
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "profile drift" });
+  const first = await waitForState(dispatcher, id, ["completed"]);
+  const original = structuredClone(first.executionProfile);
+
+  setup.project.dispatchEnv = {
+    PROFILE_FLAG: "after",
+    PROFILE_ADDED: "present",
+  };
+  await assert.rejects(
+    dispatcher.reply(id, { text: "continue after config change" }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /^EATELIER_EXECUTION_PROFILE_MISMATCH: /);
+      assert.match(error.message, /envDigest \(keys: PROFILE_ADDED, PROFILE_FLAG\)/);
+      assert.doesNotMatch(error.message, /before|after|present/);
+      return true;
+    },
+  );
+  assert.deepEqual(dispatcher.get(id).executionProfile, original);
+  assert.equal(launches.length, 1);
+
+  const resuming = await dispatcher.reply(id, {
+    text: "accept the deliberate config change",
+    acceptExecutionProfile: true,
+    actor: "human",
+  });
+  assert.equal(resuming.state, "running");
+  assert.equal(launches[1].command, resuming.executionProfile.executable.resolvedPath);
+  assert.equal(
+    resuming.executionProfile.envDigest,
+    executionEnvDigest(launches[1].options.env),
+  );
+  assert.equal(resuming.executionProfile.superseded.length, 1);
+  assert.deepEqual(
+    resuming.executionProfile.superseded[0],
+    {
+      ...original,
+      supersededAt: resuming.executionProfile.superseded[0].supersededAt,
+      reason: "operator accepted",
+      actor: "human",
+    },
+  );
+  assert.equal(
+    Number.isNaN(Date.parse(resuming.executionProfile.superseded[0].supersededAt)),
+    false,
+  );
+  await waitForState(dispatcher, id, ["completed"]);
+});
+
+test("reply refuses when the recorded provider executable no longer resolves", async (t) => {
+  const setup = await fixture(t);
+  const bin = join(setup.root, "profile-bin");
+  await mkdir(bin);
+  const executable = join(bin, process.platform === "win32" ? "claude.cmd" : "claude");
+  await writeFile(
+    executable,
+    process.platform === "win32" ? "@echo off\r\n" : "#!/bin/sh\nexit 0\n",
+  );
+  if (process.platform !== "win32") await chmod(executable, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = bin;
+  t.after(() => { process.env.PATH = previousPath; });
+  stubPreparation();
+  let launches = 0;
+  _setSpawner(() => {
+    launches += 1;
+    return successfulChild();
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "pin provider" });
+  const first = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(first.executionProfile.executable.resolvedPath, executable);
+  await rm(executable);
+
+  await assert.rejects(
+    dispatcher.reply(id, { text: "must not fall back" }),
+    (error) =>
+      error.status === 409 &&
+      /^EATELIER_EXECUTION_PROFILE_MISMATCH: /.test(error.message) &&
+      /executable\.resolvedPath/.test(error.message),
+  );
+  assert.equal(launches, 1);
+});
+
+test("a legacy record stamps legacy_profile_unproven once and resumes", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup, {
+    id: "legacy-profile-resume",
+    ticketId: null,
+    sessionId: "legacy-session",
+  });
+  await mkdir(seeded.worktreePath, { recursive: true });
+  stubPreparation();
+  _setSpawner(() => successfulChild());
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const resumed = await dispatcher.reply(seeded.id, { text: "resume legacy work" });
+
+  assert.equal(resumed.executionProfile.legacy, true);
+  assert.equal(resumed.executionProfile.state, "legacy_profile_unproven");
+  assert.equal(Number.isNaN(Date.parse(resumed.executionProfile.stampedAt)), false);
+  assert.equal(
+    resumed.warnings.filter((warning) => warning.includes("legacy_profile_unproven")).length,
+    1,
+  );
+  assert.equal(rawRecord(setup, seeded.id).executionProfile.legacy, true);
+  await waitForState(dispatcher, seeded.id, ["completed"]);
 });
 
 test("running reply writes the accepted Claude JSONL shape to piped stdin", async (t) => {
@@ -1776,7 +1931,7 @@ test("worktree verification runs sequential argv steps and records a passed verd
   const launches = [];
   _setSpawner((command, args, options) => {
     launches.push({ command, args, options });
-    if (command === "claude") return successfulChild();
+    if (isCommand(command, "claude")) return successfulChild();
     return verifyChild({ stdout: [`${command} output`], stderr: ["detail"] });
   });
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
@@ -1852,7 +2007,7 @@ test("worktree verification records the exact tested HEAD and current main drift
     if (args[2] === "rev-list") return "3\n";
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
   });
-  _setSpawner((command) => command === "claude" ? successfulChild() : verifyChild());
+  _setSpawner((command) => isCommand(command, "claude") ? successfulChild() : verifyChild());
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "stamp verification base" });
   const record = await waitForState(dispatcher, id, ["completed"]);
@@ -1872,7 +2027,7 @@ test("clean detached verification persists an immutable attestation and removes 
   stubPreparation({ onCommand: (_file, args) => gitCalls.push([...args]) });
   const verifyCwds = [];
   _setSpawner((command, _args, options) => {
-    if (command === "claude") return successfulChild();
+    if (isCommand(command, "claude")) return successfulChild();
     verifyCwds.push(options.cwd);
     return verifyChild();
   });
@@ -1914,7 +2069,7 @@ test("a zero-exit verifier that mutates the detached tree fails and cannot attes
     verificationTree: () => verifierRan ? mutatedTree : FIXTURE_RESULT_TREE,
   });
   _setSpawner((command) => {
-    if (command === "claude") return successfulChild();
+    if (isCommand(command, "claude")) return successfulChild();
     verifierRan = true;
     return verifyChild({ code: 0 });
   });
@@ -1942,7 +2097,7 @@ test("verification mutation details redact credential-shaped porcelain paths", a
     verificationStatus: () => verifierRan ? `?? ${credential}.txt\0` : "",
   });
   _setSpawner((command) => {
-    if (command === "claude") return successfulChild();
+    if (isCommand(command, "claude")) return successfulChild();
     verifierRan = true;
     return verifyChild();
   });
@@ -1968,7 +2123,7 @@ test("a failed post-command snapshot is classified as verifier mutation", async 
     },
   });
   _setSpawner((command) => {
-    if (command === "claude") return successfulChild();
+    if (isCommand(command, "claude")) return successfulChild();
     verifierRan = true;
     return verifyChild();
   });
@@ -2274,7 +2429,7 @@ test("verification output is redacted in events and recorded step tails", async 
   const credential = "sk-ABCDEFGHIJKLMNOP";
   stubPreparation();
   _setSpawner((command) =>
-    command === "claude"
+    isCommand(command, "claude")
       ? successfulChild()
       : verifyChild({ stdout: [`credential ${credential}`] }),
   );
@@ -2297,7 +2452,7 @@ test("verification records the first and last 1000 output characters", async (t)
   const first = "A".repeat(1_500);
   const last = "Z".repeat(1_500);
   _setSpawner((command) =>
-    command === "claude" ? successfulChild() : verifyChild({ stdout: [first, last] }));
+    isCommand(command, "claude") ? successfulChild() : verifyChild({ stdout: [first, last] }));
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "long verify" });
   const record = await waitForState(dispatcher, id, ["completed"]);
@@ -2313,7 +2468,7 @@ test("verification preserves every mid-output TAP failure and bounded YAML diagn
   stubPreparation();
   const failingSubtest = "not ok 27 - atelier-4f4 mid-output dispatch failure";
   const secondFailingSubtest = "not ok 28 - atelier-4f4 second dispatch failure";
-  _setSpawner((command) => command === "claude"
+  _setSpawner((command) => isCommand(command, "claude")
     ? successfulChild()
     : verifyChild({
       code: 1,
@@ -2371,7 +2526,7 @@ test("dispatchEnv merges project over defaults, stays hygienic, and reaches veri
   const launches = [];
   _setSpawner((command, args, options) => {
     launches.push({ command, args, options });
-    return command === "claude" ? successfulChild() : verifyChild();
+    return isCommand(command, "claude") ? successfulChild() : verifyChild();
   });
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "verify env" });
@@ -2415,10 +2570,10 @@ test("project defaultAgent beats the defaults lane and Codex tolerates a read-on
       return "";
     }
     if (file === "git" && args[2] === "rev-parse") return ".atelier-git\n";
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "done" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "done" } });
     }
     if (file === "git" && args[2] === "status") return "";
@@ -2474,7 +2629,7 @@ test("completed Codex reply resumes its captured companion thread with user text
     }
     if (file === "git" && args[2] === "rev-parse") return ".atelier-git\n";
     if (file === "git" && args[2] === "status") return "";
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       companionCommands.push({ args, options });
       return JSON.stringify({
         job: {
@@ -2484,7 +2639,7 @@ test("completed Codex reply resumes its captured companion thread with user text
         },
       });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       companionCommands.push({ args, options });
       return JSON.stringify({
         job: {
@@ -2534,7 +2689,7 @@ test("completed Codex reply resumes its captured companion thread with user text
       "--json",
     ],
     [
-      "node",
+      initial.executionProfile.executable.resolvedPath,
       "/fixture/codex-companion.mjs",
       "task",
       "--write",
@@ -2613,12 +2768,12 @@ process.stdout.write(JSON.stringify({ jobId: "oversized-review-job" }) + "\\n");
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         job: { status: "completed", summary: reviewSummary },
       });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({
         job: { status: "completed" },
         storedJob: { result: { rawOutput: reviewSummary } },
@@ -2681,7 +2836,7 @@ test("failed Codex jobs surface companion errorMessage and stderr", async (t) =>
     }
     if (file === "git" && args[2] === "rev-parse") return ".atelier-git\n";
     if (file === "git" && args[2] === "status") return "";
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         job: {
           status: "failed",
@@ -2690,7 +2845,7 @@ test("failed Codex jobs surface companion errorMessage and stderr", async (t) =>
         },
       });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({
         job: { status: "failed", summary: "resume request" },
         storedJob: {
@@ -2751,10 +2906,10 @@ test("codex lane stays warning-free when its resolved git dir is writable", asyn
       return "";
     }
     if (file === "git" && args[2] === "rev-parse") return ".atelier-git\n";
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "done" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "done" } });
     }
     if (file === "git" && args[2] === "status") return "";
@@ -2800,7 +2955,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
   const gitCalls = [];
   let finalizerStatusCalls = 0;
   _setSpawner((file, args) => {
-    if (file === "node" && args[0] === "/fixture/codex-companion.mjs") {
+    if (isCommand(file, "node") && args[0] === "/fixture/codex-companion.mjs") {
       order.push("agent");
       return codexLaunchChild();
     }
@@ -2809,10 +2964,10 @@ test("Atelier commits completed Codex changes before worktree verification", asy
   });
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "implemented safely" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "implemented safely" } });
     }
     assert.equal(file, "git");
@@ -2922,7 +3077,7 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   let verifyRuns = 0;
   _setSpawner((file, args) => {
-    if (file === "node" && args[0] === "/fixture/codex-companion.mjs") {
+    if (isCommand(file, "node") && args[0] === "/fixture/codex-companion.mjs") {
       return codexLaunchChild();
     }
     verifyRuns += 1;
@@ -2931,10 +3086,10 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
   let finalizerStatusCalls = 0;
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "done" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "done" } });
     }
     assert.equal(file, "git");
@@ -3035,7 +3190,7 @@ test("worktree verification stops after a failed step but leaves dispatch comple
   stubPreparation();
   const verifyLaunches = [];
   _setSpawner((command, args) => {
-    if (command === "claude") return successfulChild();
+    if (isCommand(command, "claude")) return successfulChild();
     verifyLaunches.push([command, ...args]);
     return verifyChild({ code: args[0] === "fail" ? 2 : 0, stderr: ["verification failed"] });
   });
@@ -3065,7 +3220,7 @@ test("stop during verification transitions to stopped", async (t) => {
   const setup = await fixture(t, { verifyCommands: ["node --test"] });
   stubPreparation();
   const verify = heldChild();
-  _setSpawner((command) => (command === "claude" ? successfulChild() : verify));
+  _setSpawner((command) => (isCommand(command, "claude") ? successfulChild() : verify));
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "stop verify" });
   await waitForState(dispatcher, id, ["verifying"]);
@@ -9975,7 +10130,7 @@ test("boot recovery reattaches a still-running codex job instead of failing it (
   const statusCalls = [];
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       statusCalls.push(args[2]);
       return JSON.stringify({ status: "running", job: { status: "running", pid: process.pid } });
     }
@@ -9995,6 +10150,81 @@ test("boot recovery reattaches a still-running codex job instead of failing it (
   assert.equal(persisted.codexJobId, "codex-job-live");
   assert.equal(persisted.codexWorkerPid, process.pid);
   assert.match(persisted.codexWorkerPidIdentity, /^linux-proc-start:/);
+});
+
+test("boot refuses codex reattach when companion resolution changed", async (t) => {
+  const setup = await fixture(t, { tracker: "none" });
+  const dispatchDir = join(setup.state, "dispatches");
+  await mkdir(dispatchDir, { recursive: true });
+  const worktreePath = join(setup.state, "worktrees", "fixture", "profile-mismatch");
+  const oldCompanion = "/fixture/codex-companion-old.mjs";
+  const newCompanion = "/fixture/codex-companion-new.mjs";
+  const rawEnv = envHygiene({
+    ...envHygiene(process.env),
+    ATELIER_PRIMARY_CHECKOUT: setup.primary,
+    ATELIER_TRACKER_PATH: setup.primary,
+  });
+  const profileEnv = sanitizeChildEnv({
+    ...rawEnv,
+    CLAUDE_PLUGIN_DATA: join(stateDir(), "codex-companion"),
+  }, {
+    class: "provider",
+    allowDenied: ["CLAUDE_PLUGIN_DATA"],
+  });
+  const executionProfile = createExecutionProfile({
+    agentLane: "codex",
+    command: "node",
+    companionPath: oldCompanion,
+    env: profileEnv,
+  });
+  const record = {
+    id: "boot-codex-profile-mismatch",
+    project: "fixture",
+    ticketId: null,
+    model: "codex-default",
+    effort: null,
+    lane: "codex",
+    state: "running",
+    branch: "atelier/codex-profile-mismatch",
+    worktreePath,
+    codexJobId: "codex-job-mismatch",
+    codexWorkspace: worktreePath,
+    startedAt: "2026-08-17T08:00:00.000Z",
+    endedAt: null,
+    turns: 0,
+    costUSD: 0,
+    sessionId: "codex-thread-mismatch",
+    exitSummary: "",
+    strandedBrWrites: false,
+    verify: null,
+    merged: null,
+    dismissed: null,
+    executionProfile,
+    warnings: [],
+  };
+  await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
+  _setCompanionResolver(() => newCompanion);
+  const companionCalls = [];
+  _setRunFile(async (file, args) => {
+    if (isCommand(file, "node")) companionCalls.push(args);
+    return "";
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await waitForCondition(
+    () => dispatcher.get(record.id)?.state === "failed",
+    "profile-mismatched codex boot did not fail",
+  );
+  const failed = dispatcher.get(record.id);
+  assert.equal(failed.restartResumeReady, true);
+  assert.equal(companionCalls.length, 0);
+  assert.ok(failed.warnings.some((warning) =>
+    warning.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ") &&
+    warning.includes("companionPath") &&
+    warning.includes(oldCompanion) &&
+    warning.includes(newCompanion)));
+  assert.ok(rawRecord(setup, record.id).warnings.some((warning) =>
+    warning.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ")));
 });
 
 test("boot recovery honors a codex job that completed during downtime through the normal finish pipeline", async (t) => {
@@ -10030,10 +10260,10 @@ test("boot recovery honors a codex job that completed during downtime through th
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "implemented while Atelier was down" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "implemented while Atelier was down" } });
     }
     if (file === "git") return "";
@@ -10084,7 +10314,7 @@ test("boot reattach fails closed and releases the claim when the reported codex 
   const calls = [];
   _setRunFile(async (file, args) => {
     calls.push({ file, args });
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       // The companion job store still says "running" (it never recorded a
       // clean exit) but reports no usable pid - the old behavior treated an
       // unverifiable pid as "still alive by default"; it must fail closed.
@@ -10154,7 +10384,7 @@ test("boot reattach fails closed on a PID the OS has reused for an unrelated pro
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "running", job: { status: "running", pid: process.pid } });
     }
     return "";
@@ -10810,7 +11040,7 @@ test("boot reattach on a live pid it cannot corroborate goes UNRESOLVED, keeping
   const calls = [];
   _setRunFile(async (file, args) => {
     calls.push({ file, args });
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "running", job: { status: "running", pid: process.pid } });
     }
     return "";
@@ -10885,10 +11115,10 @@ test("a verify:false codex job that completes during downtime runs no verificati
   });
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "done while down" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "done while down" } });
     }
     assert.equal(file, "git");
@@ -10943,10 +11173,10 @@ test("a verify:true codex job that completes during downtime still runs verifica
   });
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "done while down" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "done while down" } });
     }
     assert.equal(file, "git");
@@ -11015,7 +11245,7 @@ test("an unrecognized companion status fails closed, but only releases the claim
   const calls = [];
   _setRunFile(async (file, args) => {
     calls.push({ file, args });
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       // Round 3/4 returned here BEFORE looking at the reported pid at all, so a
       // live worker's ticket was freed on the strength of a status string this
       // adapter does not even understand.
@@ -11231,7 +11461,7 @@ test("shutdown() is lane-asymmetric through the real dispatch lifecycle: codex i
     codexLaunchCompleted = resolvePromise;
   });
   _setSpawner((file) => {
-    if (file === "claude") return claudeChild;
+    if (isCommand(file, "claude")) return claudeChild;
     return codexLaunchChild("codex-job-shutdown-sweep", () => {
       codexLaunchCompleted();
     });
@@ -11766,7 +11996,7 @@ test("acquireDrainLease refuses while a bake-off's shared claim is in flight (I5
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   let claudeChild;
   _setSpawner((file) => {
-    if (file === "claude") {
+    if (isCommand(file, "claude")) {
       claudeChild = heldChild();
       return claudeChild;
     }
@@ -11783,7 +12013,7 @@ test("acquireDrainLease refuses while a bake-off's shared claim is in flight (I5
       await claimGate;
       return "";
     }
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "running", job: { status: "running" } });
     }
     if (file === "git" && args[2] === "worktree" && args[3] === "add") {
@@ -12219,10 +12449,10 @@ test("integration: Atelier commits real Codex work without committing .beads", a
   _setProbe();
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setRunFile(async (file, args, options = {}) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "real implementation" });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "real implementation" } });
     }
     return execFileSync(file, args, {
@@ -12639,8 +12869,8 @@ test("queue completion automatically launches review and reports a failed verdic
   });
   let agentLaunch = 0;
   _setSpawner((file) => {
-    if (file === "node") return verifyChild();
-    assert.equal(file, "claude");
+    if (isCommand(file, "node")) return verifyChild();
+    assert.ok(isCommand(file, "claude"));
     agentLaunch += 1;
     return agentLaunch === 1
       ? successfulChild()
@@ -12937,7 +13167,7 @@ test("reply-changed HEAD makes a passed review stale and boot launches a fresh g
   const freshReviewChild = heldChild();
   let launches = 0;
   _setSpawner((file) => {
-    if (file === "node") return verifyChild();
+    if (isCommand(file, "node")) return verifyChild();
     launches += 1;
     if (launches === 1) {
       return claudeResultChild({
@@ -13205,7 +13435,7 @@ test("passed manual dispatches do not auto-review", async (t) => {
     verifyCommands: ["node --test"],
   });
   stubPreparation();
-  _setSpawner((file) => file === "node" ? verifyChild() : successfulChild());
+  _setSpawner((file) => isCommand(file, "node") ? verifyChild() : successfulChild());
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
 
   const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "manual work" });
@@ -13240,7 +13470,7 @@ test("queue completion with failed verification does not auto-review", async (t)
     if (file === "git" && ["status", "log"].includes(args[2])) return "";
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
   });
-  _setSpawner((file) => file === "node" ? verifyChild({ code: 1 }) : successfulChild());
+  _setSpawner((file) => isCommand(file, "node") ? verifyChild({ code: 1 }) : successfulChild());
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
 
   await dispatcher.drainQueuesOnce();
@@ -15866,17 +16096,17 @@ test("Codex review dispatches preserve companion rawOutput and omit --write", as
   ].join("\n");
   let companionArgs;
   _setSpawner((file, args) => {
-    assert.equal(file, "node");
+    assert.ok(isCommand(file, "node"));
     companionArgs = args;
     return codexLaunchChild();
   });
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         job: { status: "completed", summary: "Review notes before the required fields." },
       });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({
         job: { status: "completed", summary: "Review notes before the required fields." },
         storedJob: { result: { rawOutput: finalMessage } },
@@ -15936,7 +16166,7 @@ test("a completed review with an unreadable full result is malformed under every
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner(() => codexLaunchChild("codex-review-missing-result"));
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         job: {
           status: "completed",
@@ -15944,7 +16174,7 @@ test("a completed review with an unreadable full result is malformed under every
         },
       });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       throw new Error("companion result retrieval failed");
     }
     if (args[2] === "diff") return args.at(-1) === "HEAD" ? "" : "diff --git a/a b/a\n+x";
@@ -15994,10 +16224,10 @@ test("a completed Codex review with only a bounded PASS summary is malformed", a
   _setSpawner(() => codexLaunchChild("codex-review-summary-only"));
   const boundedPass = "VERDICT: PASS\nSUMMARY: The bounded result summary says approved.";
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ job: { status: "completed", summary: boundedPass } });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ storedJob: { result: { summary: boundedPass } } });
     }
     if (args[2] === "diff") return args.at(-1) === "HEAD" ? "" : "diff --git a/a b/a\n+x";
@@ -16168,7 +16398,7 @@ test("a transient status failure during reattach keeps the claim when the fence 
     calls.push({ file, args });
     // The companion CLI is unavailable for a moment. Round 3 read that as the
     // worker having died and released the ticket.
-    if (file === "node" && args[1] === "status") throw new Error("companion socket refused");
+    if (isCommand(file, "node") && args[1] === "status") throw new Error("companion socket refused");
     return "";
   });
 
@@ -16213,7 +16443,7 @@ test("stop() reaps its worker and keeps the claim when cancellation throws and t
   const calls = [];
   _setRunFile(async (file, args) => {
     calls.push({ file, args });
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       // Live polling is the one place a worker identity may legitimately be
       // established, so this corroborates the pid for real.
       return JSON.stringify({
@@ -16221,7 +16451,7 @@ test("stop() reaps its worker and keeps the claim when cancellation throws and t
         job: { status: "running", pid: worker.child.pid },
       });
     }
-    if (file === "node" && args[1] === "cancel") throw new Error("companion cancel failed");
+    if (isCommand(file, "node") && args[1] === "cancel") throw new Error("companion cancel failed");
     if (file === "git" && args[2] === "worktree" && args[3] === "add") {
       await mkdir(args[6], { recursive: true });
       return "";
@@ -16274,13 +16504,13 @@ test("stop() whose cancellation threw still reaps the worker, and the claim goes
   const calls = [];
   _setRunFile(async (file, args) => {
     calls.push({ file, args });
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         status: "running",
         job: { status: "running", pid: worker.child.pid },
       });
     }
-    if (file === "node" && args[1] === "cancel") throw new Error("companion cancel failed");
+    if (isCommand(file, "node") && args[1] === "cancel") throw new Error("companion cancel failed");
     if (file === "git" && args[2] === "worktree" && args[3] === "add") {
       await mkdir(args[6], { recursive: true });
       return "";
@@ -16687,14 +16917,14 @@ test("a terminal snapshot whose worker Atelier never captured is fenced, not com
   const calls = [];
   _setRunFile(async (file, args) => {
     calls.push({ file, args });
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         status: "completed",
         job: { status: "completed", pid: worker.child.pid },
         summary: "claims to be done",
       });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "claims to be done" } });
     }
     return "";
@@ -16754,14 +16984,14 @@ test("a terminal snapshot whose reported worker is gone completes normally (roun
   _setBrResolver(() => "/fixture/br");
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         status: "completed",
         job: { status: "completed", pid: gonePid },
         summary: "finished while Atelier was down",
       });
     }
-    if (file === "node" && args[1] === "result") {
+    if (isCommand(file, "node") && args[1] === "result") {
       return JSON.stringify({ job: { summary: "finished while Atelier was down" } });
     }
     return "";
@@ -17019,7 +17249,7 @@ test("the incident shape - empty diff plus a closing question - records needs_in
   assert.equal(record.verify.state, "skipped");
   assert.match(record.verify.detail, /nothing to verify/);
   assert.deepEqual(record.verify.steps, []);
-  assert.equal(spawns.filter(({ file }) => file === "node").length, 0);
+  assert.equal(spawns.filter(({ file }) => isCommand(file, "node")).length, 0);
 
   assert.equal(record.outcome.kind, "needs_input");
   assert.equal(record.outcome.changes, "empty");
@@ -17067,7 +17297,7 @@ test("an empty diff with no question is completed_empty, and neither outcome is 
   assert.equal(record.outcome.changes, "empty");
   assert.equal(record.outcome.question, null);
   assert.equal(record.outcome.answerPath, null);
-  assert.equal(spawns.filter((file) => file === "node").length, 0);
+  assert.equal(spawns.filter((file) => isCommand(file, "node")).length, 0);
   await waitForCondition(
     () => claimReleases(calls).length === 1,
     "a completed_empty dispatch did not release its ticket claim",
@@ -17088,7 +17318,7 @@ test("a closing question on top of real changes stays completed, warned, and ver
   const setup = await fixture(t, { tracker: "none", verifyCommands: ["node --test"] });
   stubPreparation();
   _setSpawner((file) => {
-    if (file === "node") return verifyChild({ stdout: ["ok"] });
+    if (isCommand(file, "node")) return verifyChild({ stdout: ["ok"] });
     return claudeResultChild({
       summary: "Implemented the parser and added tests.\nShould I also wire the CLI flag?",
     });
@@ -17142,11 +17372,11 @@ test("codex: an unreadable companion result classifies conservatively instead of
     _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
     _setSpawner(() => codexLaunchChild(`codex-${label.replace(/\s+/g, "-")}`));
     _setRunFile(async (file, args) => {
-      if (file === "node" && args[1] === "status") {
+      if (isCommand(file, "node") && args[1] === "status") {
         // Innocuous, question-free, and NOT the real final output.
         return JSON.stringify({ status: "completed", summary: "implemented the parser" });
       }
-      if (file === "node" && args[1] === "result") return resultBehavior();
+      if (isCommand(file, "node") && args[1] === "result") return resultBehavior();
       assert.equal(file, "git");
       if (args[2] === "worktree" && args[3] === "add") {
         await mkdir(args[6], { recursive: true });
@@ -17190,10 +17420,10 @@ test("codex: a companion result with no final message is a retrieval failure, no
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner(() => codexLaunchChild("codex-no-final"));
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "work done" });
     }
-    if (file === "node" && args[1] === "result") return JSON.stringify({ job: {} });
+    if (isCommand(file, "node") && args[1] === "result") return JSON.stringify({ job: {} });
     assert.equal(file, "git");
     if (args[2] === "worktree" && args[3] === "add") {
       await mkdir(args[6], { recursive: true });
@@ -17777,7 +18007,7 @@ test("answering a needs_input dispatch clears the stale outcome and lets the res
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
   });
   _setSpawner((file) => {
-    if (file === "node") return verifyChild({ stdout: ["ok"] });
+    if (isCommand(file, "node")) return verifyChild({ stdout: ["ok"] });
     return claudeResultChild({
       sessionId: "answerable-session",
       summary: produceChanges ? "Used option 2 as instructed." : "Option 1 or option 2?",
@@ -18180,7 +18410,7 @@ test("integration: a flaky verification is recoverable - the re-run passes, both
   _setProbe();
   _setRunFile();
   _setSpawner((file, args, options) =>
-    file === "claude"
+    isCommand(file, "claude")
       ? claudeResultChild({
           // The claude adapter commits its own work, so the fixture must too -
           // otherwise there is nothing for the merge half of this test to move.
@@ -18739,7 +18969,7 @@ test("a flipped verdict re-opens the automatic review the failed one had closed"
   });
   let reviewLaunches = 0;
   _setSpawner((file) => {
-    if (file === "claude") {
+    if (isCommand(file, "claude")) {
       reviewLaunches += 1;
       return claudeResultChild({ summary: "VERDICT: PASS\nSUMMARY: The re-verified diff passed." });
     }
@@ -18886,7 +19116,7 @@ test("a verification re-run counts a dispatch admission that is still mid-claim"
     if (args[2] === "rev-list") return "0\n";
     return "";
   }));
-  _setSpawner((file) => (file === "claude" ? successfulChild() : verifyChild()));
+  _setSpawner((file) => (isCommand(file, "claude") ? successfulChild() : verifyChild()));
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
 
   const admission = dispatcher.dispatch({ project: "fixture", ticketId: "fixture-new" });
@@ -19214,7 +19444,7 @@ test("a terminal companion job with no resume path has its whole process tree re
     releaseTerminal = resolvePromise;
   });
   _setRunFile(async (file, args) => {
-    if (file === "node" && (args[1] === "status" || args[1] === "result")) {
+    if (isCommand(file, "node") && (args[1] === "status" || args[1] === "result")) {
       await terminal;
       // A terminal job whose worker the store no longer knows: the tzw fence is
       // clean, so this test isolates the process-tree reap.
@@ -19392,7 +19622,7 @@ test("the boot sweep reaps a crash-window tree whose worktree is gone", async (t
   await rm(worktreePath, { recursive: true, force: true });
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setRunFile(async (file, args) => {
-    if (file === "node" && (args[1] === "status" || args[1] === "result")) {
+    if (isCommand(file, "node") && (args[1] === "status" || args[1] === "result")) {
       return JSON.stringify({ status: "failed", job: { status: "failed", pid: null } });
     }
     return "";
@@ -19533,7 +19763,7 @@ test("a live companion poll captures the worker's process tree and keeps a membe
   });
   _setCompanionResolver(() => "/fixture/codex-companion.mjs");
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
         status: "running",
         job: { status: "running", pid: tree.rootPid },
@@ -19692,7 +19922,7 @@ async function reapedThenResumable(t, { onResume }) {
     return onResume();
   });
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "running", job: { status: "running", pid: null } });
     }
     return "";
@@ -19732,7 +19962,9 @@ test("a terminal record whose process tree was reaped still resumes - the reap c
   const record = dispatcher.get("codex-leak");
   assert.equal(record.sessionId, "codex-thread-1");
   assert.equal(record.exitSummary, "");
-  assert.deepEqual(record.warnings, []);
+  assert.deepEqual(record.warnings, [
+    "execution profile is legacy_profile_unproven: the initial spawn environment was not captured",
+  ]);
   const persisted = rawRecord(setup, "codex-leak");
   assert.equal(persisted.codexJobId, "codex-job-resumed");
   // The reaped turn's members may still be listed until a later pass clears them
@@ -19863,7 +20095,7 @@ test("a reported pid that does not match the fence is neither adopted nor captur
   _setCodexPollIntervalMs(5);
   let polls = 0;
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       polls += 1;
       return JSON.stringify({
         status: "running",
@@ -19967,7 +20199,7 @@ test("a resume clears the previous turn's tree before it cold-starts, never mid-
     return codexLaunchChild("codex-job-resumed");
   });
   _setRunFile(async (file, args) => {
-    if (file === "node" && args[1] === "status") {
+    if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "running", job: { status: "running", pid: null } });
     }
     return "";
@@ -20658,7 +20890,7 @@ test("a first-run verification fences its runner at spawn and clears it on the o
   let verifyChildProcess;
   const release = deferredValue();
   _setSpawner((file, args, options) => {
-    if (file !== "node") return successfulChild();
+    if (!isCommand(file, "node")) return successfulChild();
     verifyChildProcess = spawn(
       process.execPath,
       ["-e", "console.log('ready');setInterval(()=>{},1000)"],
@@ -21063,7 +21295,7 @@ test("stopping a verifying dispatch reaps its runner to a verdict instead of fla
   let runner;
   const started = deferredValue();
   _setSpawner((file, args, options) => {
-    if (file === "claude") return successfulChild();
+    if (isCommand(file, "claude")) return successfulChild();
     // Traps SIGTERM, so only an AWAITED escalation can end it. A fire-and-forget
     // kill would leave the fence up while the claim release ran, which is exactly
     // the regression the fence would otherwise have introduced here.
@@ -21510,7 +21742,7 @@ test("gc preserves an in-flight verification checkout until its run cleans up", 
   const verifier = heldChild();
   const verifierStarted = deferredValue();
   _setSpawner((command) => {
-    if (command === "claude") return successfulChild();
+    if (isCommand(command, "claude")) return successfulChild();
     verifierStarted.settle();
     return verifier;
   });

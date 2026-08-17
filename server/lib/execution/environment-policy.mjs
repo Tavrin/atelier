@@ -41,6 +41,7 @@ const DENIED_PREFIXES = [
 
 export const SECRET_ENV_KEY = /key|token|secret|password|credential/i;
 const TRUSTED_BASELINE_CLASSES = new Set(["git", "provider", "editor", "tracker"]);
+const SAFE_POLICY_KEY_NAMES = new Set(["GIT_CONFIG_KEY_0"]);
 
 function controlsExecution(key) {
   const normalized = String(key).toUpperCase();
@@ -80,8 +81,9 @@ export function sanitizeChildEnv(env, { class: childClass, allowDenied = [] } = 
   const allowedDeniedKeys = new Set(allowDenied.map((key) => String(key).toUpperCase()));
   const clean = {};
   for (const [key, value] of Object.entries(env || {})) {
-    if (SECRET_ENV_KEY.test(key)) continue;
-    if (controlsExecution(key) && !allowedDeniedKeys.has(key.toUpperCase())) continue;
+    const normalized = key.toUpperCase();
+    if (SECRET_ENV_KEY.test(key) && !SAFE_POLICY_KEY_NAMES.has(normalized)) continue;
+    if (controlsExecution(key) && !allowedDeniedKeys.has(normalized)) continue;
     clean[key] = value;
   }
   if (TRUSTED_BASELINE_CLASSES.has(childClass)) {
@@ -92,10 +94,18 @@ export function sanitizeChildEnv(env, { class: childClass, allowDenied = [] } = 
 }
 
 export function gitChildEnv(env, { allowDenied = [] } = {}) {
+  const posture = {
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_PAGER: "cat",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.hooksPath",
+    GIT_CONFIG_VALUE_0: "/dev/null",
+  };
   const merged = {
     PATH: trustedChildPath(),
-    // Trusted-local Git needs the operator's identity, credential and
-    // safe.directory configuration. Wave 2 profiles will scope HOME per class.
+    // HOME remains trusted-local for credential helpers and repository access;
+    // global/system Git config is deliberately disabled by the posture below.
     HOME: trustedChildHome(),
     ...(process.env.LANG === undefined ? {} : { LANG: process.env.LANG }),
     ...(process.env.TERM === undefined ? {} : { TERM: process.env.TERM }),
@@ -106,7 +116,14 @@ export function gitChildEnv(env, { allowDenied = [] } = {}) {
       ? { SystemRoot: process.env.SystemRoot }
       : {}),
     ...env,
+    // Applied last so callers cannot restore global/system config, pagers, or
+    // repo-local hooks. Repo-local filters and attributes remain trusted-local;
+    // the broader content-transform boundary belongs to ATT-008 isolation.
+    ...posture,
     LC_ALL: "C",
   };
-  return sanitizeChildEnv(merged, { class: "git", allowDenied });
+  return sanitizeChildEnv(merged, {
+    class: "git",
+    allowDenied: [...allowDenied, ...Object.keys(posture)],
+  });
 }
