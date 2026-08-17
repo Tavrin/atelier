@@ -164,9 +164,16 @@ async function main() {
       }
       case "mutate_during_verify": {
         const target = workspacePath(workspace, step.watcherPath || ".fake-verify-watcher.json");
+        const receiptPath = workspacePath(
+          workspace,
+          step.receiptPath || ".fake-verify-receipt.json",
+          "verification receipt",
+        );
         await writeFile(target, `${JSON.stringify({
           writes: step.writes || [],
-          receiptPath: step.receiptPath || ".fake-verify-receipt.json",
+          // Verification runs in a disposable checkout. Keep the proof receipt
+          // in the originating dispatch worktree so cleanup cannot erase it.
+          receiptPath,
         })}\n`, "utf8");
         log({ type: "fake.verify-armed", path: relative(workspace, target) });
         break;

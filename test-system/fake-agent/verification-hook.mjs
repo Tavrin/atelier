@@ -19,10 +19,11 @@ for (const file of scenario.writes || []) {
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, file.content, "utf8");
 }
-const receipt = resolve(workspace, scenario.receiptPath || ".fake-verify-receipt.json");
-const receiptRelative = relative(workspace, receipt);
-if (!receiptRelative || receiptRelative.startsWith("..") || isAbsolute(receiptRelative)) {
-  throw new Error("verification receipt escapes the workspace");
-}
+// The fake agent validates and records this path while it is still in the
+// originating dispatch worktree. It is intentionally absolute because this
+// hook runs in a disposable verification checkout that is removed on return.
+const receipt = isAbsolute(scenario.receiptPath)
+  ? resolve(scenario.receiptPath)
+  : resolve(workspace, scenario.receiptPath || ".fake-verify-receipt.json");
 await mkdir(dirname(receipt), { recursive: true });
 await writeFile(receipt, `${JSON.stringify({ ran: true, exitCode: 0 })}\n`, "utf8");

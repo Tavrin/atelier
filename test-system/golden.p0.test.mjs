@@ -183,7 +183,7 @@ test("R1 production CLI routes through daemon and direct second writer is locked
   assert.deepEqual(await readFile(indexPath), before, "R1 locked constructor mutated shared state");
 });
 
-test("R2 dirty intended work is never verified and then discarded by merge", { todo: true }, async (t) => {
+test("R2 dirty intended work is never verified and then discarded by merge", async (t) => {
   const harness = await createGoldenHarness(t, {
     scenario: {
       sessionRef: "dirty-result",
@@ -220,7 +220,7 @@ test("R2 dirty intended work is never verified and then discarded by merge", { t
   assert.equal(mainAfter, mainBefore, "R2 refused merge still moved main");
 });
 
-test("R3 verification cannot attest mutation or a stale branch HEAD", { todo: true }, async (t) => {
+test("R3 verification cannot attest mutation or a stale branch HEAD", async (t) => {
   const failures = [];
 
   const mutationHarness = await createGoldenHarness(t, {
