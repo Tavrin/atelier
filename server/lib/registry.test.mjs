@@ -385,12 +385,40 @@ test("registry writes fsync and replace the destination with mode 0600", async (
   assert.equal((await stat(registryPath)).mode & 0o777, 0o600);
 });
 
-test("loadRegistry refuses a symlinked registry file", async (t) => {
+test("loadRegistry follows a trusted-local config symlink to a regular file", async (t) => {
   const { root, registryPath } = await fixture(t);
   const target = join(root, "registry-target.json");
   await writeFile(target, JSON.stringify({ version: 1, defaults: {}, groups: [], projects: [] }));
   await symlink(target, registryPath);
-  await assert.rejects(loadRegistry(registryPath), /refuses non-regular or symlinked state file/);
+  assert.deepEqual(await loadRegistry(registryPath), {
+    version: 1,
+    defaults: { dispatchProfile: {} },
+    groups: [],
+    projects: [],
+  });
+});
+
+test("loadRegistry requires a config symlink's final target to be a regular file", async (t) => {
+  const { root, registryPath } = await fixture(t);
+  const target = join(root, "registry-target-directory");
+  await mkdir(target);
+  await symlink(target, registryPath);
+  await assert.rejects(loadRegistry(registryPath), (error) => {
+    assert.ok(error instanceof RegistryError);
+    assert.match(error.message, /config file/);
+    assert.match(error.message, /non-regular/);
+    assert.doesNotMatch(error.message, /state file/);
+    return true;
+  });
+});
+
+test("loadRegistry rejects a dangling config symlink instead of treating it as absent", async (t) => {
+  const { root, registryPath } = await fixture(t);
+  await symlink(join(root, "missing-registry-target.json"), registryPath);
+  await assert.rejects(loadRegistry(registryPath), (error) =>
+    error instanceof RegistryError &&
+    /cannot read or parse config/.test(error.message) &&
+    /ENOENT/.test(error.message));
 });
 
 test("updateProject preserves trackerPath unless an internal update explicitly removes it", async (t) => {

@@ -610,6 +610,9 @@ async function doctor(args) {
         `for ${debt.ticketId ?? "unknown ticket"} (${attemptDetail}${errorDetail})`,
       );
     }
+    for (const target of result.persistenceFailureTargets ?? []) {
+      console.log(`persistence degraded: ${target}`);
+    }
     for (const error of result.errors) console.error(`gc error: ${error}`);
     for (const error of codexProcesses.errors ?? []) {
       console.error(`gc error: codex process sweep: ${error}`);
@@ -626,6 +629,16 @@ async function doctor(args) {
     );
     if (errorCount > 0) process.exitCode = 1;
     return;
+  }
+
+  const persistence = createDispatcher({
+    registry,
+    stateDir: stateDir(),
+    sweepCodexProcessesAtBoot: false,
+    observer: true,
+  }).persistenceStatus();
+  for (const target of persistence.targets) {
+    console.log(`persistence degraded: ${target}`);
   }
 
   const checks = await Promise.all([

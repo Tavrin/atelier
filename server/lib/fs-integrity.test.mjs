@@ -19,6 +19,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  appendGuarded,
   appendDurable,
   writeFileAtomic,
   writeFileExclusiveDurable,
@@ -95,6 +96,20 @@ test("new durable products are owner-only without chmodding existing append targ
   assert.equal(readFileSync(appendPath, "utf8"), "legacy\nappend\n");
 });
 
+test("guarded append keeps owner-only creation and does not fsync output lines", (t) => {
+  const root = fixture(t);
+  const path = join(root, "stream.jsonl");
+  appendGuarded(path, "output\n", {
+    fileOps: {
+      fsyncSync() {
+        throw new Error("guarded append must not fsync");
+      },
+    },
+  });
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assert.equal(readFileSync(path, "utf8"), "output\n");
+});
+
 test("atomic and append creation modes defeat a permissive umask", (t) => {
   const root = fixture(t);
   const previous = process.umask(0o777);
@@ -117,6 +132,8 @@ test("append refuses a symlink before writing any bytes", (t) => {
   writeFileSync(target, "before\n");
   symlinkSync(target, link);
   assert.throws(() => appendDurable(link, "after\n"), (error) =>
+    ["ELOOP", "EEXIST"].includes(error?.code));
+  assert.throws(() => appendGuarded(link, "after\n"), (error) =>
     ["ELOOP", "EEXIST"].includes(error?.code));
   assert.equal(readFileSync(target, "utf8"), "before\n");
 });

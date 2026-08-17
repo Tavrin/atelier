@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { configDir } from "./paths.mjs";
@@ -671,17 +671,29 @@ export async function removeProject(
 export async function loadRegistry(filePath = join(configDir(), "projects.json")) {
   let registry;
   try {
-    registry = JSON.parse(readFileNoFollowSync(filePath, "utf8"));
+    // projects.json is trusted-local configuration and is commonly managed by
+    // a dotfiles symlink. Follow that one config path, then retain the strict
+    // regular-file/no-follow read at its final target. State under stateDir is
+    // deliberately not granted this exception.
+    const resolvedFilePath = realpathSync(filePath);
+    registry = JSON.parse(readFileNoFollowSync(resolvedFilePath, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") {
-      return {
-        version: STARTER_REGISTRY.version,
-        defaults: {},
-        groups: [],
-        projects: [],
-      };
+      try {
+        lstatSync(filePath);
+      } catch (pathError) {
+        if (pathError.code === "ENOENT") {
+          return {
+            version: STARTER_REGISTRY.version,
+            defaults: {},
+            groups: [],
+            projects: [],
+          };
+        }
+      }
     }
-    throw new RegistryError([`cannot read or parse ${filePath}: ${error.message}`]);
+    const detail = String(error.message).replaceAll("state file", "config file");
+    throw new RegistryError([`cannot read or parse config ${filePath}: ${detail}`]);
   }
 
   if (!isObject(registry)) {

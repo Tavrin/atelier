@@ -75,6 +75,7 @@ import {
 } from "./stream.mjs";
 import { DEFAULTS, resolveProjectDefaultAgent } from "./registry.mjs";
 import {
+  appendGuarded,
   appendDurable,
   readFileNoFollowSync,
   writeFileAtomic,
@@ -243,6 +244,17 @@ const PERSISTENCE_WARNING =
   "PERSISTENCE DEGRADED: updates are running in memory; Atelier will retry writes on the next transition";
 const VERIFY_PERSISTENCE_WARNING =
   "VERIFICATION PERSISTENCE DEGRADED: the verification attempt or verdict was not made durable";
+const DURABLE_EVENT_TYPES = new Set([
+  "exit",
+  "plan",
+  "post-merge",
+  "reply",
+  "review",
+  "review-disposition",
+  "status",
+  "verify",
+  "verify-rerun",
+]);
 // ONE fencing pair: the persisted pid, the /proc start-time identity that proves
 // the pid was never recycled, and the two accessors that locate them on a record.
 // `hold` is what lets a pair persisted INSIDE another object join the vocabulary
@@ -1648,21 +1660,66 @@ export function createDispatcher({
     }
   }
 
-  function writeWorkspaceIdentity(worktree, record, project, kind) {
+  async function writeWorkspaceIdentity(worktree, record, project, kind) {
     // A successful `git worktree add` normally created this directory. Keep the
     // token write deterministic for injected runners and fail later at the
     // existing rev-parse linkage check if a runner falsely reported success.
     mkdirSync(worktree, { recursive: true });
     const identityPath = join(worktree, WORKSPACE_IDENTITY_FILE);
+    let existingIdentity;
+    let identityPathExists = false;
     try {
       lstatSync(identityPath);
-      const error = new Error(
-        `workspace identity naming collision: ${identityPath} already exists`,
-      );
-      error.code = "EATELIERWORKSPACECOLLISION";
-      throw error;
+      identityPathExists = true;
+      try {
+        existingIdentity = readWorkspaceIdentity(worktree);
+      } catch {
+        // A foreign file at the reserved path is a real collision. Its parse
+        // failure is intentionally reported by the common collision below.
+      }
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
+    }
+    if (identityPathExists) {
+      let tracked = false;
+      if (existingIdentity) {
+        try {
+          await commandRunner("git", [
+            "-C",
+            worktree,
+            "cat-file",
+            "-e",
+            `HEAD:${WORKSPACE_IDENTITY_FILE}`,
+          ]);
+          tracked = true;
+        } catch {
+          // A valid token that is merely untracked or staged may belong to
+          // another Atelier operation; only checked-out commit provenance
+          // makes this recoverable project pollution.
+        }
+      }
+      if (!tracked) {
+        const error = new Error(
+          `workspace identity naming collision: ${identityPath} already exists`,
+        );
+        error.code = "EATELIERWORKSPACECOLLISION";
+        throw error;
+      }
+      const pollutingCommit = String(await commandRunner(
+        "git",
+        ["-C", worktree, "rev-parse", "HEAD"],
+      )).trim();
+      addWarningOnce(
+        record,
+        `tracked Atelier workspace token from polluting commit ${pollutingCommit || "unknown"} was replaced at ${WORKSPACE_IDENTITY_FILE}`,
+      );
+      try {
+        persistenceLogger.warn(
+          `Atelier workspace ${worktree}: replaced tracked identity token from polluting commit ${pollutingCommit || "unknown"}`,
+        );
+      } catch {
+        // Logging cannot turn a recoverable polluted checkout into a failure.
+      }
     }
     writeFileAtomic(
       identityPath,
@@ -1816,7 +1873,7 @@ export function createDispatcher({
     return { allowed: true };
   }
 
-  async function removeWorkspaceCreatedInProcess(worktree, project) {
+  async function removeWorkspaceCreatedInProcess(worktree, project, { existedBeforeAdd = false } = {}) {
     try {
       await commandRunner("git", [
         "-C",
@@ -1830,6 +1887,11 @@ export function createDispatcher({
       // A timed-out add may have created the directory without registering it.
     }
     if (!existsSync(worktree)) return;
+    if (existedBeforeAdd) {
+      throw new Error(
+        `workspace cleanup retained pre-existing path after failed worktree add: ${worktree}`,
+      );
+    }
     const details = lstatSync(worktree);
     if (!details.isDirectory() || details.isSymbolicLink()) {
       throw new Error(`refusing to remove non-directory checkout artifact ${worktree}`);
@@ -1837,13 +1899,19 @@ export function createDispatcher({
     rmSync(worktree, { recursive: true, force: true });
   }
 
-  async function writeWorkspaceIdentityAfterAdd(worktree, record, project, kind) {
+  async function writeWorkspaceIdentityAfterAdd(
+    worktree,
+    record,
+    project,
+    kind,
+    { existedBeforeAdd = false } = {},
+  ) {
     try {
-      writeWorkspaceIdentity(worktree, record, project, kind);
+      await writeWorkspaceIdentity(worktree, record, project, kind);
     } catch (error) {
       let cleanupFailure;
       try {
-        await removeWorkspaceCreatedInProcess(worktree, project);
+        await removeWorkspaceCreatedInProcess(worktree, project, { existedBeforeAdd });
       } catch (cleanupError) {
         cleanupFailure = cleanupError;
       }
@@ -1933,7 +2001,7 @@ export function createDispatcher({
       typeof value === "object" &&
       !Array.isArray(value) &&
       Object.entries(value).every(([projectName, state]) =>
-        registry.projects.some((project) => project.name === projectName) &&
+        typeof projectName === "string" && Boolean(projectName) &&
         state &&
         typeof state === "object" &&
         !Array.isArray(state) &&
@@ -1957,6 +2025,10 @@ export function createDispatcher({
         ticketResumes: loadQueueResumes(savedQueues?.[project.name]?.ticketResumes),
       },
     ]),
+  );
+  const preservedQueueStates = new Map(
+    Object.entries(savedQueues).filter(([projectName]) =>
+      !registry.projects.some((project) => project.name === projectName)),
   );
   let drainingQueues = false;
   let drainingQueueProject;
@@ -2212,24 +2284,44 @@ export function createDispatcher({
     }
   }
 
-  function persistenceFailureTargets() {
+  function persistenceFailureTargets(entry) {
     const targets = [];
     if (queuePersistenceFailures.size > 0) targets.push(queuePath);
     if (convoyPersistenceFailures.size > 0) targets.push(convoysPath);
-    for (const entry of entries.values()) {
-      for (const target of entry.persistenceFailures) {
+    const affectedEntries = entry ? [entry] : entries.values();
+    for (const affectedEntry of affectedEntries) {
+      for (const target of affectedEntry.persistenceFailures) {
         targets.push(
           target === "event"
-            ? join(dispatchDir, `${entry.record.id}.jsonl`)
-            : `${indexPath} (dispatch ${entry.record.id})`,
+            ? join(dispatchDir, `${affectedEntry.record.id}.jsonl`)
+            : `${indexPath} (dispatch ${affectedEntry.record.id})`,
         );
       }
     }
     return [...new Set(targets)].sort();
   }
 
-  function persistenceDegraded() {
-    return persistenceFailureTargets().length > 0;
+  function persistenceDegraded(entry) {
+    return persistenceFailureTargets(entry).length > 0;
+  }
+
+  function persistenceDetail(entry) {
+    const targets = persistenceFailureTargets(entry);
+    return targets.length > 0
+      ? `Persistence degraded for: ${targets.join(", ")}`
+      : null;
+  }
+
+  function persistenceStatus() {
+    mergePersistedEntries();
+    const targets = persistenceFailureTargets();
+    return { degraded: targets.length > 0, targets };
+  }
+
+  function clearEntryPersistenceFailures(entry) {
+    entry.persistenceFailures.clear();
+    pendingRecordEntries.delete(entry);
+    pendingEventWrites.delete(entry);
   }
 
   function appendAlreadyPersisted(path, contents) {
@@ -2263,6 +2355,7 @@ export function createDispatcher({
     target,
     owner,
     onFailure,
+    durable = true,
   }) {
     const degrade = (error) => {
       if (typeof error?.code !== "string") throw error;
@@ -2277,7 +2370,7 @@ export function createDispatcher({
       return false;
     };
     let malformedTail = false;
-    if (method === "appendFileSync") {
+    if (method === "appendFileSync" && durable) {
       try {
         malformedTail = hasUnterminatedTail(path);
       } catch (error) {
@@ -2294,7 +2387,7 @@ export function createDispatcher({
       }
     }
     const recoveryPrefix = malformedTail ? "\n" : "";
-    if (method === "appendFileSync" && failures.has(target) && !malformedTail) {
+    if (method === "appendFileSync" && durable && failures.has(target) && !malformedTail) {
       let alreadyPersisted;
       try {
         alreadyPersisted = appendAlreadyPersisted(path, contents);
@@ -2310,7 +2403,8 @@ export function createDispatcher({
     const written = guardedFilesystemCall(() => {
       const storedContents = `${recoveryPrefix}${contents}`;
       if (method === "appendFileSync") {
-        appendDurable(path, storedContents, { fileOps: persistenceFileOps });
+        const append = durable ? appendDurable : appendGuarded;
+        append(path, storedContents, { fileOps: persistenceFileOps });
       } else if (method === "writeFileSync") {
         writeFileAtomic(path, storedContents, { mode: 0o600, fileOps: persistenceFileOps });
       } else {
@@ -2325,21 +2419,24 @@ export function createDispatcher({
 
   function persistQueues() {
     const saved = Object.fromEntries(
-      registry.projects.map((project) => {
-        const state = queues.get(project.name);
-        return [
-          project.name,
-          {
-            enabled: state?.enabled === true,
-            ...(state?.ticketAttempts?.size > 0
-              ? { ticketAttempts: Object.fromEntries(state.ticketAttempts) }
-              : {}),
-            ...(state?.ticketResumes?.size > 0
-              ? { ticketResumes: Object.fromEntries(state.ticketResumes) }
-              : {}),
-          },
-        ];
-      }),
+      [
+        ...preservedQueueStates,
+        ...registry.projects.map((project) => {
+          const state = queues.get(project.name);
+          return [
+            project.name,
+            {
+              enabled: state?.enabled === true,
+              ...(state?.ticketAttempts?.size > 0
+                ? { ticketAttempts: Object.fromEntries(state.ticketAttempts) }
+                : {}),
+              ...(state?.ticketResumes?.size > 0
+                ? { ticketResumes: Object.fromEntries(state.ticketResumes) }
+                : {}),
+            },
+          ];
+        }),
+      ],
     );
     const contents = `${JSON.stringify(saved, null, 2)}\n`;
     const persisted = guardedPersistenceWrite({
@@ -2356,12 +2453,14 @@ export function createDispatcher({
 
   function queueState(project) {
     if (!queues.has(project.name)) {
+      const preserved = preservedQueueStates.get(project.name);
+      preservedQueueStates.delete(project.name);
       queues.set(project.name, {
-        enabled: false,
+        enabled: preserved?.enabled === true,
         consecutiveFailures: 0,
         lastError: null,
-        ticketAttempts: new Map(),
-        ticketResumes: new Map(),
+        ticketAttempts: loadQueueAttempts(preserved?.ticketAttempts),
+        ticketResumes: loadQueueResumes(preserved?.ticketResumes),
       });
     }
     return queues.get(project.name);
@@ -2722,6 +2821,7 @@ export function createDispatcher({
 
   function publicConvoy(convoy) {
     return {
+      ...convoy,
       id: convoy.id,
       project: convoy.project,
       ticketIds: [...convoy.ticketIds],
@@ -2736,7 +2836,10 @@ export function createDispatcher({
   }
 
   function persistConvoys({ convoy, entry } = {}) {
-    const contents = `${JSON.stringify([...convoys.values()].map(publicConvoy), null, 2)}\n`;
+    const contents = `${JSON.stringify([...convoys.values()].map((candidate) =>
+      registry.projects.some((project) => project.name === candidate.project)
+        ? publicConvoy(candidate)
+        : candidate), null, 2)}\n`;
     const persisted = guardedPersistenceWrite({
       method: "writeFileSync",
       path: convoysPath,
@@ -2810,9 +2913,11 @@ export function createDispatcher({
       exposed.projectRemoved = true;
     }
     exposed.gates = gatesFor(exposed);
-    exposed.persistenceDegraded = persistenceDegraded();
+    const entry = entries.get(record.id);
+    exposed.persistenceDegraded = persistenceDegraded(entry);
     if (exposed.persistenceDegraded) {
-      exposed.persistenceFailureTargets = persistenceFailureTargets();
+      exposed.persistenceFailureTargets = persistenceFailureTargets(entry);
+      exposed.persistenceDetail = persistenceDetail(entry);
     }
     return exposed;
   }
@@ -2828,6 +2933,7 @@ export function createDispatcher({
       onFailure() {
         addPersistenceWarning(entry.record);
       },
+      durable: pending.durable !== false,
     });
   }
 
@@ -2855,10 +2961,12 @@ export function createDispatcher({
     };
     const eventPath = join(dispatchDir, `${entry.record.id}.jsonl`);
     const contents = `${JSON.stringify(stored)}\n`;
+    const durable = Boolean(stored.warning) || DURABLE_EVENT_TYPES.has(event.type);
     const priorEventsPersisted = retryPendingEventsFor(entry);
     const persisted = priorEventsPersisted && appendEventContents(entry, {
       path: eventPath,
       contents,
+      durable,
     });
     if (!persisted) {
       stored.warning = PERSISTENCE_WARNING;
@@ -2870,10 +2978,11 @@ export function createDispatcher({
       const retried = priorEventsPersisted && appendEventContents(entry, {
         path: eventPath,
         contents: retryContents,
+        durable: true,
       });
       if (!retried) {
         const writes = pendingEventWrites.get(entry) ?? [];
-        writes.push({ path: eventPath, contents: retryContents });
+        writes.push({ path: eventPath, contents: retryContents, durable: true });
         pendingEventWrites.set(entry, writes);
       }
     } else if (pendingRecordEntries.has(entry)) {
@@ -5016,6 +5125,7 @@ export function createDispatcher({
   }, useCheckout) {
     let worktreeAdded = false;
     let worktreeAddAttempted = false;
+    const existedBeforeAdd = existsSync(worktree);
     try {
       worktreeAddAttempted = true;
       await commandRunner("git", [
@@ -5029,7 +5139,9 @@ export function createDispatcher({
       ], { timeout: LONG_GIT_TIMEOUT_MS });
       worktreeAdded = true;
       try {
-        await writeWorkspaceIdentityAfterAdd(worktree, entry.record, project, kind);
+        await writeWorkspaceIdentityAfterAdd(worktree, entry.record, project, kind, {
+          existedBeforeAdd,
+        });
       } catch (error) {
         worktreeAdded = false;
         throw error;
@@ -5051,36 +5163,18 @@ export function createDispatcher({
         existsSync(worktree);
       if (partialAddDirectory) {
         try {
-          await removeWorkspaceCreatedInProcess(worktree, project);
+          await removeWorkspaceCreatedInProcess(worktree, project, { existedBeforeAdd });
           await onRemoved?.();
         } catch (error) {
           await onCleanupFailure?.(error);
         }
       } else if (worktreeAdded) {
         try {
-          const authorization = authorizeWorkspaceRemoval(worktree, {
-            recordId: entry.record.id,
-            project: project.name,
-            kind,
-          });
-          if (!retainWorkspaceOnIdentityFailure(entry, authorization)) {
-            await onCleanupFailure?.(new Error(authorization.warning));
-          } else {
-            const revalidation = revalidateWorkspaceRemoval(worktree, authorization);
-            if (!retainWorkspaceOnIdentityFailure(entry, revalidation)) {
-              await onCleanupFailure?.(new Error(revalidation.warning));
-            } else {
-              await commandRunner("git", [
-                "-C",
-                project.path,
-                "worktree",
-                "remove",
-                worktree,
-                "--force",
-              ], { timeout: LONG_GIT_TIMEOUT_MS });
-              await onRemoved?.();
-            }
-          }
+          // This checkout was created by this invocation. In-process
+          // provenance remains authoritative even if the verify/build command
+          // removed the token while cleaning its tree.
+          await removeWorkspaceCreatedInProcess(worktree, project, { existedBeforeAdd });
+          await onRemoved?.();
         } catch (error) {
           // A failed add may never have registered the path with git. Its
           // accurate failure is the add error, not a second cleanup warning.
@@ -6100,6 +6194,7 @@ export function createDispatcher({
         throw new Error("Dispatch worktree must not equal the primary checkout");
       }
       mkdirSync(dirname(worktreePath), { recursive: true });
+      const existedBeforeAdd = existsSync(worktreePath);
       Object.assign(entry.record, { branch, worktreePath });
       persist(entry);
       await commandRunner(
@@ -6112,6 +6207,7 @@ export function createDispatcher({
         entry.record,
         project,
         "dispatch",
+        { existedBeforeAdd },
       );
       if (entry.record.state !== "preparing") {
         await abandonPreparation(entry, project);
@@ -6383,7 +6479,7 @@ export function createDispatcher({
       throw dispatcherError(
         409,
         `execution profile acceptance refused: persistence degradation ` +
-          `(${persistenceFailureTargets().join(", ")})`,
+          `(${persistenceFailureTargets(entry).join(", ")})`,
       );
     }
   }
@@ -8507,6 +8603,8 @@ ${diff}`;
       entry.finished = false;
       entry.result = undefined;
       entry.stderrLines = [];
+      // Stamp only on the admitted cold-spawn path. A live-input or refused
+      // reply never mutates either the durable env or immutable profile.
       entry.env = resumeEnvironments.providerEnv;
       entry.workloadEnv = resumeEnvironments.workloadEnv;
       try {
@@ -8886,7 +8984,10 @@ ${diff}`;
       if (!TERMINAL_STATES.has(reservedEntry.record.state)) {
         throw dispatcherError(409, `state gate failed: only terminal dispatches can be dismissed`);
       }
-      if (reservedEntry.record.dismissed) return exposedRecord(reservedEntry.record);
+      if (reservedEntry.record.dismissed) {
+        clearEntryPersistenceFailures(reservedEntry);
+        return exposedRecord(reservedEntry.record);
+      }
       const project = registry.projects.find(
         (candidate) => candidate.name === reservedEntry.record.project,
       );
@@ -8991,6 +9092,11 @@ ${diff}`;
         failureKind: loggedFailureKind(reservedEntry.record),
         merged: Boolean(reservedEntry.record.merged),
       });
+      // Dismissal is the operator exit for a record whose private index/event
+      // files may be permanently unwritable. The best-effort dismissal writes
+      // above still run, but their failure cannot keep this record in the
+      // aggregate degradation set forever.
+      clearEntryPersistenceFailures(reservedEntry);
       return exposedRecord(reservedEntry.record);
     } finally {
       releaseLifecycle();
@@ -9057,6 +9163,7 @@ ${diff}`;
         return {
           root: join(root, projectName),
           kind,
+          projectName,
           owningProject: registry.projects.find((project) => project.name === projectName),
         };
       }
@@ -9359,7 +9466,15 @@ ${diff}`;
     if (!Number.isFinite(nowMs)) throw dispatcherError(400, "now must be a valid date");
     mergePersistedEntries();
     const cutoff = nowMs - olderThanDays * 24 * 60 * 60 * 1_000;
-    const result = { dryRun, olderThanDays, dismissed: [], orphans: [], errors: [], warnings: [] };
+    const result = {
+      dryRun,
+      olderThanDays,
+      dismissed: [],
+      orphans: [],
+      errors: [],
+      warnings: [],
+      persistenceFailureTargets: persistenceFailureTargets(),
+    };
     const reportedRetainedPaths = new Set();
     // This is deliberately a LIVE view, not a snapshot taken before GC's
     // awaited git calls. A queued post-merge verifier can create and persist its
@@ -9529,8 +9644,8 @@ ${diff}`;
           (project) => project.name === identity.project,
         );
         if (
-          !identityProject ||
           identity.kind !== context.kind ||
+          (context.projectName && identity.project !== context.projectName) ||
           (owningProject && identityProject !== owningProject) ||
           (registeredProject && identityProject !== registeredProject)
         ) {
@@ -9538,6 +9653,11 @@ ${diff}`;
           continue;
         }
         owningProject = identityProject;
+        if (!identityProject) {
+          result.warnings.push(
+            `orphan ${path}: reclaiming Atelier workspace for deregistered project ${identity.project}`,
+          );
+        }
       }
       if (dryRun) {
         result.orphans.push(path);
@@ -9703,6 +9823,7 @@ ${diff}`;
       await drainMergeFollowUpDebt(entry, project);
       return exposedRecord(record);
     }
+    assertWorkspaceIdentityExcluded(record.result?.manifest);
     if (record.mergeIntent) {
       await reconcileMergeIntent(entry, project);
       if (record.merged) {
@@ -9717,6 +9838,7 @@ ${diff}`;
           );
         }
         const abandonedMergeIntent = { ...record.mergeIntent };
+        const warningsBeforeAbandon = [...record.warnings];
         const abandonedAt = new Date().toISOString();
         const warning =
           `merge intent from ${abandonedMergeIntent.startedAt || "an unknown time"} ` +
@@ -9733,7 +9855,15 @@ ${diff}`;
           abandonedMergeIntent,
           abandonedMergeIntentAt: abandonedAt,
         };
-        persist(entry);
+        if (!persist(entry)) {
+          record.mergeIntent = abandonedMergeIntent;
+          record.warnings = warningsBeforeAbandon;
+          addPersistenceWarning(record);
+          throw dispatcherError(
+            409,
+            `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
+          );
+        }
       }
     }
     // Persistence is an authority gate, not an ordinary merge policy: force
@@ -9741,10 +9871,10 @@ ${diff}`;
     // Retry pending writes once at the operator boundary, then refuse only if
     // the aggregate is still degraded.
     retryPendingPersistence();
-    if (persistenceDegraded()) {
+    if (persistenceDegraded(entry)) {
       throw dispatcherError(
         409,
-        `persistence degradation gate failed: ${persistenceFailureTargets().join(", ")}`,
+        `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
       );
     }
     // Merging removes the worktree. Doing that under a worker Atelier has not
@@ -9919,10 +10049,10 @@ ${diff}`;
               record.result.manifest,
             );
           }
-          if (persistenceDegraded()) {
+          if (persistenceDegraded(entry)) {
             throw dispatcherError(
               409,
-              `persistence degradation gate failed: ${persistenceFailureTargets().join(", ")}`,
+              `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
             );
           }
           await commandRunner("git", [
@@ -9968,10 +10098,10 @@ ${diff}`;
           );
           trackerBytesDiscarded = mergeResult.trackerDiverged;
           try {
-            if (persistenceDegraded()) {
+            if (persistenceDegraded(entry)) {
               throw dispatcherError(
                 409,
-                `persistence degradation gate failed: ${persistenceFailureTargets().join(", ")}`,
+                `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
               );
             }
             await advanceMainRef(
@@ -9999,6 +10129,7 @@ ${diff}`;
           mkdirSync(mergeRoot, { recursive: true });
           const mergeWorktree = join(mergeRoot, randomBytes(8).toString("hex"));
           let worktreeAdded = false;
+          const existedBeforeAdd = existsSync(mergeWorktree);
           try {
             await commandRunner("git", [
               "-C",
@@ -10016,6 +10147,7 @@ ${diff}`;
                 record,
                 project,
                 "merge",
+                { existedBeforeAdd },
               );
             } catch (error) {
               worktreeAdded = false;
@@ -10034,10 +10166,10 @@ ${diff}`;
               { validateManifest: !force, mainAdvanced: true },
             );
             trackerBytesDiscarded = mergeResult.trackerDiverged;
-            if (persistenceDegraded()) {
+            if (persistenceDegraded(entry)) {
               throw dispatcherError(
                 409,
-                `persistence degradation gate failed: ${persistenceFailureTargets().join(", ")}`,
+                `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
               );
             }
             await advanceMainRef(
@@ -10196,7 +10328,18 @@ ${diff}`;
         throw resultManifestMismatch(entry.path, "result manifest entry is malformed");
       }
     }
+    assertWorkspaceIdentityExcluded(manifest);
     return manifest;
+  }
+
+  function assertWorkspaceIdentityExcluded(manifest) {
+    if (!Array.isArray(manifest)) return;
+    if (manifest.some((entry) => entry?.path === WORKSPACE_IDENTITY_FILE)) {
+      throw resultManifestMismatch(
+        WORKSPACE_IDENTITY_FILE,
+        "Atelier workspace identity tokens cannot be part of a finalized result",
+      );
+    }
   }
 
   async function treeEntriesForPaths(cwd, treeish, paths) {
@@ -10953,6 +11096,7 @@ ${diff}`;
   function recoverConvoyState() {
     let changed = false;
     for (const convoy of convoys.values()) {
+      if (!registry.projects.some((project) => project.name === convoy.project)) continue;
       if (convoy.state !== "running") continue;
       while (convoy.cursor < convoy.ticketIds.length) {
         const records = convoyMemberRecords(convoy);
@@ -11308,16 +11452,14 @@ ${diff}`;
         unavailable: true,
         persistenceDegraded: persistenceDegraded(),
         ...(persistenceDegraded()
-          ? { persistenceFailureTargets: persistenceFailureTargets() }
+          ? {
+            persistenceFailureTargets: persistenceFailureTargets(),
+            persistenceDetail: persistenceDetail(),
+          }
           : {}),
       };
     }
     const state = queueState(project);
-    const lastError = persistenceDegraded()
-      ? state.lastError === PERSISTENCE_WARNING
-        ? PERSISTENCE_WARNING
-        : [state.lastError, PERSISTENCE_WARNING].filter(Boolean).join("; ")
-      : state.lastError;
     const parkedTickets = [...state.ticketAttempts]
       .filter(([, attempt]) => parkedQueueAttempt(project, attempt))
       .map(([ticketId, attempt]) => ({
@@ -11348,10 +11490,13 @@ ${diff}`;
     return {
       enabled: state.enabled,
       consecutiveFailures: state.consecutiveFailures,
-      lastError,
+      lastError: state.lastError,
       persistenceDegraded: persistenceDegraded(),
       ...(persistenceDegraded()
-        ? { persistenceFailureTargets: persistenceFailureTargets() }
+        ? {
+          persistenceFailureTargets: persistenceFailureTargets(),
+          persistenceDetail: persistenceDetail(),
+        }
         : {}),
       failureLimit: queueFailureLimit(project),
       parkedTickets,
@@ -11578,7 +11723,6 @@ ${diff}`;
           continue;
         }
         if (persistenceDegraded()) {
-          queue.lastError = PERSISTENCE_WARNING;
           logDecision(project, {
             decision: "skipped",
             reason: "persistence-degraded",
@@ -11693,7 +11837,6 @@ ${diff}`;
           // persistence after the early pass gate. Refuse at the unattended
           // launch boundary as well.
           if (persistenceDegraded()) {
-            queue.lastError = PERSISTENCE_WARNING;
             logDecision(project, {
               decision: "skipped",
               reason: "persistence-degraded",
@@ -11938,6 +12081,7 @@ ${diff}`;
     shutdown,
     acquireDrainLease,
     releaseDrainLease,
+    persistenceStatus,
     isQueueDrainRunning(name) {
       return drainingQueueProject === name;
     },

@@ -99,6 +99,22 @@ function overflowRecord(severity, { disposeOverflow = false } = {}) {
   }, reviewDispositions);
 }
 
+test("dashboard and cozy-village mirror the persistence degradation merge reason", () => {
+  const record = reviewedRecord({
+    dispatchId: "review-pass",
+    round: 1,
+    verdict: "pass",
+    reviewedHead: "reviewed-head",
+    findings: [],
+  });
+  record.persistenceDegraded = true;
+  record.persistenceDetail = "Persistence degraded for: /state/dispatches/a.jsonl";
+  const dashboard = dashboardMergeGateReasons(record, PROJECT);
+  const village = villageMergeGateReasons(record, PROJECT);
+  assert.deepEqual(dashboard, village);
+  assert.ok(dashboard.includes(record.persistenceDetail));
+});
+
 test("server gate and both clients agree across overflow and disposition cases", () => {
   const openMajor = finding(0, "major");
   const cases = [{

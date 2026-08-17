@@ -132,6 +132,33 @@ export function appendDurable(path, line, { fileOps } = {}) {
   });
 }
 
+export function appendGuarded(path, line, { fileOps } = {}) {
+  const ops = operations(fileOps);
+  const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
+  const mode = 0o600;
+  let descriptor;
+  let created = false;
+  try {
+    descriptor = ops.openSync(
+      path,
+      constants.O_WRONLY |
+        constants.O_APPEND |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        noFollow,
+      mode,
+    );
+    created = true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    descriptor = ops.openSync(path, constants.O_WRONLY | constants.O_APPEND | noFollow);
+  }
+  closeAfter(ops, descriptor, () => {
+    if (created) ops.fchmodSync(descriptor, mode);
+    ops.appendDescriptorSync(descriptor, line, { encoding: "utf8" }, path);
+  });
+}
+
 export function writeFileExclusiveDurable(
   path,
   contents,
