@@ -12,6 +12,14 @@ const PROJECT = Object.freeze({
   reviewPolicy: "strict",
   tracker: "committed",
 });
+const RESULT_BINDING_REASONS = new Set([
+  "merge recovery pending",
+  "finalized result missing",
+  "finalized result does not match branch HEAD",
+  "verification attestation missing",
+  "attested commit does not match branch HEAD",
+  "attested result version does not match finalized result",
+]);
 
 function finding(index, severity = "nit", summary = `Finding ${index + 1}.`) {
   return {
@@ -53,8 +61,11 @@ function reviewedRecord(round, reviewDispositions = []) {
 
 function consumerEligibility(record, project = PROJECT) {
   const server = _reviewMergeAssessment(record, project).eligible;
-  const dashboard = dashboardMergeGateReasons(record, project).length === 0;
-  const village = villageMergeGateReasons(record, project).length === 0;
+  const dashboardReasons = dashboardMergeGateReasons(record, project);
+  const villageReasons = villageMergeGateReasons(record, project);
+  assert.deepEqual(villageReasons, dashboardReasons, "client merge-gate reasons drifted");
+  const dashboard = dashboardReasons.every((reason) => RESULT_BINDING_REASONS.has(reason));
+  const village = villageReasons.every((reason) => RESULT_BINDING_REASONS.has(reason));
   return { server, dashboard, village };
 }
 
@@ -158,14 +169,50 @@ test("server gate and both clients agree across overflow and disposition cases",
   }
 });
 
+test("dashboard and village expose the same complete result-binding reasons", () => {
+  const base = {
+    branchHead: "branch-head",
+    result: { commit: "branch-head", version: 3 },
+    attestation: { resultCommit: "branch-head", resultVersion: 3 },
+    verify: { state: "passed" },
+    strandedBrWrites: false,
+  };
+  const cases = [{
+    ...base,
+    mergeRecoveryPending: true,
+  }, {
+    ...base,
+    result: null,
+    attestation: null,
+  }, {
+    ...base,
+    result: { commit: "other-head", version: 4 },
+  }, {
+    ...base,
+    attestation: { resultCommit: "other-head", resultVersion: 2 },
+  }];
+
+  for (const record of cases) {
+    assert.deepEqual(
+      villageMergeGateReasons(record, { requireReview: false }),
+      dashboardMergeGateReasons(record, { requireReview: false }),
+    );
+  }
+});
+
 test("an overflow BLOCKER disables normal merge under every policy in core and both clients", () => {
   const record = overflowRecord("blocker", { disposeOverflow: true });
   assert.equal(record.gates.find((gate) => gate.gate === "review")?.state, "failed");
   for (const reviewPolicy of ["strict", "tiered", "advisory"]) {
     const project = { ...PROJECT, reviewPolicy };
     assert.equal(_reviewMergeAssessment(record, project).eligible, false, `${reviewPolicy}: core`);
-    assert.deepEqual(dashboardMergeGateReasons(record, project), ["review failed"]);
-    assert.deepEqual(villageMergeGateReasons(record, project), ["review failed"]);
+    const expected = [
+      "finalized result missing",
+      "verification attestation missing",
+      "review failed",
+    ];
+    assert.deepEqual(dashboardMergeGateReasons(record, project), expected);
+    assert.deepEqual(villageMergeGateReasons(record, project), expected);
   }
 });
 

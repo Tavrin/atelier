@@ -4588,7 +4588,12 @@ test("no HTTP endpoint that serves a dispatch record ever exposes a fencing pid 
       state: id === "i7-plan" ? "plan_ready" : "completed",
       endedAt: id === "i7-plan" ? null : "2026-07-30T08:05:00.000Z",
       ...(id === "i7-plan" ? { plan: { state: "ready", text: "do the thing" } } : {}),
-      ...(id === "i7-merge" ? { verify: { state: "passed", steps: [] } } : {}),
+      ...(id === "i7-merge" ? {
+        branchHead: "validated-head",
+        result: { commit: "validated-head", manifest: [], version: 1 },
+        attestation: { resultCommit: "validated-head", resultVersion: 1 },
+        verify: { state: "passed", steps: [] },
+      } : {}),
       ...(id === "i7-review" ? { prompt: "the original task, persisted" } : {}),
     })),
   ];
