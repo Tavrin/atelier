@@ -59,7 +59,7 @@ import {
   _setPostMergeHooks,
   _setProbe,
   _setResultFinalizer,
-  _setRunFile,
+  _setRunFile as setRunFile,
   _setSpawner,
   _resolveDispatchLane,
   createDispatcher,
@@ -71,6 +71,31 @@ const FORCE_AUDIT = Object.freeze({
   reason: "Fixture explicitly exercises the audited override path.",
   dispositionRef: "fixture-disposition-ref",
 });
+
+// Most dispatch fixtures use a synthetic branch rather than a real repository.
+// Once merge became bound to the finalized result, that fake branch must resolve
+// to the same default SHA the seeded result names unless a test supplies a more
+// specific answer (stale-head, concurrency, and real-git tests all do).
+function _setRunFile(nextRunner) {
+  if (!nextRunner) {
+    setRunFile();
+    return;
+  }
+  setRunFile(async (file, args, options) => {
+    const output = await nextRunner(file, args, options);
+    if (
+      file === "git" &&
+      args[2] === "rev-parse" &&
+      args[3] === "--verify" &&
+      typeof output === "string" &&
+      !output.trim() &&
+      String(args[4] || "").startsWith("atelier/")
+    ) {
+      return "validated-head\n";
+    }
+    return output;
+  });
+}
 
 function project(path, overrides = {}) {
   return {
@@ -646,6 +671,8 @@ async function waitForConditionOverTime(predicate, message, { timeoutMs = 5_000,
 async function seedDispatch(setup, overrides = {}) {
   const dispatchDir = join(setup.state, "dispatches");
   await mkdir(dispatchDir, { recursive: true });
+  const boundCommit = overrides.branchHead ?? overrides.result?.commit ?? "validated-head";
+  const resultVersion = overrides.result?.version ?? 1;
   const record = {
     id: "dispatch-merge",
     project: "fixture",
@@ -663,6 +690,15 @@ async function seedDispatch(setup, overrides = {}) {
     exitSummary: "done",
     strandedBrWrites: false,
     verify: { state: "passed", steps: [] },
+    branchHead: boundCommit,
+    result: {
+      commit: boundCommit,
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      manifest: [],
+      version: resultVersion,
+    },
+    attestation: { resultCommit: boundCommit, resultVersion },
     merged: null,
     dismissed: null,
     warnings: [],
@@ -2080,6 +2116,54 @@ test("merge refuses a branch HEAD that moved after attestation", async (t) => {
   );
 });
 
+test("strict merge binding refuses a missing result, divergent result, and missing attestation", async (t) => {
+  const scenarios = [
+    {
+      label: "missing result",
+      overrides: { result: null, attestation: null },
+      branchHead: "validated-head",
+    },
+    {
+      label: "divergent result",
+      overrides: {
+        result: { commit: "other-head", manifest: [], version: 1 },
+        attestation: { resultCommit: "validated-head", resultVersion: 1 },
+      },
+      branchHead: "validated-head",
+    },
+    {
+      label: "missing attestation",
+      overrides: { attestation: null },
+      branchHead: "validated-head",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const setup = await fixture(t);
+    const seeded = await seedDispatch(setup, scenario.overrides);
+    const calls = [];
+    _setRunFile(async (file, args) => {
+      calls.push({ file, args });
+      if (args[2] === "rev-parse" && args[3] === "--verify") {
+        return `${scenario.branchHead}\n`;
+      }
+      return "";
+    });
+    const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+    await assert.rejects(dispatcher.merge(seeded.id), (error) => {
+      assert.equal(error.status, 409, scenario.label);
+      assert.match(error.message, /^EATELIER_RESULT_VERIFICATION_MISMATCH: /, scenario.label);
+      return true;
+    });
+    assert.equal(
+      calls.some(({ args }) => ["fetch", "merge", "branch"].includes(args[2])),
+      false,
+      `${scenario.label} moved main`,
+    );
+  }
+});
+
 test("a legacy record without a finalized result verifies in place without attesting", async (t) => {
   const setup = await fixture(t, { verifyCommands: ["node --test"] });
   const record = await seedRerunnable(setup);
@@ -2937,6 +3021,15 @@ test("merge fast-forwards the captured validated SHA with the exact argv cleanup
     calls.push([file, args]);
     if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
     if (args[2] === "rev-parse" && args[3] === "main") return "abcdef1234567890\n";
+    if (args[2] === "fetch") {
+      assert.deepEqual(rawRecord(setup, seeded.id).mergeIntent, {
+        resultCommit: "validated-head",
+        branchHead: "validated-head",
+        mainBranch: "main",
+        mainTipBefore: "abcdef1234567890",
+        startedAt: rawRecord(setup, seeded.id).mergeIntent.startedAt,
+      });
+    }
     return "";
   });
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
@@ -2944,6 +3037,7 @@ test("merge fast-forwards the captured validated SHA with the exact argv cleanup
 
   assert.deepEqual(calls, [
     ["git", ["-C", setup.primary, "rev-parse", "--verify", seeded.branch]],
+    ["git", ["-C", setup.primary, "rev-parse", "main"]],
     [
       "git",
       [
@@ -2966,7 +3060,11 @@ test("merge fast-forwards the captured validated SHA with the exact argv cleanup
   ]);
   assert.equal(record.merged.commit, "abcdef1234567890");
   assert.equal(record.merged.strategy, "ff");
+  assert.equal(record.merged.resultCommit, "validated-head");
+  assert.equal(record.merged.resultVersion, 1);
+  assert.equal(record.merged.mainTipBefore, "abcdef1234567890");
   assert.match(record.merged.mergedAt, /^2026-/);
+  assert.equal(rawRecord(setup, seeded.id).mergeIntent, null);
   assert.ok(
     dispatcher.getEvents(seeded.id).some((event) => event.detail === "merged abcdef1"),
   );
@@ -3005,6 +3103,17 @@ test("merge discards divergent dispatch .beads and preserves the committed main 
     cwd: seeded.worktreePath,
     stdio: "ignore",
   });
+  const exactResult = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: seeded.worktreePath,
+    encoding: "utf8",
+  }).trim();
+  seeded.branchHead = exactResult;
+  seeded.result = { ...seeded.result, commit: exactResult };
+  seeded.attestation = { resultCommit: exactResult, resultVersion: seeded.result.version };
+  await writeFile(
+    join(setup.state, "dispatches", "index.jsonl"),
+    `${JSON.stringify(seeded)}\n`,
+  );
 
   const loggedWarnings = [];
   _setPersistenceLogger({
@@ -3454,7 +3563,7 @@ test("post-merge verification is FIFO and keeps an older failure visible while a
   _setRunFile(async (file, args) => {
     assert.equal(file, "git");
     if (args[2] === "rev-parse" && args[3] === "main") {
-      return `${commits[mainResolution++]}\n`;
+      return `${commits[Math.floor(mainResolution++ / 2)]}\n`;
     }
     if (args[2] === "worktree" && args[3] === "add" && args[4] === "--detach") {
       worktreeCommits.set(args[5], args[6]);
@@ -3694,6 +3803,7 @@ test("close-on-merge leaves a ticket open while it solely carries redirected rev
       id: "dispatch-carrier",
       ticketId: "fixture-carrier",
       branch: "atelier/fixture-carrier-dispatch-carrier",
+      branchHead: "carrier-head",
     },
     {
       id: "dispatch-source",
@@ -3765,12 +3875,14 @@ test("redirect carriers are project-scoped when ticket ids collide", async (t) =
       project: "fixture",
       ticketId: sharedTicket,
       branch: "atelier/fixture-shared-carrier",
+      branchHead: "carrier-head",
     },
     {
       id: "dispatch-other-carrier",
       project: "other",
       ticketId: sharedTicket,
       branch: "atelier/other-shared-carrier",
+      branchHead: "carrier-head",
     },
     {
       id: "dispatch-fixture-source",
@@ -3867,6 +3979,7 @@ test("a later lineage acceptance releases redirect-carrier closure debt", async 
       id: "dispatch-carrier-superseded",
       ticketId: "fixture-carrier-superseded",
       branch: "atelier/fixture-carrier-superseded",
+      branchHead: "carrier-head",
     },
     {
       id: "dispatch-source-superseded",
@@ -3987,6 +4100,7 @@ test("merge falls back to a clean checked-out primary branch", async (t) => {
 
   assert.deepEqual(calls, [
     ["git", ["-C", setup.primary, "rev-parse", "--verify", seeded.branch]],
+    ["git", ["-C", setup.primary, "rev-parse", "main"]],
     [
       "git",
       [
@@ -4046,6 +4160,7 @@ test("merge falls back to a clean checked-out primary branch", async (t) => {
         ".beads",
       ],
     ],
+    ["git", ["-C", setup.primary, "write-tree"]],
     [
       "git",
       ["-C", setup.primary, "commit", "-m", `merge: atelier dispatch ${seeded.id} (${seeded.ticketId})`],
@@ -4104,6 +4219,7 @@ test("merge falls back to a detached worktree when primary is not on main", asyn
   assert.ok(mergeWorktree.startsWith(join(setup.state, "merge-worktrees")));
   assert.deepEqual(calls, [
     ["git", ["-C", setup.primary, "rev-parse", "--verify", seeded.branch]],
+    ["git", ["-C", setup.primary, "rev-parse", "main"]],
     [
       "git",
       [
@@ -4163,6 +4279,7 @@ test("merge falls back to a detached worktree when primary is not on main", asyn
         ".beads",
       ],
     ],
+    ["git", ["-C", mergeWorktree, "write-tree"]],
     [
       "git",
       ["-C", mergeWorktree, "commit", "-m", `merge: atelier dispatch ${seeded.id} (${seeded.ticketId})`],
@@ -4262,12 +4379,21 @@ test("merge gates verification, duplicate merge, and stranded writes unless forc
     registry: mergedSetup.registry,
     stateDir: mergedSetup.state,
   });
-  await assert.rejects(mergedDispatcher.merge("dispatch-merge"), /already merged/);
+  let duplicateGitCalls = 0;
+  _setRunFile(async () => {
+    duplicateGitCalls += 1;
+    return "";
+  });
+  const duplicate = await mergedDispatcher.merge("dispatch-merge");
+  assert.equal(duplicate.merged.commit, "already");
+  assert.equal(duplicateGitCalls, 0, "an idempotent duplicate must not execute a second git merge");
 
   const forcedSetup = await fixture(t);
   await seedDispatch(forcedSetup, {
     verify: { state: "skipped", steps: [] },
     strandedBrWrites: true,
+    result: null,
+    attestation: null,
   });
   _setRunFile(async (_file, args) =>
     args[2] === "rev-parse" && args[3] === "main" ? "fedcba9876543210\n" : "",
@@ -4314,6 +4440,224 @@ test("merge gates verification, duplicate merge, and stranded writes unless forc
   assert.equal(mergeEvents[0].forcedBy, FORCE_AUDIT.forcedBy);
   assert.equal(mergeEvents[0].reason, FORCE_AUDIT.reason);
   assert.equal(mergeEvents[0].dispositionRef, FORCE_AUDIT.dispositionRef);
+});
+
+test("a pending durable merge intent blocks a second attempt before git runs", async (t) => {
+  const setup = await fixture(t);
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await seedDispatch(setup, {
+    mergeIntent: {
+      resultCommit: "validated-head",
+      branchHead: "validated-head",
+      mainBranch: "main",
+      mainTipBefore: "main-before",
+      startedAt: "2026-08-17T08:00:00.000Z",
+    },
+  });
+  let commands = 0;
+  _setRunFile(async () => {
+    commands += 1;
+    return "";
+  });
+  await assert.rejects(
+    dispatcher.merge("dispatch-merge"),
+    (error) => error.status === 409 && /merge intent is pending recovery/.test(error.message),
+  );
+  assert.equal(commands, 0);
+});
+
+test("an idempotent duplicate drains durable ticket-close debt without touching git", async (t) => {
+  const setup = await fixture(t, { tracker: "committed", autoCloseOnMerge: true });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const owedAt = "2026-08-17T08:00:00.000Z";
+  await seedDispatch(setup, {
+    merged: {
+      commit: "already-merged",
+      mergedAt: owedAt,
+      strategy: "ff",
+      resultCommit: "validated-head",
+      resultVersion: 1,
+      mainTipBefore: "main-before",
+    },
+    mergeFollowUpDebt: {
+      ticketCloseOwedAt: owedAt,
+      ticketCloseSettledAt: null,
+      ticketCloseAttempts: 0,
+      ticketCloseLastAttemptAt: null,
+      ticketCloseLastError: null,
+    },
+  });
+  _setBrResolver(() => "/fixture/br");
+  const calls = [];
+  _setRunFile(async (file, args) => {
+    calls.push({ file, args });
+    if (file === "/fixture/br" && args[0] === "show") {
+      return `${JSON.stringify([{ id: "fixture-1", status: "open" }])}\n`;
+    }
+    if (file === "/fixture/br" && args[0] === "close") return "";
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  });
+  const duplicate = await dispatcher.merge("dispatch-merge");
+
+  assert.equal(duplicate.merged.commit, "already-merged");
+  assert.deepEqual(calls.map(({ file, args }) => [file, args[0]]), [
+    ["/fixture/br", "show"],
+    ["/fixture/br", "close"],
+  ]);
+  assert.ok(rawRecord(setup, "dispatch-merge").mergeFollowUpDebt.ticketCloseSettledAt);
+});
+
+test("manifest divergence refuses resurrected deletions, changed blobs, and gitlinks before fast-forward", async (t) => {
+  const scenarios = [
+    {
+      path: "deleted.txt",
+      manifest: { path: "deleted.txt", deleted: true },
+      tree: "100644 blob resurrected\tdeleted.txt\0",
+    },
+    {
+      path: "changed.txt",
+      manifest: { path: "changed.txt", blobHash: "expected-blob" },
+      tree: "100644 blob divergent-blob\tchanged.txt\0",
+    },
+    {
+      path: "module",
+      manifest: { path: "module", type: "gitlink", objectId: "expected-commit" },
+      tree: "160000 commit divergent-commit\tmodule\0",
+    },
+  ];
+  for (const scenario of scenarios) {
+    const setup = await fixture(t);
+    const seeded = await seedDispatch(setup, {
+      result: {
+        commit: "validated-head",
+        tree: FIXTURE_RESULT_TREE,
+        base: FIXTURE_BASE_COMMIT,
+        manifest: [scenario.manifest],
+        version: 1,
+      },
+    });
+    const calls = [];
+    _setRunFile(async (file, args) => {
+      calls.push({ file, args });
+      if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
+      if (args[2] === "rev-parse" && args[3] === "main") return "main-before\n";
+      if (args.includes("ls-tree")) return scenario.tree;
+      return "";
+    });
+    const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+    await assert.rejects(dispatcher.merge(seeded.id), (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /^EATELIER_RESULT_VERIFICATION_MISMATCH: /);
+      assert.match(error.message, new RegExp(scenario.path));
+      return true;
+    });
+    assert.equal(calls.some(({ args }) => args[2] === "fetch"), false);
+    assert.equal(rawRecord(setup, seeded.id).mergeIntent, null);
+  }
+});
+
+test("merge-commit strategy validates the staged merged tree before committing", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup, {
+    result: {
+      commit: "validated-head",
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      manifest: [{ path: "feature.txt", blobHash: "expected-blob" }],
+      version: 1,
+    },
+  });
+  const calls = [];
+  _setRunFile(async (file, args) => {
+    calls.push({ file, args });
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
+    if (args[2] === "rev-parse" && args[3] === "main") return "main-head\n";
+    if (args[2] === "rev-parse" && args[3] === "--abbrev-ref") return "main\n";
+    if (args[2] === "status") return "";
+    if (args[2] === "fetch") throw new Error("non-fast-forward");
+    if (args[2] === "write-tree") return "candidate-tree\n";
+    if (args.includes("ls-tree")) return "100644 blob expected-blob\tfeature.txt\0";
+    return "";
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  const merged = await dispatcher.merge(seeded.id);
+  const operations = calls.map(({ args }) => args.includes("ls-tree") ? "ls-tree" : args[2]);
+  const writeTree = operations.indexOf("write-tree");
+  const mergedTreeRead = operations.lastIndexOf("ls-tree");
+
+  assert.equal(merged.merged.strategy, "primary-merge");
+  assert.ok(writeTree < mergedTreeRead);
+  assert.ok(mergedTreeRead < operations.indexOf("commit"));
+});
+
+test("boot reconciles landed and unlanded merge intents before follow-up debt drains", async (t) => {
+  const landedSetup = await fixture(t, { tracker: "committed", autoCloseOnMerge: true });
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(landedSetup, {
+    branchHead: "result-head",
+    mergeIntent: intent,
+  });
+  _setBrResolver(() => "/fixture/br");
+  let closeCalls = 0;
+  _setRunFile(async (file, args) => {
+    if (file === "/fixture/br" && args[0] === "show") {
+      return `${JSON.stringify([{ id: "fixture-1", status: "open" }])}\n`;
+    }
+    if (file === "/fixture/br" && args[0] === "close") {
+      closeCalls += 1;
+      return "";
+    }
+    if (args[2] === "rev-parse" && args[3] === "main") return "current-main\n";
+    if (args[2] === "merge-base") return "result-head\n";
+    if (args[2] === "rev-list") return "landed-merge\nlater-main\n";
+    return "";
+  });
+  const landed = createDispatcher({ registry: landedSetup.registry, stateDir: landedSetup.state });
+  await waitForCondition(
+    () => Boolean(landed.get("dispatch-merge")?.merged),
+    "boot did not synthesize the landed merge intent",
+  );
+  await waitForCondition(
+    () => Boolean(rawRecord(landedSetup, "dispatch-merge").mergeFollowUpDebt?.ticketCloseSettledAt),
+    "boot did not drain synthesized ticket-close debt",
+  );
+
+  const recovered = landed.get("dispatch-merge");
+  const recoveredRaw = rawRecord(landedSetup, "dispatch-merge");
+  assert.equal(recovered.merged.commit, "landed-merge");
+  assert.equal(recovered.merged.resultCommit, "result-head");
+  assert.equal(recovered.merged.mainTipBefore, "main-before");
+  assert.equal(recoveredRaw.mergeIntent, null);
+  assert.ok(recoveredRaw.mergeFollowUpDebt.ticketCloseOwedAt);
+  assert.ok(recoveredRaw.mergeFollowUpDebt.ticketCloseSettledAt);
+  assert.equal(closeCalls, 1);
+
+  const unlandedSetup = await fixture(t);
+  await seedDispatch(unlandedSetup, { mergeIntent: intent });
+  _setRunFile(async (_file, args) => {
+    if (args[2] === "rev-parse" && args[3] === "main") return "main-before\n";
+    if (args[2] === "merge-base") return "some-other-base\n";
+    return "";
+  });
+  const unlanded = createDispatcher({
+    registry: unlandedSetup.registry,
+    stateDir: unlandedSetup.state,
+  });
+  await waitForCondition(
+    () => rawRecord(unlandedSetup, "dispatch-merge").mergeIntent === null,
+    "boot did not clear an unlanded merge intent",
+  );
+
+  assert.equal(unlanded.get("dispatch-merge").merged, null);
+  assert.equal(rawRecord(unlandedSetup, "dispatch-merge").mergeIntent, null);
 });
 
 test("strict unforced merge accepts refuted, redirected, and waived MAJOR dispositions", async (t) => {
@@ -5019,7 +5363,7 @@ test("merge follow-up debt survives a branch-cleanup crash and boot drains verif
     autoCloseOnMerge: true,
     verifyCommands: ["node --test"],
   });
-  await seedDispatch(setup);
+  await seedDispatch(setup, { branchHead: "branch-head" });
   _setBrResolver(() => "/fixture/br");
   _setSpawner(() => verifyChild({ stdout: ["post-merge verification passed"] }));
   let ticketStatus = "open";
@@ -5053,14 +5397,6 @@ test("merge follow-up debt survives a branch-cleanup crash and boot drains verif
   assert.ok(persisted.mergeFollowUpDebt.postMergeOwedAt);
   assert.ok(persisted.mergeFollowUpDebt.ticketCloseOwedAt);
   assert.equal(persisted.mergeFollowUpDebt.ticketCloseSettledAt, null);
-  await assert.rejects(
-    dispatcher.merge("dispatch-merge"),
-    (error) => error.status === 409 &&
-      /already merged; owed merge follow-up: post-merge verification, ticket closure/.test(
-        error.message,
-      ),
-  );
-
   const restarted = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   await restarted.ready;
   await waitForCondition(
@@ -5082,15 +5418,18 @@ test("merge follow-up debt survives a branch-cleanup crash and boot drains verif
 
 test("concurrent merges for one project execute sequentially", async (t) => {
   const setup = await fixture(t);
-  const first = await seedDispatch(setup);
+  const firstHead = "1111111111111111111111111111111111111111";
+  const secondHead = "2222222222222222222222222222222222222222";
+  const first = await seedDispatch(setup, { branchHead: firstHead });
   const second = {
     ...first,
     id: "dispatch-merge-second",
     branch: "atelier/fixture-2-dispatch-merge-second",
     worktreePath: join(setup.state, "worktrees", "fixture", "dispatch-merge-second"),
+    branchHead: secondHead,
+    result: { ...first.result, commit: secondHead },
+    attestation: { resultCommit: secondHead, resultVersion: first.result.version },
   };
-  const firstHead = "1111111111111111111111111111111111111111";
-  const secondHead = "2222222222222222222222222222222222222222";
   await writeFile(
     join(setup.state, "dispatches", "index.jsonl"),
     `${JSON.stringify(first)}\n${JSON.stringify(second)}\n`,
@@ -5219,7 +5558,10 @@ test("merge lifecycle reservation rejects a disposition change after eligibility
 
 test("concurrent merge and reply reserve exactly one lifecycle winner", async (t) => {
   const mergeSetup = await fixture(t);
-  const mergeTarget = await seedDispatch(mergeSetup, { sessionId: "merge-race-session" });
+  const mergeTarget = await seedDispatch(mergeSetup, {
+    sessionId: "merge-race-session",
+    branchHead: "merge-race-head",
+  });
   await mkdir(mergeTarget.worktreePath, { recursive: true });
   const mergeCalls = [];
   let resumeLaunches = 0;
@@ -5358,7 +5700,7 @@ test("concurrent stop and reply preserve queued stop intent with one lifecycle o
 
 test("concurrent merge and dismiss reserve exactly one lifecycle winner", async (t) => {
   const mergeSetup = await fixture(t);
-  const mergeTarget = await seedDispatch(mergeSetup);
+  const mergeTarget = await seedDispatch(mergeSetup, { branchHead: "merge-dismiss-head" });
   await mkdir(mergeTarget.worktreePath, { recursive: true });
   const mergeCalls = [];
   let markMergeStarted;
@@ -11679,6 +12021,7 @@ test("reply-changed HEAD makes a passed review stale and boot launches a fresh g
   }));
   const target = await seedDispatch(setup, {
     ticketId: null,
+    branchHead: "head-before-reply",
     prompt: "Review every changed fix-round tree.",
     queueLaunched: true,
     sessionId: "fix-round-session",
@@ -11735,7 +12078,7 @@ test("reply-changed HEAD makes a passed review stale and boot launches a fresh g
   currentHead = "head-after-external-change";
   await assert.rejects(
     first.merge(target.id),
-    /review gate failed: eligible review does not match the current branch HEAD/,
+    /EATELIER_VERIFICATION_HEAD_MISMATCH: /,
   );
   currentHead = "head-before-reply";
 
@@ -14875,7 +15218,10 @@ test("requireReview preserves flat and mid-upgrade passes for merge and never me
   ];
   for (const shape of shapes) {
     const passedSetup = await fixture(t, { requireReview: true });
-    const passed = await seedDispatch(passedSetup, { review: shape.review });
+    const passed = await seedDispatch(passedSetup, {
+      branchHead: "abcdef1234567890",
+      review: shape.review,
+    });
     const passedDispatcher = createDispatcher({
       registry: passedSetup.registry,
       stateDir: passedSetup.state,
@@ -16903,6 +17249,8 @@ async function seedRerunnable(setup, overrides = {}) {
   const [record] = await seedDispatches(setup, [{
     id: "dispatch-rerun",
     verify: { ...FAILED_VERIFY, steps: FAILED_VERIFY.steps.map((step) => ({ ...step })) },
+    result: null,
+    attestation: null,
     ...overrides,
   }]);
   await mkdir(record.worktreePath, { recursive: true });
@@ -17210,8 +17558,8 @@ test("a running verification re-run is single-flight, while stop alone preempts 
 test("two dispatches cannot re-verify past one concurrency slot (the archived capacity race)", async (t) => {
   const setup = await fixture(t, { verifyCommands: ["node --test"] }, { concurrentDispatchCap: 1 });
   const records = await seedDispatches(setup, [
-    { id: "rerun-first", ticketId: "fixture-1", verify: FAILED_VERIFY },
-    { id: "rerun-second", ticketId: "fixture-2", verify: FAILED_VERIFY },
+    { id: "rerun-first", ticketId: "fixture-1", verify: FAILED_VERIFY, result: null, attestation: null },
+    { id: "rerun-second", ticketId: "fixture-2", verify: FAILED_VERIFY, result: null, attestation: null },
   ]);
   for (const record of records) await mkdir(record.worktreePath, { recursive: true });
   // The provenance probe is held open, so the first re-run is unambiguously
@@ -17396,6 +17744,8 @@ test("a record persisted before verification attempts existed re-runs with its f
     id: "dispatch-rerun",
     // Exactly the pre-atelier-9dt shape: a verdict, steps, and nothing else.
     verify: { state: "failed", steps: [{ command: "node --test", exitCode: 3, durationMs: 9, tail: "legacy tail" }] },
+    result: null,
+    attestation: null,
   }]);
   await mkdir(legacy.worktreePath, { recursive: true });
   stubVerificationRuntime();
@@ -17565,6 +17915,8 @@ test("boot repairs a re-run that crashed before the dispatch left completed", as
         startedAt: "2026-07-21T08:02:00.000Z",
         rerun: { attempt: 2, from: "completed", previousState: "failed" },
       },
+      result: null,
+      attestation: null,
     },
     {
       // The same class with no marker: a terminal record can never legitimately
@@ -17572,6 +17924,8 @@ test("boot repairs a re-run that crashed before the dispatch left completed", as
       id: "markerless-running-attempt",
       ticketId: "ticket-markerless",
       verify: { state: "running", steps: [], attempt: 1, attempts: [] },
+      result: null,
+      attestation: null,
     },
   ]);
   for (const record of records) await mkdir(record.worktreePath, { recursive: true });
@@ -17619,7 +17973,13 @@ test("a verification re-run counts a dispatch admission that is still mid-claim"
     { concurrentDispatchCap: 1 },
   );
   const [seeded] = await seedDispatches(setup, [
-    { id: "dispatch-rerun", ticketId: "ticket-rerun", verify: FAILED_VERIFY },
+    {
+      id: "dispatch-rerun",
+      ticketId: "ticket-rerun",
+      verify: FAILED_VERIFY,
+      result: null,
+      attestation: null,
+    },
   ]);
   await mkdir(seeded.worktreePath, { recursive: true });
   const claimGate = deferredValue();
@@ -18216,6 +18576,8 @@ test("merge escalates a wedged companion tree to SIGKILL inside its own call", a
     endedAt: "2026-07-30T08:05:00.000Z",
     sessionId: "codex-thread-1",
     branchHead: "validated-head",
+    result: { commit: "validated-head", manifest: [], version: 1 },
+    attestation: { resultCommit: "validated-head", resultVersion: 1 },
     codexProcessTree: wedged.persistedTree,
     verify: { state: "passed", steps: [] },
   });

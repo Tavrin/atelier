@@ -299,6 +299,21 @@ export function mergeGateReasons(record, project) {
     reasons.push(`verification ${record.verify?.state || "missing"}`);
   }
   if (record.strandedBrWrites) reasons.push("stranded tracker writes");
+  if (!record.result?.commit) {
+    reasons.push("finalized result missing");
+  } else if (record.result.commit !== record.branchHead) {
+    reasons.push("finalized result does not match branch HEAD");
+  }
+  if (!record.attestation) {
+    reasons.push("verification attestation missing");
+  } else {
+    if (record.attestation.resultCommit !== record.branchHead) {
+      reasons.push("attested commit does not match branch HEAD");
+    }
+    if (record.attestation.resultVersion !== record.result?.version) {
+      reasons.push("attested result version does not match finalized result");
+    }
+  }
   if (project?.requireReview) {
     const review = currentReview(record.review);
     const reviewState = record.gates?.find?.((gate) => gate.gate === "review")?.state ?? (

@@ -21,9 +21,17 @@ const claude = {
   capabilities: { liveInput: true, canResume: true },
 };
 
+function mergeBinding(branchHead = "reviewed-head", version = 1) {
+  return {
+    branchHead,
+    result: { commit: branchHead, version },
+    attestation: { resultCommit: branchHead, resultVersion: version },
+  };
+}
+
 test("a live review patch retains overflow text so client reassessment matches reload", () => {
   const record = {
-    branchHead: "reviewed-head",
+    ...mergeBinding(),
     verify: { state: "passed" },
     strandedBrWrites: false,
     review: null,
@@ -98,7 +106,7 @@ test("a disposition event disables merge immediately when the detail refetch fai
   };
   const record = {
     state: "completed",
-    branchHead: "reviewed-head",
+    ...mergeBinding(),
     verify: { state: "passed" },
     strandedBrWrites: false,
     review: { ...round, current: round, rounds: [round] },
@@ -221,7 +229,11 @@ test("plan continuation is refused for an unresolved orphan, and offered when th
 });
 
 test("an unresolved orphan is a merge gate reason, so the normal button disables and Force merge stays offered", () => {
-  const completed = { verify: { state: "passed" }, strandedBrWrites: false };
+  const completed = {
+    ...mergeBinding("bound-head"),
+    verify: { state: "passed" },
+    strandedBrWrites: false,
+  };
 
   assert.deepEqual(mergeGateReasons(completed, {}), []);
   assert.deepEqual(
@@ -230,8 +242,42 @@ test("an unresolved orphan is a merge gate reason, so the normal button disables
   );
   // It stacks with the existing gates rather than replacing them.
   assert.deepEqual(
-    mergeGateReasons({ verify: { state: "failed" }, orphanUnresolved: true }, {}),
+    mergeGateReasons({ ...completed, verify: { state: "failed" }, orphanUnresolved: true }, {}),
     ["a prior worker could not be confirmed dead", "verification failed"],
+  );
+});
+
+test("dashboard merge reasons mirror every result and attestation binding refusal", () => {
+  const base = {
+    ...mergeBinding("branch-head", 3),
+    verify: { state: "passed" },
+    strandedBrWrites: false,
+  };
+
+  assert.deepEqual(
+    mergeGateReasons({ ...base, result: null, attestation: null }, {}),
+    ["finalized result missing", "verification attestation missing"],
+  );
+  assert.deepEqual(
+    mergeGateReasons({ ...base, result: { commit: "other-head", version: 4 } }, {}),
+    [
+      "finalized result does not match branch HEAD",
+      "attested result version does not match finalized result",
+    ],
+  );
+  assert.deepEqual(
+    mergeGateReasons({ ...base, attestation: null }, {}),
+    ["verification attestation missing"],
+  );
+  assert.deepEqual(
+    mergeGateReasons({
+      ...base,
+      attestation: { resultCommit: "other-head", resultVersion: 2 },
+    }, {}),
+    [
+      "attested commit does not match branch HEAD",
+      "attested result version does not match finalized result",
+    ],
   );
 });
 
@@ -253,25 +299,25 @@ test("review staleness is decided by the reviewed head, not the verdict alone", 
 
 test("passed-with-dispositions clears the dashboard merge blocker but still decays", () => {
   const record = {
+    ...mergeBinding(),
     verify: { state: "passed" },
     strandedBrWrites: false,
-    branchHead: "reviewed-head",
     review: { verdict: "fail", reviewedHead: "reviewed-head" },
     gates: [{ gate: "review", state: "passed-with-dispositions" }],
   };
   assert.deepEqual(mergeGateReasons(record, { requireReview: true }), []);
   assert.deepEqual(
-    mergeGateReasons({ ...record, branchHead: "changed-head" }, { requireReview: true }),
+    mergeGateReasons({ ...record, ...mergeBinding("changed-head") }, { requireReview: true }),
     ["review stale - re-review required"],
   );
 });
 
 test("dashboard merge reasons respect strict, tiered, advisory, and the universal blocker", () => {
   const recordFor = (severity) => ({
+    ...mergeBinding(),
     ticketId: "atelier-1",
     verify: { state: "passed" },
     strandedBrWrites: false,
-    branchHead: "reviewed-head",
     review: {
       current: {
         dispatchId: "review-policy",
@@ -379,9 +425,9 @@ test("review history helpers use the current round and parked threads refuse rep
   assert.deepEqual(
     mergeGateReasons(
       {
+        ...mergeBinding("same-head"),
         verify: { state: "passed" },
         strandedBrWrites: false,
-        branchHead: "same-head",
         review,
       },
       { requireReview: true },
