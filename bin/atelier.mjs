@@ -39,8 +39,8 @@ function usage() {
     "  atelier track <project|path> [--yes]",
     "  atelier move-tracker <project> --to external|in-repo",
     "  atelier dispatch <project> (<ticketId>|--prompt \"...\") [--model X] [--effort low|medium|high|xhigh|max] [--lane codex] [--follow]",
-    "  atelier reply <dispatchId> <text...> [--follow]",
-    "  atelier plan <dispatchId> --approve | --revise \"text\"",
+    "  atelier reply <dispatchId> <text...> [--follow] [--accept-execution-profile]",
+    "  atelier plan <dispatchId> (--approve | --revise \"text\") [--accept-execution-profile]",
     "  atelier logs [--follow] [--kind K[,K]] [--project NAME] [--dispatch ID] [--ticket ID] [--actor A] [--since ISO] [--limit N]",
     "  atelier doctor [--install-service | --gc [--older-than-days N] [--offline-maintenance] | --safe-restart [--port N]] [--dry-run]",
   ].join("\n");
@@ -363,12 +363,21 @@ async function dispatch(args) {
 }
 
 async function reply(args) {
-  const { values, positionals } = parseOptions(args, new Set(), new Set(["follow"]));
+  const { values, positionals } = parseOptions(
+    args,
+    new Set(),
+    new Set(["follow", "accept-execution-profile"]),
+  );
   const dispatchId = positionals.shift();
   if (!dispatchId) throw new Error("reply requires a dispatch id");
   if (positionals.length === 0) throw new Error("reply requires text");
   const dispatcher = serverDispatcher({ followReplies: values.follow === true });
-  const record = await dispatcher.reply(dispatchId, { text: positionals.join(" ") });
+  const record = await dispatcher.reply(dispatchId, {
+    text: positionals.join(" "),
+    ...(values["accept-execution-profile"]
+      ? { acceptExecutionProfile: true }
+      : {}),
+  });
   console.log(JSON.stringify(record));
   if (!values.follow) return;
   const completed = await follow(dispatcher, dispatchId);
@@ -379,7 +388,7 @@ async function plan(args) {
   const { values, positionals } = parseOptions(
     args,
     new Set(["revise"]),
-    new Set(["approve"]),
+    new Set(["approve", "accept-execution-profile"]),
   );
   const dispatchId = positionals.shift();
   if (!dispatchId || positionals.length > 0) {
@@ -392,6 +401,7 @@ async function plan(args) {
   const body = values.approve
     ? { action: "approve" }
     : { action: "revise", text: values.revise };
+  if (values["accept-execution-profile"]) body.acceptExecutionProfile = true;
   console.log(JSON.stringify(await dispatcher.plan(dispatchId, body)));
 }
 

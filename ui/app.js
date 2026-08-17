@@ -32,6 +32,7 @@ import {
   applyReviewDispositionEvent,
   applyReviewEvent,
   dismissAvailability,
+  executionProfileMismatchDetail,
   currentReview,
   mergeGateReasons,
   planAvailability,
@@ -5191,7 +5192,13 @@ async function renderDispatch(route, token) {
   const replySend = button("Send now", "button primary");
   replySend.type = "submit";
   replyControls.append(replyHint, replySend);
-  replyComposer.append(replyText, replyControls);
+  const profileAcceptance = element("label", "execution-profile-acceptance");
+  const acceptExecutionProfile = document.createElement("input");
+  acceptExecutionProfile.type = "checkbox";
+  acceptExecutionProfile.name = "acceptExecutionProfile";
+  const profileAcceptanceCopy = element("span");
+  profileAcceptance.append(acceptExecutionProfile, profileAcceptanceCopy);
+  replyComposer.append(replyText, profileAcceptance, replyControls);
   pane.append(paneToolbar, timeline, transcriptPanel, diffPanel, replyComposer);
   const planCard = element("section", "plan-card panel");
   const planHeader = element("header", "plan-card-header");
@@ -5377,6 +5384,11 @@ async function renderDispatch(route, token) {
   }
 
   function renderReplyControls() {
+    const mismatchDetail = executionProfileMismatchDetail(record);
+    profileAcceptance.hidden = !mismatchDetail;
+    profileAcceptanceCopy.textContent = mismatchDetail
+      ? `Accept this new execution profile for the next process spawn. ${mismatchDetail}`
+      : "";
     const availability = replyAvailability(record, agent);
     const disabled = replyInFlight || !availability.label;
     const empty = !replyText.value.trim();
@@ -5390,6 +5402,17 @@ async function renderDispatch(route, token) {
       : availability.reason || (empty ? `Enter a reply. ${availability.hint}` : availability.hint);
     replySend.title = disabledReason || (empty ? "Enter a reply to send." : "");
     replyComposer.title = disabledReason || "";
+  }
+
+  function captureExecutionProfileRefusal(error, operation) {
+    const detail = String(error?.message || "");
+    if (!detail.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ")) return false;
+    record.executionProfileRefusal = {
+      operation,
+      detail,
+      at: new Date().toISOString(),
+    };
+    return true;
   }
 
   function renderPlanControls() {
@@ -5494,12 +5517,14 @@ async function renderDispatch(route, token) {
           ? { action }
           : { action, text: planFeedback.value.trim() }),
         ...(force ? { force: true } : {}),
+        ...(acceptExecutionProfile.checked ? { acceptExecutionProfile: true } : {}),
       },
     });
     const existing = state.dispatches.find((candidate) => candidate.id === record.id);
     if (existing) Object.assign(existing, record);
     else state.dispatches.unshift(record);
     if (action === "revise") planFeedback.value = "";
+    acceptExecutionProfile.checked = false;
     showToast(action === "approve" ? "Plan approved" : "Plan revision started", "success");
   }
 
@@ -5523,6 +5548,7 @@ async function renderDispatch(route, token) {
           }
         });
       } else {
+        captureExecutionProfileRefusal(error, "plan continuation");
         showToast(error.message);
       }
     } finally {
@@ -5560,14 +5586,16 @@ async function renderDispatch(route, token) {
     try {
       record = await api(`/api/dispatch/${encoded(route.id)}/verify`, {
         method: "POST",
-        body: {},
+        body: acceptExecutionProfile.checked ? { acceptExecutionProfile: true } : {},
       });
       const existing = state.dispatches.find((candidate) => candidate.id === record.id);
       if (existing) Object.assign(existing, record);
       else state.dispatches.unshift(record);
+      acceptExecutionProfile.checked = false;
       verificationSteps.clear();
       showToast(`verification re-run started for ${record.id}`, "success");
     } catch (error) {
+      captureExecutionProfileRefusal(error, "verification re-run");
       showToast(error.message);
     } finally {
       verifyRerunInFlight = false;
@@ -5690,14 +5718,17 @@ async function renderDispatch(route, token) {
 
   replyText.addEventListener("input", renderReplyControls);
   async function requestReply(text, force = false) {
-    record = await api(`/api/dispatch/${encoded(route.id)}/reply`, {
+    const replyOptions = {
       method: "POST",
       body: { text, ...(force ? { force: true } : {}) },
-    });
+    };
+    if (acceptExecutionProfile.checked) replyOptions.body.acceptExecutionProfile = true;
+    record = await api(`/api/dispatch/${encoded(route.id)}/reply`, replyOptions);
     const existing = state.dispatches.find((candidate) => candidate.id === record.id);
     if (existing) Object.assign(existing, record);
     else state.dispatches.unshift(record);
     replyText.value = "";
+    acceptExecutionProfile.checked = false;
     showToast(record.state === "running" ? "Reply sent" : "Reply accepted", "success");
   }
   replyComposer.addEventListener("submit", async (event) => {
@@ -5721,6 +5752,7 @@ async function renderDispatch(route, token) {
           }
         });
       } else {
+        captureExecutionProfileRefusal(error, "reply resume");
         showToast(error.message);
       }
     } finally {

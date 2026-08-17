@@ -150,7 +150,7 @@ test("fake adapter executable and scenario schema are shipped as test fixtures",
   assert.deepEqual(schema.required, ["steps"]);
   assert.ok(schema.properties.steps.items.properties.type.enum.includes("spawn_detached"));
   await assert.rejects(
-    fakeAgent.preLaunchChecks({ entry: { env: {} } }),
+    fakeAgent.preLaunchChecks({ env: {} }),
     /ATELIER_TEST_NO_REAL_PROVIDER=1/,
   );
   assert.throws(

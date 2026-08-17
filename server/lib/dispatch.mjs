@@ -54,6 +54,13 @@ import {
   runFile,
   spawnTracked,
 } from "./exec.mjs";
+import {
+  EXECUTION_PROFILE_MISMATCH,
+  executionProfileAmbientWarning,
+  executionProfileMismatch,
+  supersedeExecutionProfile,
+} from "./execution/execution-profile.mjs";
+import { gitConfigCountSupported } from "./execution/environment-policy.mjs";
 import { acquireInstanceLock, liveInstanceOwner } from "./instance-lock.mjs";
 import {
   normalizeLine,
@@ -490,6 +497,12 @@ function publicRecord(record) {
     outcome: record.outcome ?? null,
     result: record.result ?? null,
     attestation: record.attestation ?? null,
+    executionProfile: record.executionProfile
+      ? structuredClone(record.executionProfile)
+      : null,
+    executionProfileRefusal: record.executionProfileRefusal
+      ? { ...record.executionProfileRefusal }
+      : null,
     verify: record.verify ?? null,
     postMerge: record.postMerge ?? null,
     review: reviewState(record),
@@ -3781,12 +3794,42 @@ export function createDispatcher({
         loaded.codexWorkspace.length > 0 &&
         Boolean(project);
       const codexAgentForReattach = codexReattachable ? getAgent("codex") : undefined;
+      let reattachProfileMismatch;
+      let reattachProfile;
+      let reattachEnvironments;
       if (codexReattachable && typeof codexAgentForReattach.reattach === "function") {
+        reattachEnvironments = resolvedEntryEnvironments(project, codexAgentForReattach);
+        reattachProfile = reconcileExecutionProfile(
+          entry,
+          codexAgentForReattach,
+          reattachEnvironments,
+          {
+            compare: { companionPath: true },
+            requirements: { companionPath: true },
+          },
+        );
+        reattachProfileMismatch = reattachProfile.mismatch;
+        if (reattachProfileMismatch) {
+          executionProfileRefusal(
+            entry,
+            reattachProfileMismatch,
+            "codex boot reattach",
+            { companionPath: true },
+          );
+        }
+      }
+      if (
+        codexReattachable &&
+        typeof codexAgentForReattach.reattach === "function" &&
+        !reattachProfileMismatch
+      ) {
+        entry.env = reattachEnvironments.providerEnv;
+        entry.workloadEnv = reattachEnvironments.workloadEnv;
+        applyExecutionProfile(entry, reattachProfile);
         entry.inert = false;
         entry.finished = false;
         entry.result = undefined;
         entry.stderrLines = [];
-        ensureEntryEnv(entry, project);
         bootReattachments.push(
           Promise.resolve()
             .then(() => codexAgentForReattach.reattach({
@@ -4069,6 +4112,7 @@ export function createDispatcher({
 
   function runVerifyStep(entry, command, step, stageDeadline, {
     cwd = entry.record.worktreePath,
+    env = entry.workloadEnv ?? entry.env,
     eventType = "verify",
     outputEventType = "verify-output",
     eventFields = {},
@@ -4168,7 +4212,7 @@ export function createDispatcher({
         if (!file) throw new Error("verify command must not be empty");
         child = spawner(file, args, {
           cwd,
-          env: entry.env,
+          env,
         });
         entry[childKey] = child;
         // Persisted BEFORE the close listener is registered, so there is no
@@ -4944,7 +4988,24 @@ export function createDispatcher({
     if (shuttingDown) {
       throw new Error("server shutdown interrupted queued post-merge verification");
     }
-    ensureEntryEnv(entry, project);
+    const agent = getAgent(entry.record.lane);
+    const postMergeEnvironments = resolvedEntryEnvironments(project, agent);
+    const postMergeReconciliation = reconcileExecutionProfile(
+      entry,
+      agent,
+      postMergeEnvironments,
+    );
+    const postMergeMismatch = postMergeReconciliation.mismatch;
+    if (postMergeMismatch) {
+      addWarningOnce(
+        entry.record,
+        `post-merge verification environment diverged: ${postMergeMismatch}`,
+      );
+    }
+    // Post-merge verification is workload code, not a provider child. Preserve
+    // the pre-profile looser env and never leak Codex's companion IPC variable.
+    entry.workloadEnv = postMergeEnvironments.workloadEnv;
+    applyExecutionProfile(entry, postMergeReconciliation);
     postMergeFileOps.mkdirSync(verifyRoot, { recursive: true });
     entry.record.postMerge = {
       ...entry.record.postMerge,
@@ -5601,19 +5662,14 @@ export function createDispatcher({
         unattendedQueue: entry.record.queueLaunched === true,
       });
       const prompt = opts.planFirst ? `${PLAN_PROMPT_PREFIX}${taskPrompt}` : taskPrompt;
-      const profile = project.dispatchProfile || {};
-      const resolvedDispatchEnv = {
-        ...(registry.defaults?.dispatchProfile?.dispatchEnv || {}),
-        ...(profile.dispatchEnv || {}),
-        ...(project.dispatchEnv || {}),
-      };
-      entry.env = envHygiene({
-        ...envHygiene(process.env),
-        ...resolvedDispatchEnv,
-        ATELIER_PRIMARY_CHECKOUT: project.path,
-        ATELIER_TRACKER_PATH: trackerDirectory(project),
+      const spawnEnvironments = resolvedEntryEnvironments(project, agent);
+      await agent.preLaunchChecks({
+        entry,
+        project,
+        worktreePath,
+        env: spawnEnvironments.providerEnv,
+        commandRunner,
       });
-      await agent.preLaunchChecks({ entry, project, worktreePath, commandRunner });
       if (entry.record.state !== "preparing") {
         await abandonPreparation(entry, project);
         return;
@@ -5624,6 +5680,26 @@ export function createDispatcher({
       entry.disallowedTools = entry.record.readOnly
         ? [...REVIEW_DENIED_TOOLS]
         : opts.planFirst ? [...PLAN_DENIED_TOOLS] : undefined;
+      const executionProfile = agent.executionProfile({
+        entry,
+        env: spawnEnvironments.providerEnv,
+        controlledKeys: spawnEnvironments.controlledKeys,
+        hooksSupported: spawnEnvironments.hooksSupported,
+      });
+      requireResolvedExecutionProfile(executionProfile, {
+        executable: true,
+        companionPath: entry.record.lane === "codex",
+      });
+      if (entry.record.executionProfile) {
+        throw new Error("Execution profile already exists before first spawn");
+      }
+      // The profile and durable env are committed only after every preparation
+      // gate has passed, immediately before this exact object reaches launch.
+      entry.env = spawnEnvironments.providerEnv;
+      entry.workloadEnv = spawnEnvironments.workloadEnv;
+      entry.record.executionProfile = executionProfile;
+      recordGitPostureWarning(entry, executionProfile);
+      persist(entry);
       agent.launch({
         entry,
         project,
@@ -5665,26 +5741,195 @@ export function createDispatcher({
     }
   }
 
-  function ensureEntryEnv(entry, project) {
-    // Boot-revived entries (inert history) have no live env - rebuild the
-    // hygienic one so resumed/approved runs never inherit the raw process
-    // env (secret-shaped keys, unscoped vars).
-    if (entry.env) return;
+  function resolvedEntryEnvironments(project, agent) {
     const profile = project.dispatchProfile || {};
     const resolvedDispatchEnv = {
       ...(registry.defaults?.dispatchProfile?.dispatchEnv || {}),
       ...(profile.dispatchEnv || {}),
+      ...(project.dispatchEnv || {}),
     };
-    entry.env = envHygiene({
-      ...envHygiene(process.env),
+    const controlledEnv = envHygiene({
       ...resolvedDispatchEnv,
       ATELIER_PRIMARY_CHECKOUT: project.path,
       ATELIER_TRACKER_PATH: trackerDirectory(project),
     });
-    if (entry.record.readOnly) {
-      entry.allowedTools = [];
-      entry.disallowedTools = [...REVIEW_DENIED_TOOLS];
+    const workloadEnv = envHygiene({
+      ...envHygiene(process.env),
+      ...controlledEnv,
+    });
+    if (agent.id === "codex") delete workloadEnv.CLAUDE_PLUGIN_DATA;
+    const providerEnv = agent.executionEnv(workloadEnv);
+    return {
+      providerEnv,
+      workloadEnv,
+      controlledKeys: Object.keys(controlledEnv)
+        .filter((key) => Object.hasOwn(providerEnv, key))
+        .sort(),
+      hooksSupported: gitConfigCountSupported(),
+    };
+  }
+
+  function addWarningOnce(record, warning) {
+    if (!record.warnings.includes(warning)) record.warnings.push(warning);
+  }
+
+  function requireResolvedExecutionProfile(profile, {
+    executable = false,
+    companionPath = false,
+  } = {}) {
+    if (executable && !profile.executable?.resolvedPath) {
+      throw new Error(`Provider executable could not be resolved: ${profile.executable?.command}`);
     }
+    if (companionPath && !profile.companionPath) {
+      throw new Error("Codex lane unavailable: codex-companion.mjs was not found");
+    }
+  }
+
+  function recordGitPostureWarning(entry, profile) {
+    if (profile.gitPosture?.hooks !== "unsupported") return;
+    addWarningOnce(
+      entry.record,
+      "Git does not support GIT_CONFIG_COUNT; Atelier cannot disable repository hooks for control-plane Git operations",
+    );
+  }
+
+  function legacyExecutionProfile(entry, current, requirements) {
+    requireResolvedExecutionProfile(current, requirements);
+    const stampedAt = new Date().toISOString();
+    entry.record.executionProfile = {
+      ...current,
+      legacy: true,
+      state: "legacy_profile_unproven",
+      stampedAt,
+    };
+    if (current.companionPath) entry.companionPath = current.companionPath;
+    recordGitPostureWarning(entry, current);
+    addWarningOnce(
+      entry.record,
+      "execution profile is legacy_profile_unproven: the initial spawn environment was not captured",
+    );
+    persist(entry);
+  }
+
+  function reconcileExecutionProfile(entry, agent, resolved, {
+    accept = false,
+    acceptRecordedRefusal = false,
+    compare = {},
+    requirements = compare,
+  } = {}) {
+    const current = agent.executionProfile({
+      entry,
+      env: resolved.providerEnv,
+      controlledKeys: resolved.controlledKeys,
+      hooksSupported: resolved.hooksSupported,
+      resolveCurrent: true,
+    });
+    const recorded = entry.record.executionProfile;
+    if (!recorded) {
+      return { current, mismatch: null, stamp: "legacy", requirements, comparison: compare };
+    }
+    const ambientWarning = executionProfileAmbientWarning(recorded, current);
+    if (ambientWarning) {
+      addWarningOnce(entry.record, ambientWarning);
+      persist(entry);
+    }
+    const mismatch = executionProfileMismatch(recorded, current, compare);
+    const recordedRefusal = acceptRecordedRefusal
+      ? entry.record.executionProfileRefusal
+      : null;
+    const recordedRefusalComparison = recordedRefusal
+      ? refusalComparison(recordedRefusal, compare)
+      : null;
+    const recordedRefusalMismatch = recordedRefusal
+      ? executionProfileMismatch(recorded, current, recordedRefusalComparison)
+      : null;
+    if (recordedRefusal && !recordedRefusalMismatch) {
+      entry.record.executionProfileRefusal = null;
+      persist(entry);
+    }
+    const effectiveMismatch = mismatch || (!accept ? recordedRefusalMismatch : null);
+    const acceptsRecordedRefusal = accept && acceptRecordedRefusal && Boolean(recordedRefusalMismatch);
+    const acceptedCurrent = (mismatch && accept) || acceptsRecordedRefusal
+      ? {
+          ...current,
+          executable: compare.executable || acceptsRecordedRefusal
+            ? current.executable
+            : recorded.executable,
+          companionPath: compare.companionPath || acceptsRecordedRefusal
+            ? current.companionPath
+            : recorded.companionPath,
+        }
+      : current;
+    return {
+      current: acceptedCurrent,
+      mismatch: accept ? null : effectiveMismatch,
+      stamp: (effectiveMismatch && accept) || acceptsRecordedRefusal ? "accepted" : null,
+      requirements,
+      comparison: mismatch ? compare : recordedRefusalComparison || compare,
+    };
+  }
+
+  function applyExecutionProfile(entry, reconciliation, { actor } = {}) {
+    const { current, stamp, requirements } = reconciliation;
+    if (stamp === "legacy") {
+      legacyExecutionProfile(entry, current, requirements);
+      return;
+    }
+    if (stamp !== "accepted") return;
+    requireResolvedExecutionProfile(current, requirements);
+    const at = new Date().toISOString();
+    entry.record.executionProfile = supersedeExecutionProfile(
+      entry.record.executionProfile,
+      current,
+      {
+        at,
+        reason: "operator accepted",
+        actor: actionActor(actor),
+      },
+    );
+    if (current.companionPath) entry.companionPath = current.companionPath;
+    entry.record.executionProfileRefusal = null;
+    recordGitPostureWarning(entry, current);
+    persist(entry);
+  }
+
+  function refusalComparison(refusal, fallback) {
+    if (refusal?.compare && typeof refusal.compare === "object") {
+      return {
+        executable: refusal.compare.executable === true,
+        companionPath: refusal.compare.companionPath === true,
+      };
+    }
+    if (refusal?.operation === "codex boot reattach") return { companionPath: true };
+    if (["reply resume", "plan continuation"].includes(refusal?.operation)) {
+      return { executable: true };
+    }
+    return fallback;
+  }
+
+  function executionProfileRefusal(entry, mismatch, operation, compare = {}) {
+    const detail = mismatch.includes("operator can accept the new profile")
+      ? mismatch
+      : `${mismatch}; an operator can accept the new profile with ` +
+        "`atelier reply --accept-execution-profile` or the UI accept checkbox";
+    entry.record.executionProfileRefusal = {
+      operation,
+      detail,
+      compare: {
+        executable: compare.executable === true,
+        companionPath: compare.companionPath === true,
+      },
+      at: new Date().toISOString(),
+    };
+    addWarningOnce(entry.record, detail);
+    persist(entry);
+    return dispatcherError(409, detail);
+  }
+
+  function restoreReviewToolClamp(entry) {
+    if (!entry.record.readOnly) return;
+    entry.allowedTools = [];
+    entry.disallowedTools = [...REVIEW_DENIED_TOOLS];
   }
 
   async function claimTicket(project, ticketId) {
@@ -6611,6 +6856,8 @@ export function createDispatcher({
       dismissed: null,
       mergedClose: null,
       harvest: null,
+      executionProfile: null,
+      executionProfileRefusal: null,
       warnings: claim?.warning ? [claim.warning] : [],
     };
     const entry = {
@@ -7346,7 +7593,10 @@ ${diff}`;
   // a suite can run for the full stage timeout, and neither an HTTP client nor
   // an MCP caller should be held open for it. Progress and the verdict arrive on
   // the dispatch's event stream.
-  async function rerunVerification(id, { actor } = {}) {
+  async function rerunVerification(id, { actor, acceptExecutionProfile } = {}) {
+    if (acceptExecutionProfile !== undefined && typeof acceptExecutionProfile !== "boolean") {
+      throw dispatcherError(400, "acceptExecutionProfile must be a boolean");
+    }
     await bootRecovery;
     mergePersistedEntries();
     if (!entries.get(id)) throw dispatcherError(404, `Unknown dispatch: ${id}`);
@@ -7443,11 +7693,26 @@ ${diff}`;
       if (active.length + bakeoffReservedSlots + inFlightAdmissions >= cap) {
         throw dispatcherError(409, `Concurrent dispatch cap exceeded (${cap})`);
       }
-      ensureEntryEnv(entry, project);
+      const agent = getAgent(record.lane);
+      const verifyEnvironments = resolvedEntryEnvironments(project, agent);
+      const profile = reconcileExecutionProfile(entry, agent, verifyEnvironments, {
+        accept: acceptExecutionProfile === true,
+      });
+      if (profile.mismatch) {
+        throw executionProfileRefusal(
+          entry,
+          profile.mismatch,
+          "verification re-run",
+          profile.comparison,
+        );
+      }
       // A persisted terminal record becomes live for the duration, so background
       // history refreshes cannot replace the object under the running attempt.
       entry.inert = false;
+      restoreReviewToolClamp(entry);
       entry.releaseVerifyRerun = releaseLifecycle;
+      entry.workloadEnv = verifyEnvironments.workloadEnv;
+      applyExecutionProfile(entry, profile, { actor });
       const settled = runVerification(entry, project, record.exitSummary, { rerun: true });
       entry.verifyRun = settled;
       admitted = true;
@@ -7474,7 +7739,7 @@ ${diff}`;
     }
   }
 
-  async function reply(id, { text, force, actor } = {}) {
+  async function reply(id, { text, force, acceptExecutionProfile, actor } = {}) {
     if (typeof text !== "string" || !text.trim()) {
       throw dispatcherError(400, "text must be a non-empty string");
     }
@@ -7485,15 +7750,21 @@ ${diff}`;
     if (force !== undefined && typeof force !== "boolean") {
       throw dispatcherError(400, "force must be a boolean");
     }
+    if (acceptExecutionProfile !== undefined && typeof acceptExecutionProfile !== "boolean") {
+      throw dispatcherError(400, "acceptExecutionProfile must be a boolean");
+    }
     const releaseLifecycle = reserveDispatchLifecycle(id, "reply");
     try {
-      return await replyUnlocked(id, { replyText, force, actor });
+      return await replyUnlocked(id, { replyText, force, acceptExecutionProfile, actor });
     } finally {
       releaseLifecycle();
     }
   }
 
-  async function replyUnlocked(id, { replyText, force, actor } = {}) {
+  async function replyUnlocked(
+    id,
+    { replyText, force, acceptExecutionProfile, actor } = {},
+  ) {
     mergePersistedEntries();
     let entry = entries.get(id);
     if (!entry) throw dispatcherError(404, `Unknown dispatch: ${id}`);
@@ -7567,12 +7838,27 @@ ${diff}`;
       }
       entry.inert = false;
     }
+    restoreReviewToolClamp(entry);
 
-    ensureEntryEnv(entry, project);
     enforceProjectBudget(project, force);
     const agent = getAgent(entry.record.lane);
     const { state } = entry.record;
     if (state === "running") {
+      if (acceptExecutionProfile === true) {
+        throw dispatcherError(
+          400,
+          "acceptExecutionProfile applies only to resumes that spawn a new agent turn",
+        );
+      }
+      const liveEnvironments = resolvedEntryEnvironments(project, agent);
+      const liveProfile = reconcileExecutionProfile(entry, agent, liveEnvironments);
+      if (liveProfile.mismatch) {
+        addWarningOnce(
+          entry.record,
+          `live-input reply proceeded without spawning despite ${liveProfile.mismatch}`,
+        );
+        persist(entry);
+      }
       if (!agent.capabilities.liveInput) {
         throw dispatcherError(409, `${agent.displayName} adapter does not support live input`);
       }
@@ -7669,6 +7955,29 @@ ${diff}`;
         throw error;
       }
 
+      const resumeEnvironments = resolvedEntryEnvironments(project, agent);
+      const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnvironments, {
+        accept: acceptExecutionProfile === true,
+        acceptRecordedRefusal: true,
+        compare: { executable: true },
+        requirements: {
+          executable: true,
+          companionPath: entry.record.lane === "codex",
+        },
+      });
+      if (resumeProfile.mismatch) {
+        if (reclaimed) await releaseClaim(entry, project);
+        if (resumeProfile.mismatch.startsWith(EXECUTION_PROFILE_MISMATCH)) {
+          throw executionProfileRefusal(
+            entry,
+            resumeProfile.mismatch,
+            "reply resume",
+            resumeProfile.comparison,
+          );
+        }
+        throw dispatcherError(409, resumeProfile.mismatch);
+      }
+
       entry.finished = false;
       entry.result = undefined;
       entry.stderrLines = [];
@@ -7717,6 +8026,11 @@ ${diff}`;
         throw dispatcherError(409, "Resume was cancelled before the agent spawned");
       }
       try {
+        // Stamp only on the admitted cold-spawn path. A live-input or refused
+        // reply never mutates either the durable env or immutable profile.
+        entry.env = resumeEnvironments.providerEnv;
+        entry.workloadEnv = resumeEnvironments.workloadEnv;
+        applyExecutionProfile(entry, resumeProfile, { actor });
         await agent.resume({
           entry,
           project,
@@ -7757,7 +8071,7 @@ ${diff}`;
     }
   }
 
-  async function plan(id, { action, text, force, actor } = {}) {
+  async function plan(id, { action, text, force, acceptExecutionProfile, actor } = {}) {
     if (!new Set(["approve", "revise"]).has(action)) {
       throw dispatcherError(400, "action must be approve or revise");
     }
@@ -7772,6 +8086,9 @@ ${diff}`;
     }
     if (force !== undefined && typeof force !== "boolean") {
       throw dispatcherError(400, "force must be a boolean");
+    }
+    if (acceptExecutionProfile !== undefined && typeof acceptExecutionProfile !== "boolean") {
+      throw dispatcherError(400, "acceptExecutionProfile must be a boolean");
     }
     mergePersistedEntries();
     const entry = entries.get(id);
@@ -7790,12 +8107,12 @@ ${diff}`;
       throw dispatcherError(409, "Dispatch worktree no longer exists - dismissed or GC'd");
     }
     if (entry.inert) entry.inert = false;
+    restoreReviewToolClamp(entry);
 
     const project = registry.projects.find(
       (candidate) => candidate.name === entry.record.project,
     );
     if (!project) throw dispatcherError(404, `Unknown project: ${entry.record.project}`);
-    ensureEntryEnv(entry, project);
     if (action === "approve") enforceProjectBudget(project, force);
     const agent = getAgent(entry.record.lane);
     if (entry.record.lane !== "claude" || !agent.capabilities.canResume) {
@@ -7818,7 +8135,26 @@ ${diff}`;
       // exited, but its fencing pid is still on the record until death is
       // PROVEN, and a plan continuation is just as much a spawn-for-an-existing
       // -ticket as a reply-resume is - including the claim re-verification.
-      await admitSpawn({ entry, project, action: "Plan continuation" });
+      const { claimed: reclaimed } = await admitSpawn({
+        entry,
+        project,
+        action: "Plan continuation",
+      });
+      const resumeEnvironments = resolvedEntryEnvironments(project, agent);
+      const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnvironments, {
+        accept: acceptExecutionProfile === true,
+        compare: { executable: true },
+        requirements: { executable: true },
+      });
+      if (resumeProfile.mismatch) {
+        if (reclaimed) await releaseClaim(entry, project);
+        throw executionProfileRefusal(
+          entry,
+          resumeProfile.mismatch,
+          "plan continuation",
+          resumeProfile.comparison,
+        );
+      }
       const resumeText = action === "approve"
         ? `Execute the approved plan exactly:\n${entry.record.plan?.text || ""}`
         : `Revise the plan per this feedback, again WITHOUT modifying files:\n${feedback}`;
@@ -7832,6 +8168,7 @@ ${diff}`;
         entry.disallowedTools = [...PLAN_DENIED_TOOLS];
         entry.planRun = "revision";
       }
+      restoreReviewToolClamp(entry);
       entry.finished = false;
       entry.result = undefined;
       entry.stderrLines = [];
@@ -7859,6 +8196,9 @@ ${diff}`;
         throw dispatcherError(409, "Plan continuation was cancelled before the agent spawned");
       }
       try {
+        entry.env = resumeEnvironments.providerEnv;
+        entry.workloadEnv = resumeEnvironments.workloadEnv;
+        applyExecutionProfile(entry, resumeProfile, { actor });
         await agent.resume({
           entry,
           project,
@@ -7969,6 +8309,10 @@ ${diff}`;
       }
       const agent = getAgent(reservedEntry.record.lane);
       const stopResult = await agent.stop({ entry: reservedEntry, commandRunner });
+      if (stopResult.warning) {
+        addWarningOnce(reservedEntry.record, stopResult.warning);
+        persist(reservedEntry);
+      }
       if (stopResult.finish) {
         // A user-initiated stop is exactly when killing an identity-matched
         // worker is authorized, so reap before finishing (round 4, item 1c). It

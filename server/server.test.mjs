@@ -90,6 +90,7 @@ function dispatcherStub() {
   const reviewDispositions = [];
   const merges = [];
   const verifyReruns = [];
+  const verifyRerunOptions = [];
   const resumedQueueTickets = [];
   const convoys = [{
     id: "convoy-1",
@@ -119,6 +120,7 @@ function dispatcherStub() {
     _reviewDispositions: reviewDispositions,
     _merges: merges,
     _verifyReruns: verifyReruns,
+    _verifyRerunOptions: verifyRerunOptions,
     _resumedQueueTickets: resumedQueueTickets,
     _convoys: convoys,
     _queueDraining: queueDraining,
@@ -135,9 +137,14 @@ function dispatcherStub() {
       return { id: records[0].id };
     },
     stop: async () => ({ ...records[0], state: "stopped" }),
-    reply: async (id, { text, force }) => {
+    reply: async (id, { text, force, acceptExecutionProfile }) => {
       const record = records.find((candidate) => candidate.id === id);
-      replies.push({ id, text, ...(force !== undefined ? { force } : {}) });
+      replies.push({
+        id,
+        text,
+        ...(force !== undefined ? { force } : {}),
+        ...(acceptExecutionProfile !== undefined ? { acceptExecutionProfile } : {}),
+      });
       return { ...record, state: "running", replyText: text };
     },
     plan: async (id, body) => {
@@ -170,9 +177,10 @@ function dispatcherStub() {
         })),
       };
     },
-    rerunVerification: async (id) => {
+    rerunVerification: async (id, options) => {
       const record = records.find((candidate) => candidate.id === id);
       verifyReruns.push(id);
+      verifyRerunOptions.push(options);
       return { ...record, state: "verifying", verify: { state: "running", steps: [], attempt: 2 } };
     },
     listConvoys: () => convoys,
@@ -603,6 +611,24 @@ test("MCP bearer cannot exercise server-side force authority", async (t) => {
 
   assert.equal(response.status, 409);
   assert.match(JSON.parse(response.text).error, /human break-glass policy/);
+  assert.doesNotMatch(JSON.parse(response.text).error, /accept-execution-profile/);
+  assert.deepEqual(dispatcher._merges, []);
+});
+
+test("MCP bearer cannot exercise execution-profile acceptance", async (t) => {
+  const { port, dispatcher } = await serverFixture(t);
+  const response = await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/merge",
+    body: JSON.stringify({ acceptExecutionProfile: true }),
+    contentType: "application/json",
+    credential: "mcp",
+    actor: "human",
+  });
+
+  assert.equal(response.status, 409);
+  assert.match(JSON.parse(response.text).error, /atelier reply --accept-execution-profile/);
+  assert.match(JSON.parse(response.text).error, /web UI accept checkbox/);
   assert.deepEqual(dispatcher._merges, []);
 });
 
@@ -622,7 +648,7 @@ test("atelier reply reads the live daemon bearer from its disposable state direc
   const { stdout } = await execFileAsync(
     process.execPath,
     [join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "atelier.mjs"),
-      "reply", "dispatch-1", "continue"],
+      "reply", "dispatch-1", "continue", "--accept-execution-profile"],
     {
       cwd: join(dirname(fileURLToPath(import.meta.url)), ".."),
       env: {
@@ -635,7 +661,12 @@ test("atelier reply reads the live daemon bearer from its disposable state direc
   );
 
   assert.match(stdout, /"state":"running"/);
-  assert.deepEqual(replies, [{ id: "dispatch-1", text: "continue", actor: "cli" }]);
+  assert.deepEqual(replies, [{
+    id: "dispatch-1",
+    text: "continue",
+    acceptExecutionProfile: true,
+    actor: "cli",
+  }]);
 });
 
 test("server enforces JSON gates, body cap, API 404s and degraded tracker gate", async (t) => {
@@ -2599,6 +2630,15 @@ test("verify route admits a re-run, reports it as started, and rejects unknown f
   assert.equal(JSON.parse(admitted.text).verify.attempt, 2);
   assert.deepEqual(dispatcher._verifyReruns, ["dispatch-1"]);
 
+  const accepted = await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/verify",
+    body: JSON.stringify({ acceptExecutionProfile: true }),
+    contentType: "application/json",
+  });
+  assert.equal(accepted.status, 202);
+  assert.equal(dispatcher._verifyRerunOptions[1].acceptExecutionProfile, true);
+
   const rejected = await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/verify",
@@ -2615,7 +2655,7 @@ test("verify route admits a re-run, reports it as started, and rejects unknown f
     contentType: "application/json",
   });
   assert.equal(unknown.status, 404);
-  assert.deepEqual(dispatcher._verifyReruns, ["dispatch-1"]);
+  assert.deepEqual(dispatcher._verifyReruns, ["dispatch-1", "dispatch-1"]);
 });
 
 test("dismiss route delegates terminal cleanup and returns the updated record", async (t) => {
@@ -2719,6 +2759,18 @@ test("reply route validates its text cap and delegates to the dispatcher", async
     force: true,
   });
 
+  await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/reply",
+    body: JSON.stringify({ text: "accept profile", acceptExecutionProfile: true }),
+    contentType: "application/json",
+  });
+  assert.deepEqual(dispatcher._replies.at(-1), {
+    id: "dispatch-1",
+    text: "accept profile",
+    acceptExecutionProfile: true,
+  });
+
   for (const text of ["   ", "-leading-option", "x".repeat(32 * 1024 + 1)]) {
     const rejected = await send(port, {
       method: "POST",
@@ -2728,7 +2780,7 @@ test("reply route validates its text cap and delegates to the dispatcher", async
     });
     assert.equal(rejected.status, 400);
   }
-  assert.equal(dispatcher._replies.length, 2);
+  assert.equal(dispatcher._replies.length, 3);
 });
 
 test("plan route delegates approve and revise actions through the resume endpoint", async (t) => {
@@ -2751,16 +2803,30 @@ test("plan route delegates approve and revise actions through the resume endpoin
     body: JSON.stringify({ action: "approve", force: true }),
     contentType: "application/json",
   });
+  const acceptedApprove = await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/plan",
+    body: JSON.stringify({ action: "approve", acceptExecutionProfile: true }),
+    contentType: "application/json",
+  });
 
   assert.equal(approve.status, 200);
   assert.equal(JSON.parse(approve.text).planAction, "approve");
   assert.equal(revise.status, 200);
   assert.equal(JSON.parse(revise.text).planAction, "revise");
   assert.equal(forcedApprove.status, 200);
+  assert.equal(acceptedApprove.status, 200);
   assert.deepEqual(dispatcher._plans, [
     { id: "dispatch-1", action: "approve", text: undefined, actor: "api" },
     { id: "dispatch-1", action: "revise", text: "cover rollback", actor: "api" },
     { id: "dispatch-1", action: "approve", text: undefined, force: true, actor: "api" },
+    {
+      id: "dispatch-1",
+      action: "approve",
+      text: undefined,
+      acceptExecutionProfile: true,
+      actor: "api",
+    },
   ]);
 
   const missing = await send(port, {

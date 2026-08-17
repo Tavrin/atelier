@@ -6,6 +6,7 @@ import {
   applyReviewEvent,
   currentReview,
   dismissAvailability,
+  executionProfileMismatchDetail,
   mergeGateReasons,
   planAvailability,
   replyAvailability,
@@ -169,6 +170,27 @@ test("a restart-interrupted claude dispatch surfaces Resume after restart, not t
   assert.equal(availability.label, "Resume after restart");
   assert.match(availability.hint, /A Atelier restart interrupted Claude/);
   assert.equal(availability.reason, undefined);
+});
+
+test("execution profile refusal detail supports the explicit UI acceptance control", () => {
+  const detail =
+    "EATELIER_EXECUTION_PROFILE_MISMATCH: envDigest (keys: PROFILE_FLAG); an operator can accept the new profile";
+  assert.equal(
+    executionProfileMismatchDetail({
+      executionProfileRefusal: { operation: "reply resume", detail },
+      warnings: [],
+    }),
+    detail,
+  );
+  assert.equal(
+    executionProfileMismatchDetail({ warnings: [detail] }),
+    detail,
+  );
+  assert.equal(
+    executionProfileMismatchDetail({ executionProfileRefusal: null, warnings: [detail] }),
+    "",
+  );
+  assert.equal(executionProfileMismatchDetail({ warnings: ["ambient warning"] }), "");
 });
 
 test("the same terminal dispatch offers the ordinary reply label once it is no longer resume-ready", () => {

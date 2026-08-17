@@ -72,7 +72,13 @@ export function runFile(
         if (error) {
           const detail = String(stderr || stdout || error.message).trim();
           const message = detail || `${file} exited with an error`;
-          rejectPromise(new Error(message));
+          const wrapped = new Error(message, { cause: error });
+          // Adapter lifecycle policy distinguishes an executable that could not
+          // spawn from an ordinary non-zero exit. Preserve Node's spawn evidence
+          // while still presenting the bounded stderr/stdout message above.
+          if (error.code !== undefined) wrapped.code = error.code;
+          if (error.path !== undefined) wrapped.path = error.path;
+          rejectPromise(wrapped);
           return;
         }
         resolvePromise(String(stdout));

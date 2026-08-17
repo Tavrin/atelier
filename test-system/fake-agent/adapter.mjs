@@ -2,6 +2,10 @@ import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { killTracked } from "../../server/lib/exec.mjs";
+import {
+  createExecutionProfile,
+  pinnedExecutable,
+} from "../../server/lib/execution/execution-profile.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput } from "../../server/lib/stream.mjs";
 
 const FAKE_AGENT = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
@@ -29,9 +33,25 @@ function fakeChildEnvironment(env) {
     LC_ALL: env.LC_ALL || "C",
   };
   for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith("ATELIER_TEST_")) childEnv[key] = value;
+    if (key === "ATELIER_FAKE_SCENARIO" || key.startsWith("ATELIER_TEST_")) {
+      childEnv[key] = value;
+    }
   }
   return childEnv;
+}
+
+function executionEnv(env) {
+  return fakeChildEnvironment(env);
+}
+
+function executionProfile({ entry, env, controlledKeys, hooksSupported }) {
+  return createExecutionProfile({
+    agentLane: entry.record.lane,
+    command: FAKE_AGENT,
+    env,
+    controlledKeys,
+    hooksSupported,
+  });
 }
 
 function options() {
@@ -129,7 +149,7 @@ function launch({ entry, project, worktreePath, env, spawner, callbacks }) {
   const scenario = requireTestGuard(env);
   const child = spawner(FAKE_AGENT, [scenario], {
     cwd: worktreePath,
-    env: fakeChildEnvironment(env),
+    env,
     stdio: ["pipe", "pipe", "pipe"],
   });
   consume({ entry, project, child, callbacks, accumulateUsage: false });
@@ -137,11 +157,15 @@ function launch({ entry, project, worktreePath, env, spawner, callbacks }) {
 
 function resume({ entry, project, worktreePath, env, spawner, callbacks }) {
   const scenario = requireTestGuard(env);
-  const child = spawner(FAKE_AGENT, [scenario, "--resume", entry.record.sessionId], {
-    cwd: worktreePath,
-    env: fakeChildEnvironment(env),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = spawner(
+    pinnedExecutable(entry, FAKE_AGENT),
+    [scenario, "--resume", entry.record.sessionId],
+    {
+      cwd: worktreePath,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
   consume({ entry, project, child, callbacks, accumulateUsage: true });
 }
 
@@ -151,8 +175,8 @@ async function stop({ entry }) {
   return { finish: false };
 }
 
-async function preLaunchChecks({ entry }) {
-  requireTestGuard(entry.env);
+async function preLaunchChecks({ env }) {
+  requireTestGuard(env);
 }
 
 export const fakeAgent = Object.freeze({
@@ -166,4 +190,6 @@ export const fakeAgent = Object.freeze({
   resume,
   stop,
   preLaunchChecks,
+  executionEnv,
+  executionProfile,
 });

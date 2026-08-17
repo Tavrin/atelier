@@ -1,5 +1,9 @@
 import { killTracked } from "../exec.mjs";
 import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
+import {
+  createExecutionProfile,
+  pinnedExecutable,
+} from "../execution/execution-profile.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput, userMessageLine } from "../stream.mjs";
 
 const MODELS = Object.freeze([
@@ -29,9 +33,23 @@ const CAPABILITIES = Object.freeze({
 function spawnOptions(worktreePath, env) {
   return {
     cwd: worktreePath,
-    env: sanitizeChildEnv(env, { class: "provider" }),
+    env,
     ...(CAPABILITIES.liveInput ? { stdio: ["pipe", "pipe", "pipe"] } : {}),
   };
+}
+
+function executionEnv(env) {
+  return sanitizeChildEnv(env, { class: "provider" });
+}
+
+function executionProfile({ entry, env, controlledKeys, hooksSupported }) {
+  return createExecutionProfile({
+    agentLane: entry.record.lane,
+    command: "claude",
+    env,
+    controlledKeys,
+    hooksSupported,
+  });
 }
 
 function options() {
@@ -204,7 +222,11 @@ function launch({
     args.push("--disallowedTools", entry.disallowedTools.join(","));
   }
   if (entry.record.effort) args.push("--effort", entry.record.effort);
-  const child = spawner("claude", args, spawnOptions(worktreePath, env));
+  const child = spawner(
+    pinnedExecutable(entry, "claude"),
+    args,
+    spawnOptions(worktreePath, env),
+  );
   child.stdin.write(userMessageLine(prompt));
   consume({ entry, project, child, callbacks, accumulateUsage: false });
 }
@@ -245,7 +267,11 @@ function resume({
     args.push("--disallowedTools", entry.disallowedTools.join(","));
   }
   if (entry.record.effort) args.push("--effort", entry.record.effort);
-  const child = spawner("claude", args, spawnOptions(worktreePath, env));
+  const child = spawner(
+    pinnedExecutable(entry, "claude"),
+    args,
+    spawnOptions(worktreePath, env),
+  );
   child.stdin.write(userMessageLine(text));
   consume({ entry, project, child, callbacks, accumulateUsage: true });
 }
@@ -271,4 +297,6 @@ export const claudeAgent = Object.freeze({
   resume,
   stop,
   preLaunchChecks,
+  executionEnv,
+  executionProfile,
 });

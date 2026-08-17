@@ -16,10 +16,19 @@ import { StringDecoder } from "node:string_decoder";
 
 import { killTracked } from "../exec.mjs";
 import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
+import {
+  EXECUTION_PROFILE_MISMATCH,
+  createExecutionProfile,
+  pinnedCompanionPath,
+  pinnedExecutable,
+} from "../execution/execution-profile.mjs";
 import { stateDir } from "../paths.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput } from "../stream.mjs";
 
 const POLL_INTERVAL_MS = 30_000;
+// Ordinary polling already treats transient command failures as retryable. A
+// missing pinned path gets the same bounded grace, then fails deterministically.
+const STATUS_PROFILE_FAILURE_RETRY_LIMIT = 3;
 let pollIntervalMs = POLL_INTERVAL_MS;
 const LOG_TAIL_INTERVAL_MS = 2_000;
 const LOG_READ_CHUNK_BYTES = 64 * 1024;
@@ -494,6 +503,44 @@ function companionEnv(env) {
   });
 }
 
+function executionEnv(env) {
+  return companionEnv(env);
+}
+
+function executionProfile({
+  entry,
+  env,
+  controlledKeys,
+  hooksSupported,
+  resolveCurrent = false,
+}) {
+  const companionPath = resolveCurrent
+    ? companionResolver() ?? null
+    : entry.companionPath ?? companionResolver() ?? null;
+  return createExecutionProfile({
+    agentLane: entry.record.lane,
+    command: "node",
+    companionPath,
+    env,
+    controlledKeys,
+    hooksSupported,
+  });
+}
+
+function companionCommand(entry) {
+  return pinnedExecutable(entry, "node");
+}
+
+function profilePathWarning(entry, error, operation) {
+  if (error?.code !== "ENOENT") return null;
+  return `${EXECUTION_PROFILE_MISMATCH}executable.resolvedPath could not spawn during Codex ${operation}: ${error.message}`;
+}
+
+function addWarningOnce(entry, warning) {
+  if (!Array.isArray(entry.record.warnings)) entry.record.warnings = [];
+  if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
+}
+
 function companionErrorMessage(payload) {
   return [
     payload?.job?.errorMessage,
@@ -520,7 +567,7 @@ function companionSummaryMessage(payload) {
 }
 
 function attachCompanion(entry) {
-  const companionPath = entry.companionPath ?? companionResolver();
+  const companionPath = entry.companionPath ?? pinnedCompanionPath(entry) ?? companionResolver();
   if (!companionPath) {
     throw new Error("Codex lane unavailable: codex-companion.mjs was not found");
   }
@@ -580,10 +627,11 @@ async function poll(
   if (entry.record.state !== "running") return;
   try {
     const raw = await commandRunner(
-      "node",
+      companionCommand(entry),
       [entry.companionPath, "status", entry.codexJobId, "--json"],
       { cwd: entry.record.codexWorkspace ?? entry.record.worktreePath, env: entry.env },
     );
+    entry.codexStatusProfileFailures = 0;
     const snapshot = JSON.parse(raw);
     captureThread(entry, snapshot, callbacks);
     recordUsage(entry, snapshot, callbacks);
@@ -669,7 +717,7 @@ async function poll(
       let rawOutput;
       try {
         const resultRaw = await commandRunner(
-          "node",
+          companionCommand(entry),
           [entry.companionPath, "result", entry.codexJobId, "--json"],
           { cwd: entry.record.codexWorkspace ?? entry.record.worktreePath, env: entry.env },
         );
@@ -725,7 +773,15 @@ async function poll(
       return;
     }
   } catch (error) {
-    if (failOnFirstError) {
+    const profileWarning = profilePathWarning(entry, error, "status polling");
+    if (profileWarning) {
+      entry.codexStatusProfileFailures = (entry.codexStatusProfileFailures || 0) + 1;
+      if (entry.codexStatusProfileFailures >= STATUS_PROFILE_FAILURE_RETRY_LIMIT) {
+        addWarningOnce(entry, profileWarning);
+        await failCompanionTurn(entry, project, callbacks, profileWarning);
+        return;
+      }
+    } else if (failOnFirstError) {
       await failCompanionTurn(
         entry,
         project,
@@ -733,8 +789,9 @@ async function poll(
         `worker status unavailable after restart: ${error.message}`,
       );
       return;
+    } else {
+      entry.stderrLines.push(`codex status failed: ${error.message}`);
     }
-    entry.stderrLines.push(`codex status failed: ${error.message}`);
   }
   entry.pollTimer = setTimeout(
     () => void poll(entry, project, commandRunner, callbacks),
@@ -758,6 +815,7 @@ function resetCompanionLogTail(entry) {
 function resetCompanionTurn(entry) {
   resetCompanionLogTail(entry);
   entry.codexJobId = undefined;
+  entry.codexStatusProfileFailures = 0;
 }
 
 function filePrompt(entry, prompt, dispatchDir) {
@@ -786,8 +844,6 @@ function launchCompanion({
   callbacks,
 }, { resume = false } = {}) {
   resetCompanionTurn(entry);
-  const durableEnv = companionEnv(env);
-  entry.env = durableEnv;
   const promptArgument = filePrompt(entry, prompt, dispatchDir);
   const args = [
     entry.companionPath,
@@ -799,9 +855,9 @@ function launchCompanion({
     promptArgument,
   ];
   const child = spawner(
-    "node",
+    companionCommand(entry),
     args,
-    { cwd: worktreePath, env: durableEnv },
+    { cwd: worktreePath, env },
   );
   entry.child = child;
   let output = "";
@@ -853,7 +909,7 @@ function reattach({ entry, project, workspace, env, commandRunner, callbacks }) 
   attachCompanion(entry);
   entry.codexJobId = entry.record.codexJobId;
   entry.record.codexWorkspace = workspace;
-  entry.env = companionEnv(env ?? entry.env ?? {});
+  entry.env = env ?? entry.env ?? {};
   resetCompanionLogTail(entry);
   callbacks.emit(entry, {
     type: "status",
@@ -883,12 +939,17 @@ async function stop({ entry, commandRunner }) {
   if (entry.codexJobId) {
     try {
       await commandRunner(
-        "node",
+        companionCommand(entry),
         [entry.companionPath, "cancel", entry.codexJobId, "--json"],
         { cwd: entry.record.codexWorkspace ?? entry.record.worktreePath, env: entry.env },
       );
     } catch (error) {
       entry.stderrLines.push(`codex cancel failed: ${error.message}`);
+      const warning = profilePathWarning(entry, error, "cancel");
+      if (warning) {
+        addWarningOnce(entry, warning);
+        return { finish: false, warning };
+      }
     }
     return { finish: true };
   }
@@ -918,6 +979,8 @@ export const codexAgent = Object.freeze({
   detach,
   stop,
   preLaunchChecks,
+  executionEnv,
+  executionProfile,
 });
 
 export function _setCompanionResolver(nextResolver = resolveCompanionPath) {

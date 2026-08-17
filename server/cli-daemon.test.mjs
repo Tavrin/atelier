@@ -189,6 +189,15 @@ async function waitForTerminal(url, id, headers) {
   throw new Error(`dispatch ${id} did not fail during prepare`);
 }
 
+test("reply CLI advertises the human execution-profile acceptance flag", async () => {
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "reply", "--help"],
+    { cwd: resolve("."), env: process.env },
+  );
+  assert.match(stdout, /atelier reply .*--accept-execution-profile/);
+});
+
 test("live daemon owns simultaneous CLI and HTTP dispatch record creation", async (t) => {
   const setup = await fixture(t);
   const project = await gitProject(setup.root, "fixture", { commit: false });

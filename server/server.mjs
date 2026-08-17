@@ -846,7 +846,13 @@ export function createServer({
       if (authContext.actor === "mcp" && postBody?.force === true) {
         throw new HttpError(
           409,
-          "MCP force overrides are forbidden; use the human break-glass policy",
+          "MCP operator overrides are forbidden; use the human break-glass policy",
+        );
+      }
+      if (authContext.actor === "mcp" && postBody?.acceptExecutionProfile === true) {
+        throw new HttpError(
+          409,
+          "MCP operator overrides are forbidden; use atelier reply --accept-execution-profile or the web UI accept checkbox",
         );
       }
 
@@ -1490,6 +1496,9 @@ export function createServer({
             jsonResponse(response, 200, await dispatcher.reply(id, dispatchActionContext(request, {
               text,
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.acceptExecutionProfile !== undefined
+                ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
+                : {}),
             })));
           } catch (error) {
             throw dispatchHttpError(error);
@@ -1502,6 +1511,9 @@ export function createServer({
               action: requiredString(postBody, "action"),
               text: optionalString(postBody, "text"),
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.acceptExecutionProfile !== undefined
+                ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
+                : {}),
             })));
           } catch (error) {
             throw dispatchHttpError(error);
@@ -1563,7 +1575,8 @@ export function createServer({
           return;
         }
         if (request.method === "POST" && action === "verify") {
-          const rejected = Object.keys(postBody);
+          const rejected = Object.keys(postBody)
+            .filter((key) => key !== "acceptExecutionProfile");
           if (rejected.length > 0) {
             throw new HttpError(400, `Unknown verification fields: ${rejected.join(", ")}`);
           }
@@ -1576,7 +1589,11 @@ export function createServer({
             jsonResponse(
               response,
               202,
-              await dispatcher.rerunVerification(id, dispatchActionContext(request)),
+              await dispatcher.rerunVerification(id, dispatchActionContext(request, {
+                ...(postBody.acceptExecutionProfile !== undefined
+                  ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
+                  : {}),
+              })),
             );
           } catch (error) {
             throw dispatchHttpError(error);

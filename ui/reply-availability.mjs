@@ -19,6 +19,17 @@ const DISMISSIBLE_STATES = new Set([
   "rejected",
 ]);
 
+export function executionProfileMismatchDetail(record) {
+  const refusal = String(record?.executionProfileRefusal?.detail || "").trim();
+  if (refusal.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ")) return refusal;
+  // Current records always expose this field. An explicit null means the
+  // refusal was accepted, even though its warning remains in the audit trail.
+  if (Object.hasOwn(record || {}, "executionProfileRefusal")) return "";
+  const warnings = Array.isArray(record?.warnings) ? record.warnings : [];
+  return [...warnings].reverse().find((warning) =>
+    String(warning).startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ")) || "";
+}
+
 export function dismissAvailability(record) {
   if (!record || !DISMISSIBLE_STATES.has(record.state) || record.dismissed) {
     return { available: false, label: "Dismiss" };
