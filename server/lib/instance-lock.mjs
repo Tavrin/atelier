@@ -4,12 +4,17 @@ import {
   linkSync,
   mkdirSync,
   openSync,
-  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+
+import { readFileNoFollowSync } from "./fs-integrity.mjs";
+
+function readLockOwner(path) {
+  return Number(readFileNoFollowSync(path, "utf8").trim());
+}
 
 function ownerIsAlive(pid, killProcess) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -48,7 +53,7 @@ function lockedError(message) {
 function confirmLockOwner(path, pid) {
   let owner;
   try {
-    owner = Number(readFileSync(path, "utf8").trim());
+    owner = readLockOwner(path);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -66,7 +71,7 @@ export function liveInstanceOwner(directory, { killProcess = process.kill } = {}
   const path = join(directory, "atelier.lock");
   let owner;
   try {
-    owner = Number(readFileSync(path, "utf8").trim());
+    owner = readLockOwner(path);
   } catch (error) {
     if (error.code === "ENOENT") return undefined;
     throw error;
@@ -89,7 +94,7 @@ export function acquireInstanceLock(directory, {
     if (error.code !== "EEXIST") throw error;
     let owner;
     try {
-      owner = Number(readFileSync(path, "utf8").trim());
+      owner = readLockOwner(path);
     } catch (readError) {
       if (readError.code !== "ENOENT") throw readError;
     }
@@ -110,7 +115,7 @@ export function acquireInstanceLock(directory, {
     if (existsSync(graveyard)) {
       let captured;
       try {
-        captured = Number(readFileSync(graveyard, "utf8").trim());
+        captured = readLockOwner(graveyard);
       } catch {
         captured = undefined;
       }
@@ -155,7 +160,7 @@ export function acquireInstanceLock(directory, {
       if (released) return;
       released = true;
       try {
-        const owner = Number(readFileSync(path, "utf8").trim());
+        const owner = readLockOwner(path);
         if (owner === pid) rmSync(path, { force: true });
       } catch (error) {
         if (error.code !== "ENOENT") throw error;

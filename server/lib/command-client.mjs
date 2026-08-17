@@ -1,7 +1,8 @@
-import { readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { clientBearerToken } from "./auth.mjs";
+import { readFileNoFollowSync } from "./fs-integrity.mjs";
 import { liveInstanceOwner } from "./instance-lock.mjs";
 import { stateDir } from "./paths.mjs";
 
@@ -24,7 +25,7 @@ export function atelierServerUrl({ directory = stateDir(), env = process.env } =
   }
   const urlPath = join(directory, "atelier.url");
   try {
-    return loopbackUrl(readFileSync(urlPath, "utf8").trim(), urlPath);
+    return loopbackUrl(readFileNoFollowSync(urlPath, "utf8").trim(), urlPath);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }

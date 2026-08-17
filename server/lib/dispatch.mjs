@@ -3,8 +3,11 @@ import { EventEmitter } from "node:events";
 import {
   appendFileSync,
   closeSync,
+  constants,
   existsSync,
+  fsyncSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readSync,
@@ -71,6 +74,11 @@ import {
   userMessageLine,
 } from "./stream.mjs";
 import { DEFAULTS, resolveProjectDefaultAgent } from "./registry.mjs";
+import {
+  appendDurable,
+  readFileNoFollowSync,
+  writeFileAtomic,
+} from "./fs-integrity.mjs";
 import {
   loadReadyTicketIds as loadTrackerReadyTicketIds,
   parseReadyTicketIds as parseTrackerReadyTicketIds,
@@ -222,11 +230,18 @@ const UNRETRIEVED_FINAL_MESSAGE_WARNING_PREFIX =
   "outcome classified conservatively: ";
 const UNKNOWN_CHANGE_STATE_WARNING_PREFIX =
   "Atelier could not compare this dispatch against its base: ";
-const NON_TRACKER_PATHS = Object.freeze([".", ":(exclude).beads"]);
+const WORKSPACE_IDENTITY_FILE = ".atelier-workspace.json";
+const NON_TRACKER_PATHS = Object.freeze([
+  ".",
+  ":(exclude).beads",
+  `:(exclude)${WORKSPACE_IDENTITY_FILE}`,
+]);
 const TRACKER_MERGE_WARNING =
   "divergent tracker bytes were discarded from the dispatch branch; main .beads state was preserved";
 const PERSISTENCE_WARNING =
   "PERSISTENCE DEGRADED: updates are running in memory; Atelier will retry writes on the next transition";
+const VERIFY_PERSISTENCE_WARNING =
+  "VERIFICATION PERSISTENCE DEGRADED: the verification attempt or verdict was not made durable";
 // ONE fencing pair: the persisted pid, the /proc start-time identity that proves
 // the pid was never recycled, and the two accessors that locate them on a record.
 // `hold` is what lets a pair persisted INSIDE another object join the vocabulary
@@ -335,8 +350,22 @@ let resultFinalizer = finalizeResult;
 let capabilityProbe = probeProject;
 let pushFetch = globalThis.fetch;
 let brResolver = resolveBrExecutable;
-let gcFileOps = { readdirSync, rmSync };
-let persistenceFileOps = { appendFileSync, writeFileSync };
+const DEFAULT_GC_FILE_OPS = Object.freeze({ lstatSync, readdirSync, realpathSync, rmSync });
+const DEFAULT_PERSISTENCE_FILE_OPS = Object.freeze({
+  appendFileSync,
+  closeSync,
+  fsyncSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+});
+let gcFileOps = { ...DEFAULT_GC_FILE_OPS };
+let persistenceFileOps = { ...DEFAULT_PERSISTENCE_FILE_OPS };
 let persistenceLogger = console;
 let postMergeFileOps = { mkdirSync };
 let postMergeHooks = {};
@@ -355,19 +384,26 @@ function resolveDispatchLane(opts, project, defaults) {
 function hasUnterminatedTail(path) {
   let file;
   try {
-    file = openSync(path, "r");
+    const details = persistenceFileOps.lstatSync(path);
+    if (!details.isFile() || details.isSymbolicLink()) {
+      const error = new Error(`Atelier refuses non-regular or symlinked state file: ${path}`);
+      error.code = "EATELIERINTEGRITY";
+      throw error;
+    }
+    const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
+    file = persistenceFileOps.openSync(path, constants.O_RDONLY | noFollow);
   } catch (error) {
     if (error?.code === "ENOENT") return false;
     throw error;
   }
   try {
-    const { size } = fstatSync(file);
+    const { size } = persistenceFileOps.fstatSync(file);
     if (size === 0) return false;
     const lastByte = Buffer.allocUnsafe(1);
-    readSync(file, lastByte, 0, 1, size - 1);
+    persistenceFileOps.readSync(file, lastByte, 0, 1, size - 1);
     return lastByte[0] !== 0x0a;
   } finally {
-    closeSync(file);
+    persistenceFileOps.closeSync(file);
   }
 }
 
@@ -1148,7 +1184,9 @@ function parseIndex(path, { warnMalformed = false } = {}) {
   if (!existsSync(path)) return [];
   const records = new Map();
   let malformed = 0;
-  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+  for (const line of readFileNoFollowSync(path, "utf8", {
+    fileOps: persistenceFileOps,
+  }).split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
       const record = JSON.parse(line);
@@ -1171,7 +1209,9 @@ function parseIndex(path, { warnMalformed = false } = {}) {
 
 function compactIndex(path) {
   if (!existsSync(path)) return;
-  const lines = readFileSync(path, "utf8").split(/\r?\n/).filter((line) => line.trim());
+  const lines = readFileNoFollowSync(path, "utf8", {
+    fileOps: persistenceFileOps,
+  }).split(/\r?\n/).filter((line) => line.trim());
   if (lines.length <= 1_000) return;
 
   const latest = new Map();
@@ -1187,36 +1227,20 @@ function compactIndex(path) {
     }
   }
 
-  const temporaryPath = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   const contents = [...latest.values()].map((record) => JSON.stringify(record)).join("\n");
   const warn = (error) => {
     logPersistenceWarning(
       `Atelier persistence could not compact ${path}: ${error.message}; continuing with the uncompacted index`,
     );
   };
-  const cleanup = () => guardedFilesystemCall(
-    () => rmSync(temporaryPath, { force: true }),
-    (error) => logPersistenceWarning(
-      `Atelier persistence could not remove failed compaction file ${temporaryPath}: ${error.message}`,
-    ),
-  );
   const written = guardedFilesystemCall(
-    () => persistenceFileOps.writeFileSync(temporaryPath, contents ? `${contents}\n` : "", {
-      encoding: "utf8",
-      flag: "wx",
+    () => writeFileAtomic(path, contents ? `${contents}\n` : "", {
       mode: 0o600,
+      fileOps: persistenceFileOps,
     }),
     warn,
   );
-  if (!written.ok) {
-    cleanup();
-    return false;
-  }
-  const renamed = guardedFilesystemCall(() => renameSync(temporaryPath, path), warn);
-  if (!renamed.ok) {
-    cleanup();
-    return false;
-  }
+  if (!written.ok) return false;
   return true;
 }
 
@@ -1525,6 +1549,170 @@ export function createDispatcher({
   const indexPath = join(dispatchDir, "index.jsonl");
   const queuePath = join(stateDir, "queue.json");
   const convoysPath = join(stateDir, "convoys.json");
+  const queuePersistenceFailures = new Set();
+  const convoyPersistenceFailures = new Set();
+  let queueWritePending = false;
+  let convoyWritePending = false;
+  const pendingRecordEntries = new Set();
+  const pendingEventWrites = new Map();
+  const malformedTailWarnings = new Set();
+
+  function preserveCorruptState(path, raw, target, failures) {
+    const timestamp = new Date().toISOString().replaceAll(":", "-");
+    const evidencePath = `${path}.corrupt-${timestamp}`;
+    if (!observer) {
+      try {
+        writeFileAtomic(evidencePath, raw, { mode: 0o600, fileOps: persistenceFileOps });
+      } catch (error) {
+        logPersistenceWarning(
+          `Atelier could not preserve corrupt ${path} as ${evidencePath}: ${error.message}`,
+        );
+      }
+    }
+    failures.add(target);
+    logPersistenceWarning(
+      `Atelier persistence found corrupt state in ${path}; loaded empty state` +
+        (observer ? " (observer mode did not write evidence)" : ` and preserved evidence at ${evidencePath}`),
+    );
+  }
+
+  function loadJsonState(path, { fallback, valid, target, failures }) {
+    let raw;
+    try {
+      raw = readFileNoFollowSync(path, "utf8", { fileOps: persistenceFileOps });
+    } catch (error) {
+      if (error?.code === "ENOENT") return fallback;
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!valid(parsed)) throw new SyntaxError("unexpected JSON state shape");
+      return parsed;
+    } catch (error) {
+      preserveCorruptState(path, raw, target, failures);
+      return fallback;
+    }
+  }
+
+  function writeWorkspaceIdentity(worktree, record, project, kind) {
+    // A successful `git worktree add` normally created this directory. Keep the
+    // token write deterministic for injected runners and fail later at the
+    // existing rev-parse linkage check if a runner falsely reported success.
+    mkdirSync(worktree, { recursive: true });
+    writeFileAtomic(
+      join(worktree, WORKSPACE_IDENTITY_FILE),
+      `${JSON.stringify({
+        recordId: record.id,
+        project: project.name,
+        kind,
+        createdAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    // Keep Atelier's identity token out of application diffs and agent commits.
+    // Linked worktrees have a gitfile pointing at their per-worktree git dir;
+    // its own info/exclude is local to this disposable checkout.
+    const gitEntry = join(worktree, ".git");
+    let gitDirectory;
+    try {
+      const details = lstatSync(gitEntry);
+      if (details.isDirectory()) {
+        gitDirectory = gitEntry;
+      } else if (details.isFile()) {
+        const match = /^gitdir: ([^\r\n]+)\r?\n?$/.exec(readFileSync(gitEntry, "utf8"));
+        if (match) gitDirectory = isAbsolute(match[1]) ? match[1] : resolve(worktree, match[1]);
+      }
+    } catch {
+      // Injected runners may not create Git metadata; their command stubs own
+      // status output. The token itself still exists and guards cleanup.
+    }
+    if (gitDirectory) {
+      const gitDirectories = [gitDirectory];
+      try {
+        const common = readFileSync(join(gitDirectory, "commondir"), "utf8").trim();
+        if (common) gitDirectories.push(resolve(gitDirectory, common));
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      for (const directory of new Set(gitDirectories)) {
+        const excludePath = join(directory, "info", "exclude");
+        mkdirSync(dirname(excludePath), { recursive: true });
+        let current = "";
+        try {
+          current = readFileSync(excludePath, "utf8");
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+        if (!current.split(/\r?\n/).includes(`/${WORKSPACE_IDENTITY_FILE}`)) {
+          appendFileSync(excludePath, `/${WORKSPACE_IDENTITY_FILE}\n`, { mode: 0o600 });
+        }
+      }
+    }
+  }
+
+  function readWorkspaceIdentity(worktree) {
+    const path = join(worktree, WORKSPACE_IDENTITY_FILE);
+    const parsed = JSON.parse(readFileNoFollowSync(path, "utf8"));
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      typeof parsed.recordId !== "string" ||
+      typeof parsed.project !== "string" ||
+      typeof parsed.kind !== "string" ||
+      typeof parsed.createdAt !== "string"
+    ) {
+      throw new Error(`invalid workspace identity token: ${path}`);
+    }
+    return parsed;
+  }
+
+  function authorizeWorkspaceRemoval(worktree, { recordId, project, kind }) {
+    let details;
+    try {
+      details = lstatSync(worktree);
+    } catch (error) {
+      if (error?.code === "ENOENT") return { allowed: true };
+      return { allowed: false, warning: `workspace cleanup skipped: ${error.message}` };
+    }
+    if (!details.isDirectory() || details.isSymbolicLink()) {
+      return {
+        allowed: false,
+        warning: `workspace cleanup skipped: ${worktree} is not a real directory`,
+      };
+    }
+    let identity;
+    try {
+      identity = readWorkspaceIdentity(worktree);
+    } catch (error) {
+      return {
+        allowed: false,
+        warning: `workspace cleanup skipped: identity token unavailable for ${worktree} (${error.message})`,
+      };
+    }
+    if (
+      identity.recordId !== recordId ||
+      identity.project !== project ||
+      identity.kind !== kind
+    ) {
+      return {
+        allowed: false,
+        warning:
+          `workspace cleanup skipped: identity token mismatch for ${worktree} ` +
+          `(expected ${recordId}/${project}/${kind})`,
+      };
+    }
+    return { allowed: true, identity };
+  }
+
+  function retainWorkspaceOnIdentityFailure(entry, authorization) {
+    if (authorization.allowed) return true;
+    addWarningOnce(entry.record, authorization.warning);
+    logPersistenceWarning(`Atelier ${authorization.warning}`);
+    persist(entry);
+    return false;
+  }
+
   if (!observer) {
     mkdirSync(dispatchDir, { recursive: true });
     try {
@@ -1533,7 +1721,7 @@ export function createDispatcher({
           `Atelier persistence found a malformed final line in ${indexPath}; skipping it and repairing the JSONL boundary`,
         );
         try {
-          persistenceFileOps.appendFileSync(indexPath, "\n", "utf8");
+          appendDurable(indexPath, "\n", { fileOps: persistenceFileOps });
         } catch (error) {
           if (typeof error?.code !== "string") throw error;
           logPersistenceWarning(
@@ -1564,13 +1752,12 @@ export function createDispatcher({
   let shuttingDown = false;
   let activeShutdownGraceMs = postMergeShutdownGraceMs;
   let shutdownPromise;
-  let savedConvoys = [];
-  try {
-    const parsed = JSON.parse(readFileSync(convoysPath, "utf8"));
-    if (Array.isArray(parsed)) savedConvoys = parsed;
-  } catch {
-    // Missing or malformed convoy state starts empty.
-  }
+  const savedConvoys = loadJsonState(convoysPath, {
+    fallback: [],
+    valid: Array.isArray,
+    target: "convoy",
+    failures: convoyPersistenceFailures,
+  });
   const convoys = new Map(
     savedConvoys
       .filter((convoy) =>
@@ -1582,13 +1769,12 @@ export function createDispatcher({
         convoy.cursor >= 0)
       .map((convoy) => [convoy.id, convoy]),
   );
-  let savedQueues = {};
-  try {
-    savedQueues = JSON.parse(readFileSync(queuePath, "utf8"));
-  } catch {
-    // Missing or malformed runtime state starts disabled and can be rewritten
-    // by the next explicit toggle.
-  }
+  const savedQueues = loadJsonState(queuePath, {
+    fallback: {},
+    valid: (value) => value && typeof value === "object" && !Array.isArray(value),
+    target: "queue",
+    failures: queuePersistenceFailures,
+  });
   const queues = new Map(
     registry.projects.map((project) => [
       project.name,
@@ -1609,10 +1795,6 @@ export function createDispatcher({
   let bakeoffReservedSlots = 0;
   let drainLease;
   let inFlightAdmissions = 0;
-  const queuePersistenceFailures = new Set();
-  const convoyPersistenceFailures = new Set();
-  const pendingRecordEntries = new Set();
-  const malformedTailWarnings = new Set();
   const reviewCreationTails = new Map();
   const reviewParkingTails = new Map();
   const lastDrainDecisions = new Map();
@@ -1862,6 +2044,26 @@ export function createDispatcher({
     }
   }
 
+  function persistenceFailureTargets() {
+    const targets = [];
+    if (queuePersistenceFailures.size > 0) targets.push(queuePath);
+    if (convoyPersistenceFailures.size > 0) targets.push(convoysPath);
+    for (const entry of entries.values()) {
+      for (const target of entry.persistenceFailures) {
+        targets.push(
+          target === "event"
+            ? join(dispatchDir, `${entry.record.id}.jsonl`)
+            : `${indexPath} (dispatch ${entry.record.id})`,
+        );
+      }
+    }
+    return [...new Set(targets)].sort();
+  }
+
+  function persistenceDegraded() {
+    return persistenceFailureTargets().length > 0;
+  }
+
   function guardedPersistenceWrite({
     method,
     path,
@@ -1901,10 +2103,16 @@ export function createDispatcher({
       }
     }
     const recoveryPrefix = malformedTail ? "\n" : "";
-    const written = guardedFilesystemCall(
-      () => persistenceFileOps[method](path, `${recoveryPrefix}${contents}`, "utf8"),
-      degrade,
-    );
+    const written = guardedFilesystemCall(() => {
+      const storedContents = `${recoveryPrefix}${contents}`;
+      if (method === "appendFileSync") {
+        appendDurable(path, storedContents, { fileOps: persistenceFileOps });
+      } else if (method === "writeFileSync") {
+        writeFileAtomic(path, storedContents, { mode: 0o600, fileOps: persistenceFileOps });
+      } else {
+        throw new TypeError(`Unknown persistence method: ${method}`);
+      }
+    }, degrade);
     if (!written.ok) return false;
     failures.delete(target);
     malformedTailWarnings.delete(path);
@@ -1930,7 +2138,7 @@ export function createDispatcher({
       }),
     );
     const contents = `${JSON.stringify(saved, null, 2)}\n`;
-    return guardedPersistenceWrite({
+    const persisted = guardedPersistenceWrite({
       method: "writeFileSync",
       path: queuePath,
       contents,
@@ -1938,6 +2146,8 @@ export function createDispatcher({
       target: "queue",
       owner: "ready queues",
     });
+    queueWritePending = !persisted;
+    return persisted;
   }
 
   function queueState(project) {
@@ -2323,7 +2533,7 @@ export function createDispatcher({
 
   function persistConvoys({ convoy, entry } = {}) {
     const contents = `${JSON.stringify([...convoys.values()].map(publicConvoy), null, 2)}\n`;
-    return guardedPersistenceWrite({
+    const persisted = guardedPersistenceWrite({
       method: "writeFileSync",
       path: convoysPath,
       contents,
@@ -2339,6 +2549,8 @@ export function createDispatcher({
         }
       },
     });
+    convoyWritePending = !persisted;
+    return persisted;
   }
 
   function persist(entry) {
@@ -2394,7 +2606,36 @@ export function createDispatcher({
       exposed.projectRemoved = true;
     }
     exposed.gates = gatesFor(exposed);
+    exposed.persistenceDegraded = persistenceDegraded();
+    if (exposed.persistenceDegraded) {
+      exposed.persistenceFailureTargets = persistenceFailureTargets();
+    }
     return exposed;
+  }
+
+  function appendEventContents(entry, pending) {
+    return guardedPersistenceWrite({
+      method: "appendFileSync",
+      path: pending.path,
+      contents: pending.contents,
+      failures: entry.persistenceFailures,
+      target: "event",
+      owner: `dispatch ${entry.record.id}`,
+      onFailure() {
+        addPersistenceWarning(entry.record);
+      },
+    });
+  }
+
+  function retryPendingEventsFor(entry) {
+    const writes = pendingEventWrites.get(entry);
+    if (!writes) return true;
+    while (writes.length > 0) {
+      if (!appendEventContents(entry, writes[0])) return false;
+      writes.shift();
+    }
+    pendingEventWrites.delete(entry);
+    return true;
   }
 
   function emit(entry, event) {
@@ -2410,16 +2651,10 @@ export function createDispatcher({
     };
     const eventPath = join(dispatchDir, `${entry.record.id}.jsonl`);
     const contents = `${JSON.stringify(stored)}\n`;
-    const persisted = guardedPersistenceWrite({
-      method: "appendFileSync",
+    const priorEventsPersisted = retryPendingEventsFor(entry);
+    const persisted = priorEventsPersisted && appendEventContents(entry, {
       path: eventPath,
       contents,
-      failures: entry.persistenceFailures,
-      target: "event",
-      owner: `dispatch ${entry.record.id}`,
-      onFailure() {
-        addPersistenceWarning(entry.record);
-      },
     });
     if (!persisted) {
       stored.warning = PERSISTENCE_WARNING;
@@ -2428,17 +2663,15 @@ export function createDispatcher({
       // leave it only in memory, then retry the event once with the warning.
       persist(entry);
       const retryContents = `${JSON.stringify(stored)}\n`;
-      guardedPersistenceWrite({
-        method: "appendFileSync",
+      const retried = priorEventsPersisted && appendEventContents(entry, {
         path: eventPath,
         contents: retryContents,
-        failures: entry.persistenceFailures,
-        target: "event",
-        owner: `dispatch ${entry.record.id}`,
-        onFailure() {
-          addPersistenceWarning(entry.record);
-        },
       });
+      if (!retried) {
+        const writes = pendingEventWrites.get(entry) ?? [];
+        writes.push({ path: eventPath, contents: retryContents });
+        pendingEventWrites.set(entry, writes);
+      }
     } else if (pendingRecordEntries.has(entry)) {
       persist(entry);
     }
@@ -3665,7 +3898,7 @@ export function createDispatcher({
   const bootQueueSettlements = [];
   const bootReattachments = [];
   const bootOrphanReaps = [];
-  for (const loaded of parseIndex(indexPath, { warnMalformed: observer })) {
+  for (const loaded of parseIndex(indexPath, { warnMalformed: true })) {
     const entry = inertEntry(loaded);
     entries.set(loaded.id, entry);
     seedPostMergeFenceBarrier(entry);
@@ -4451,7 +4684,7 @@ export function createDispatcher({
       // dispatch. Persisted below, before any event announces the attempt.
       ...(rerun ? { rerun: { attempt, from: entry.record.state, previousState } } : {}),
     };
-    persist(entry);
+    if (!persist(entry)) addWarningOnce(entry.record, VERIFY_PERSISTENCE_WARNING);
     return { attempt, previousState };
   }
 
@@ -4485,7 +4718,7 @@ export function createDispatcher({
         },
       ],
     };
-    persist(entry);
+    if (!persist(entry)) addWarningOnce(entry.record, VERIFY_PERSISTENCE_WARNING);
     return entry.record.verify;
   }
 
@@ -4566,9 +4799,11 @@ export function createDispatcher({
   }
 
   async function withDetachedCheckout({
+    entry,
     project,
     commit,
     worktree,
+    kind,
     mismatchLabel,
     cleanupAfterAddFailure = false,
     afterAdded,
@@ -4589,6 +4824,7 @@ export function createDispatcher({
         commit,
       ], { timeout: LONG_GIT_TIMEOUT_MS });
       worktreeAdded = true;
+      writeWorkspaceIdentity(worktree, entry.record, project, kind);
       await afterAdded?.({ worktree });
       const head = (
         await commandRunner("git", ["-C", worktree, "rev-parse", "HEAD"])
@@ -4605,15 +4841,24 @@ export function createDispatcher({
       );
       if (cleanupNeeded) {
         try {
-          await commandRunner("git", [
-            "-C",
-            project.path,
-            "worktree",
-            "remove",
-            worktree,
-            "--force",
-          ], { timeout: LONG_GIT_TIMEOUT_MS });
-          await onRemoved?.();
+          const authorization = authorizeWorkspaceRemoval(worktree, {
+            recordId: entry.record.id,
+            project: project.name,
+            kind,
+          });
+          if (!retainWorkspaceOnIdentityFailure(entry, authorization)) {
+            await onCleanupFailure?.(new Error(authorization.warning));
+          } else {
+            await commandRunner("git", [
+              "-C",
+              project.path,
+              "worktree",
+              "remove",
+              worktree,
+              "--force",
+            ], { timeout: LONG_GIT_TIMEOUT_MS });
+            await onRemoved?.();
+          }
         } catch (error) {
           // A failed add may never have registered the path with git. Its
           // accurate failure is the add error, not a second cleanup warning.
@@ -4640,6 +4885,9 @@ export function createDispatcher({
       "--untracked-files=all",
       "--ignored=matching",
       "-z",
+      "--",
+      ".",
+      `:(exclude)${WORKSPACE_IDENTITY_FILE}`,
     ]));
     return { head, tree, status };
   }
@@ -4732,9 +4980,11 @@ export function createDispatcher({
         entry.record.verify.worktreePath = worktree;
         persist(entry);
         outcome = await withDetachedCheckout({
+          entry,
           project,
           commit: attestedResult.commit,
           worktree,
+          kind: "verify",
           mismatchLabel: "verification worktree",
           cleanupAfterAddFailure: true,
           onRemoved() {
@@ -5023,9 +5273,11 @@ export function createDispatcher({
       startedAt: entry.record.postMerge.startedAt,
     });
     await withDetachedCheckout({
+      entry,
       project,
       commit,
       worktree,
+      kind: "post-merge",
       mismatchLabel: "post-merge verification worktree",
       afterAdded: () => postMergeHooks.afterWorktreeAdded?.({
         entry,
@@ -5633,6 +5885,7 @@ export function createDispatcher({
         ["-C", project.path, "worktree", "add", "-b", branch, worktreePath, baseRef],
         { timeout: LONG_GIT_TIMEOUT_MS },
       );
+      writeWorkspaceIdentity(worktreePath, entry.record, project, "dispatch");
       if (entry.record.state !== "preparing") {
         await abandonPreparation(entry, project);
         return;
@@ -6640,14 +6893,23 @@ export function createDispatcher({
     const failures = [];
     if (entry.record.worktreePath) {
       try {
-        await commandRunner("git", [
-          "-C",
-          project.path,
-          "worktree",
-          "remove",
-          entry.record.worktreePath,
-          "--force",
-        ]);
+        const authorization = authorizeWorkspaceRemoval(entry.record.worktreePath, {
+          recordId: entry.record.id,
+          project: project.name,
+          kind: "dispatch",
+        });
+        if (!retainWorkspaceOnIdentityFailure(entry, authorization)) {
+          failures.push(authorization.warning);
+        } else {
+          await commandRunner("git", [
+            "-C",
+            project.path,
+            "worktree",
+            "remove",
+            entry.record.worktreePath,
+            "--force",
+          ]);
+        }
       } catch (error) {
         if (!cleanupMissing(error, "worktree")) {
           failures.push(`worktree cleanup failed: ${error.message}`);
@@ -6860,6 +7122,7 @@ export function createDispatcher({
       executionProfileRefusal: null,
       warnings: claim?.warning ? [claim.warning] : [],
     };
+    if (persistenceDegraded()) addPersistenceWarning(record);
     const entry = {
       record,
       claimed: orchestration.sharedClaim ? false : claim?.claimed === true,
@@ -7553,6 +7816,10 @@ ${diff}`;
     }
 
     return {
+      persistenceDegraded: persistenceDegraded(),
+      ...(persistenceDegraded()
+        ? { persistenceFailureTargets: persistenceFailureTargets() }
+        : {}),
       projects: [...projectRows.values()].sort((left, right) =>
         left.project.localeCompare(right.project),
       ),
@@ -8483,7 +8750,7 @@ ${diff}`;
         throw error;
       }
       for (const dispatchDirectory of dispatchDirectories) {
-        if (dispatchDirectory.isDirectory()) {
+        if (dispatchDirectory.isDirectory() || dispatchDirectory.isSymbolicLink()) {
           paths.push(join(projectRoot, dispatchDirectory.name));
         }
       }
@@ -8494,7 +8761,7 @@ ${diff}`;
   function flatWorktreeDirectories(root) {
     try {
       return gcFileOps.readdirSync(root, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
+        .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
         .map((entry) => join(root, entry.name));
     } catch (error) {
       if (error.code === "ENOENT") return [];
@@ -8509,6 +8776,29 @@ ${diff}`;
       ...nestedWorktreeDirectories(join(stateDir, "post-merge-worktrees")),
       ...flatWorktreeDirectories(join(stateDir, "merge-worktrees")),
     ];
+  }
+
+  function orphanWorkspaceContext(path) {
+    for (const [rootName, kind] of [
+      ["worktrees", "dispatch"],
+      ["verify-worktrees", "verify"],
+      ["post-merge-worktrees", "post-merge"],
+    ]) {
+      const root = join(stateDir, rootName);
+      const projectName = basename(dirname(path));
+      if (resolve(dirname(dirname(path))) === resolve(root)) {
+        return {
+          root: join(root, projectName),
+          kind,
+          owningProject: registry.projects.find((project) => project.name === projectName),
+        };
+      }
+    }
+    const mergeRoot = join(stateDir, "merge-worktrees");
+    if (resolve(dirname(path)) === resolve(mergeRoot)) {
+      return { root: mergeRoot, kind: "merge", owningProject: undefined };
+    }
+    return undefined;
   }
 
   // Atelier's OWN dispatch worktree root, resolved through symlinks once per sweep
@@ -8908,14 +9198,69 @@ ${diff}`;
       const resolvedPath = resolve(path);
       if (protectedWorktreePaths().has(resolvedPath)) continue;
       const registeredProject = registeredPaths.get(resolvedPath);
-      const owningProject = registry.projects.find(
-        (project) => [
-          join(stateDir, "worktrees", project.name),
-          join(stateDir, "verify-worktrees", project.name),
-          join(stateDir, "post-merge-worktrees", project.name),
-        ].some((root) => resolve(root) === resolve(dirname(path))),
-      );
+      const context = orphanWorkspaceContext(path);
+      if (!context) {
+        result.warnings.push(`orphan ${path} retained: no owning workspace root`);
+        continue;
+      }
+      let owningProject = context?.owningProject;
       if (!registeredProject && owningProject && listFailures.has(owningProject.name)) continue;
+      let details;
+      try {
+        details = gcFileOps.lstatSync(path);
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        result.warnings.push(`orphan ${path} retained: cannot lstat candidate (${error.message})`);
+        continue;
+      }
+      if (!details.isDirectory() || details.isSymbolicLink()) {
+        result.warnings.push(`orphan ${path} retained: candidate is not a real directory`);
+        continue;
+      }
+      try {
+        const realRoot = gcFileOps.realpathSync(context.root);
+        const realCandidate = gcFileOps.realpathSync(path);
+        const segment = relative(realRoot, realCandidate);
+        if (!segment || segment.startsWith("..") || isAbsolute(segment)) {
+          result.warnings.push(`orphan ${path} retained: realpath escapes its owning root`);
+          continue;
+        }
+      } catch (error) {
+        result.warnings.push(`orphan ${path} retained: cannot verify realpath (${error.message})`);
+        continue;
+      }
+      let identity;
+      try {
+        identity = readWorkspaceIdentity(path);
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          result.warnings.push(`orphan ${path} retained: invalid identity token (${error.message})`);
+          continue;
+        }
+        // Legacy window: pre-ATT-007 directories have no token. They remain
+        // removable only when Git itself still registers this exact real
+        // directory under the owning project; unregistered legacy paths stay.
+        if (!registeredProject || (owningProject && registeredProject !== owningProject)) {
+          result.warnings.push(`orphan ${path} retained: workspace identity token is missing`);
+          continue;
+        }
+        owningProject = registeredProject;
+      }
+      if (identity) {
+        const identityProject = registry.projects.find(
+          (project) => project.name === identity.project,
+        );
+        if (
+          !identityProject ||
+          identity.kind !== context.kind ||
+          (owningProject && identityProject !== owningProject) ||
+          (registeredProject && identityProject !== registeredProject)
+        ) {
+          result.warnings.push(`orphan ${path} retained: workspace identity token mismatched owner`);
+          continue;
+        }
+        owningProject = identityProject;
+      }
       if (dryRun) {
         result.orphans.push(path);
         continue;
@@ -8931,9 +9276,7 @@ ${diff}`;
             "--force",
           ]);
         } else {
-          const pruneProject = owningProject ?? registry.projects.find(
-            (project) => project.archetype !== "tracker-only",
-          );
+          const pruneProject = owningProject;
           if (pruneProject && !prunedProjects.has(pruneProject.name)) {
             await commandRunner("git", ["-C", pruneProject.path, "worktree", "prune"]);
             prunedProjects.add(pruneProject.name);
@@ -9106,6 +9449,17 @@ ${diff}`;
         };
         persist(entry);
       }
+    }
+    // Persistence is an authority gate, not an ordinary merge policy: force
+    // cannot make an in-memory-only verdict or lifecycle transition durable.
+    // Retry pending writes once at the operator boundary, then refuse only if
+    // the aggregate is still degraded.
+    retryPendingPersistence();
+    if (persistenceDegraded()) {
+      throw dispatcherError(
+        409,
+        `persistence degradation gate failed: ${persistenceFailureTargets().join(", ")}`,
+      );
     }
     // Merging removes the worktree. Doing that under a worker Atelier has not
     // proven dead is how you get a half-written tree merged, or a live agent
@@ -9358,6 +9712,7 @@ ${diff}`;
               project.mainBranch,
             ], { timeout: LONG_GIT_TIMEOUT_MS });
             worktreeAdded = true;
+            writeWorkspaceIdentity(mergeWorktree, record, project, "merge");
             const mergeMainHead = (
               await commandRunner("git", ["-C", mergeWorktree, "rev-parse", "HEAD"])
             ).trim();
@@ -9383,14 +9738,21 @@ ${diff}`;
             throw dispatcherError(409, error.message);
           } finally {
             if (worktreeAdded) {
-              await commandRunner("git", [
-                "-C",
-                project.path,
-                "worktree",
-                "remove",
-                mergeWorktree,
-                "--force",
-              ]).catch(() => {});
+              const authorization = authorizeWorkspaceRemoval(mergeWorktree, {
+                recordId: record.id,
+                project: project.name,
+                kind: "merge",
+              });
+              if (retainWorkspaceOnIdentityFailure(entry, authorization)) {
+                await commandRunner("git", [
+                  "-C",
+                  project.path,
+                  "worktree",
+                  "remove",
+                  mergeWorktree,
+                  "--force",
+                ]).catch(() => {});
+              }
             }
           }
         }
@@ -9602,6 +9964,14 @@ ${diff}`;
       // directory is removed (atelier-za6).
       await reapCodexProcessTree(entry, "dispatch merged");
       try {
+        const authorization = authorizeWorkspaceRemoval(record.worktreePath, {
+          recordId: record.id,
+          project: project.name,
+          kind: "dispatch",
+        });
+        if (!retainWorkspaceOnIdentityFailure(entry, authorization)) {
+          throw dispatcherError(409, authorization.warning);
+        }
         await commandRunner("git", [
           "-C",
           project.path,
@@ -10603,10 +10973,21 @@ ${diff}`;
     if (project.archetype === "tracker-only") {
       throw dispatcherError(409, "Queue unavailable: tracker-only project");
     }
-    if (project.tracker === "none") return { enabled: false, unavailable: true };
+    if (project.tracker === "none") {
+      return {
+        enabled: false,
+        unavailable: true,
+        persistenceDegraded: persistenceDegraded(),
+        ...(persistenceDegraded()
+          ? { persistenceFailureTargets: persistenceFailureTargets() }
+          : {}),
+      };
+    }
     const state = queueState(project);
-    const lastError = queuePersistenceFailures.has("queue")
-      ? [state.lastError, PERSISTENCE_WARNING].filter(Boolean).join("; ")
+    const lastError = persistenceDegraded()
+      ? state.lastError === PERSISTENCE_WARNING
+        ? PERSISTENCE_WARNING
+        : [state.lastError, PERSISTENCE_WARNING].filter(Boolean).join("; ")
       : state.lastError;
     const parkedTickets = [...state.ticketAttempts]
       .filter(([, attempt]) => parkedQueueAttempt(project, attempt))
@@ -10639,6 +11020,10 @@ ${diff}`;
       enabled: state.enabled,
       consecutiveFailures: state.consecutiveFailures,
       lastError,
+      persistenceDegraded: persistenceDegraded(),
+      ...(persistenceDegraded()
+        ? { persistenceFailureTargets: persistenceFailureTargets() }
+        : {}),
       failureLimit: queueFailureLimit(project),
       parkedTickets,
       ...(budget
@@ -10770,8 +11155,24 @@ ${diff}`;
     }
   }
 
+  function retryPendingEvents() {
+    for (const entry of [...pendingEventWrites.keys()]) retryPendingEventsFor(entry);
+  }
+
   function retryPendingQueueState() {
-    if (queuePersistenceFailures.has("queue")) persistQueues();
+    if (queueWritePending) persistQueues();
+  }
+
+  function retryPendingConvoyState() {
+    if (convoyWritePending) persistConvoys();
+  }
+
+  function retryPendingPersistence() {
+    retryPendingRecords();
+    retryPendingEvents();
+    retryPendingRecords();
+    retryPendingQueueState();
+    retryPendingConvoyState();
   }
 
   // The trace the motivating incident was missing: one line per drain pass per
@@ -10828,8 +11229,7 @@ ${diff}`;
       logDrainDecision(project, { passId, ...fields });
     try {
       mergePersistedEntries();
-      retryPendingRecords();
-      retryPendingQueueState();
+      retryPendingPersistence();
       await retryPendingReviewParkings();
       for (const project of registry.projects) {
         const queue = queues.get(project.name);
@@ -10846,6 +11246,15 @@ ${diff}`;
         }
         if (movingTrackers.has(project.name)) {
           logDecision(project, { decision: "skipped", reason: "tracker-moving" });
+          continue;
+        }
+        if (persistenceDegraded()) {
+          queue.lastError = PERSISTENCE_WARNING;
+          logDecision(project, {
+            decision: "skipped",
+            reason: "persistence-degraded",
+            targets: persistenceFailureTargets(),
+          });
           continue;
         }
         const budget = projectBudgetStatus(project, { excludeReviews: true });
@@ -11246,12 +11655,12 @@ export function _setCodexModelFileOps(nextFileOps) {
   setAgentModelFileOps(nextFileOps);
 }
 
-export function _setGcFileOps(nextFileOps = { readdirSync, rmSync }) {
-  gcFileOps = nextFileOps;
+export function _setGcFileOps(nextFileOps = DEFAULT_GC_FILE_OPS) {
+  gcFileOps = { ...DEFAULT_GC_FILE_OPS, ...nextFileOps };
 }
 
-export function _setPersistenceFileOps(nextFileOps = { appendFileSync, writeFileSync }) {
-  persistenceFileOps = nextFileOps;
+export function _setPersistenceFileOps(nextFileOps = DEFAULT_PERSISTENCE_FILE_OPS) {
+  persistenceFileOps = { ...DEFAULT_PERSISTENCE_FILE_OPS, ...nextFileOps };
 }
 
 export function _setPersistenceLogger(nextLogger = console) {

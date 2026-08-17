@@ -7,7 +7,6 @@ import {
   closeSync,
   mkdirSync,
   openSync,
-  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -15,6 +14,7 @@ import {
 import { join } from "node:path";
 
 import { HttpError } from "./http.mjs";
+import { readFileNoFollowSync } from "./fs-integrity.mjs";
 import { stateDir } from "./paths.mjs";
 
 export const AUTH_SECRET_FILE = "auth-secret";
@@ -60,7 +60,7 @@ export function ensureAuthSecret(directory) {
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
   }
-  return validateSecret(path, readFileSync(path, "utf8").trim());
+  return validateSecret(path, readFileNoFollowSync(path, "utf8").trim());
 }
 
 function signature(secret, purpose, value) {
@@ -98,7 +98,7 @@ export function clientBearerToken(label, {
   const path = join(directory, AUTH_SECRET_FILE);
   let secret;
   try {
-    secret = validateSecret(path, readFileSync(path, "utf8").trim());
+    secret = validateSecret(path, readFileNoFollowSync(path, "utf8").trim());
   } catch (error) {
     if (error.code === "ENOENT") {
       throw new Error(
