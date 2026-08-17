@@ -4537,7 +4537,10 @@ export function createDispatcher({
       }
       return await useCheckout({ worktree, head });
     } finally {
-      if (worktreeAdded || (cleanupAfterAddFailure && worktreeAddAttempted)) {
+      const cleanupNeeded = worktreeAdded || (
+        cleanupAfterAddFailure && worktreeAddAttempted && existsSync(worktree)
+      );
+      if (cleanupNeeded) {
         try {
           await commandRunner("git", [
             "-C",
@@ -4549,8 +4552,12 @@ export function createDispatcher({
           ], { timeout: LONG_GIT_TIMEOUT_MS });
           await onRemoved?.();
         } catch (error) {
-          await onCleanupFailure?.(error);
+          // A failed add may never have registered the path with git. Its
+          // accurate failure is the add error, not a second cleanup warning.
+          if (worktreeAdded) await onCleanupFailure?.(error);
         }
+      } else if (cleanupAfterAddFailure && worktreeAddAttempted) {
+        await onRemoved?.();
       }
     }
   }
@@ -4659,12 +4666,24 @@ export function createDispatcher({
       const worktree = join(verifyRoot, randomBytes(8).toString("hex"));
       try {
         mkdirSync(verifyRoot, { recursive: true });
+        entry.record.verify.worktreePath = worktree;
+        persist(entry);
         outcome = await withDetachedCheckout({
           project,
           commit: attestedResult.commit,
           worktree,
           mismatchLabel: "verification worktree",
           cleanupAfterAddFailure: true,
+          onRemoved() {
+            delete entry.record.verify.worktreePath;
+            try {
+              persist(entry);
+            } catch (persistError) {
+              logPersistenceWarning(
+                `Atelier could not persist cleaned verification worktree for ${entry.record.id}: ${persistError.message}`,
+              );
+            }
+          },
           onCleanupFailure(error) {
             const warning = `verification worktree cleanup failed: ${error.message}`;
             if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
@@ -8409,10 +8428,17 @@ ${diff}`;
         ) {
           protectedPaths.add(resolve(entry.record.postMerge.worktreePath));
         }
+        if (
+          entry.record.verify?.worktreePath &&
+          (entry.record.verify.state === "running" || fenced)
+        ) {
+          protectedPaths.add(resolve(entry.record.verify.worktreePath));
+        }
         if (!fenced) continue;
         const retainedPaths = new Set([
           entry.record.worktreePath,
           entry.record.postMerge?.worktreePath,
+          entry.record.verify?.worktreePath,
         ].filter(Boolean));
         for (const path of retainedPaths) {
           const key = `${entry.record.id}\0${resolve(path)}`;

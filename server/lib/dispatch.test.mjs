@@ -1981,6 +1981,53 @@ test("verification removes a checkout left behind by a timed-out worktree add", 
   assert.equal(existsSync(verificationWorktree), false);
 });
 
+test("verification reports only the checkout failure when worktree add never registered a path", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["node never"] });
+  _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
+  let verificationWorktree;
+  const calls = [];
+  _setRunFile(withDispatchChanges(async (file, args) => {
+    calls.push({ file, args });
+    assert.equal(file, "git");
+    if (args[2] === "worktree" && args[3] === "add" && args[4] === "-b") {
+      await mkdir(args[6], { recursive: true });
+      return "";
+    }
+    if (args[2] === "worktree" && args[3] === "add" && args[4] === "--detach") {
+      verificationWorktree = args[5];
+      throw new Error("git worktree add rejected before registration");
+    }
+    if (args[2] === "worktree" && args[3] === "remove") {
+      throw new Error("unknown worktree path");
+    }
+    if (["status", "log"].includes(args[2])) return "";
+    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "rev-list") return "0\n";
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  }));
+  _setSpawner(() => successfulChild());
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "reject checkout add" });
+  const record = await waitForState(dispatcher, id, ["completed"]);
+
+  assert.match(
+    record.verify.detail,
+    /^verification checkout failed: git worktree add rejected before registration$/,
+  );
+  assert.equal(existsSync(verificationWorktree), false);
+  assert.equal(record.verify.worktreePath, undefined);
+  assert.equal(
+    record.warnings.some((warning) => warning.startsWith("verification worktree cleanup failed:")),
+    false,
+  );
+  assert.equal(
+    calls.some(({ args }) =>
+      args[2] === "worktree" && args[3] === "remove" && args[4] === verificationWorktree),
+    false,
+  );
+});
+
 test("result invalidation clears an existing attestation", () => {
   const entry = {
     record: {
@@ -20180,6 +20227,93 @@ test("gc refreshes fenced paths created while git worktree listing is awaited", 
       warning.includes(worktreePath)),
     `gc did not report the late retained worktree: ${JSON.stringify(collected.warnings)}`,
   );
+});
+
+test("gc preserves an in-flight verification checkout until its run cleans up", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["node --test"] });
+  _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
+  let verificationWorktree;
+  const calls = [];
+  _setRunFile(withDispatchChanges(async (file, args) => {
+    calls.push({ file, args });
+    if (["update", "ready", "sync"].includes(args[0])) return "";
+    assert.equal(file, "git");
+    if (args[2] === "worktree" && args[3] === "add" && args[4] === "-b") {
+      await mkdir(args[6], { recursive: true });
+      return "";
+    }
+    if (args[2] === "worktree" && args[3] === "add" && args[4] === "--detach") {
+      verificationWorktree = args[5];
+      await mkdir(verificationWorktree, { recursive: true });
+      return "";
+    }
+    if (args[2] === "worktree" && args[3] === "list") {
+      return `worktree ${setup.primary}\n\nworktree ${verificationWorktree}\n`;
+    }
+    if (args[2] === "worktree" && args[3] === "remove") {
+      await rm(args[4], { recursive: true, force: true });
+      return "";
+    }
+    if (["status", "log"].includes(args[2])) return "";
+    if (args[2] === "rev-parse") {
+      return `${args[3] === "HEAD^{tree}" ? FIXTURE_RESULT_TREE : FIXTURE_BASE_COMMIT}\n`;
+    }
+    if (args[2] === "rev-list") return "0\n";
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  }));
+  const verifier = heldChild();
+  const verifierStarted = deferredValue();
+  _setSpawner((command) => {
+    if (command === "claude") return successfulChild();
+    verifierStarted.settle();
+    return verifier;
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sweepCodexProcessesAtBoot: false,
+  });
+  const created = await dispatcher.dispatch({ project: "fixture", prompt: "hold verification" });
+  t.after(async () => {
+    if (dispatcher.get(created.id)?.state === "verifying") {
+      verifier.complete();
+      await waitForState(dispatcher, created.id, ["completed"]);
+    }
+  });
+  await waitForCondition(
+    () => (
+      typeof verificationWorktree === "string" &&
+      dispatcher.get(created.id)?.verify?.worktreePath === verificationWorktree
+    ),
+    "verification checkout path was not persisted before the runner started",
+  );
+  await verifierStarted.promise;
+
+  const liveRecord = rawRecord(setup, created.id);
+  assert.equal(liveRecord.verify.state, "running");
+  assert.equal(liveRecord.verify.worktreePath, verificationWorktree);
+  assert.equal(existsSync(verificationWorktree), true);
+
+  const collected = await dispatcher.gc({
+    olderThanDays: 0,
+    now: new Date("2026-08-30T12:00:00.000Z"),
+  });
+
+  assert.equal(existsSync(verificationWorktree), true, "gc removed the active verify checkout");
+  assert.equal(collected.orphans.includes(verificationWorktree), false);
+  assert.equal(
+    calls.some(({ args }) =>
+      args[2] === "worktree" && args[3] === "remove" && args[4] === verificationWorktree),
+    false,
+    "gc issued a removal for the active verify checkout",
+  );
+
+  verifier.complete();
+  const completed = await waitForState(dispatcher, created.id, ["completed"]);
+  assert.equal(completed.verify.state, "passed");
+  assert.equal(completed.verify.worktreePath, undefined);
+  assert.equal(rawRecord(setup, created.id).verify.worktreePath, undefined);
+  assert.equal(existsSync(verificationWorktree), false, "verification cleanup left its checkout");
 });
 
 test("stop preempts a SIGTERM-immune verification re-run and a later re-run is accepted", async (t) => {
