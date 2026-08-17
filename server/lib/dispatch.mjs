@@ -8883,13 +8883,19 @@ ${diff}`;
     const mainTipBefore = (
       await commandRunner("git", ["-C", project.path, "rev-parse", project.mainBranch])
     ).trim();
-    const alreadyContained = String(await commandRunner("git", [
-      "-C",
-      project.path,
-      "merge-base",
-      branchHead,
-      mainTipBefore,
-    ])).trim() === branchHead;
+    let alreadyContained = false;
+    try {
+      alreadyContained = String(await commandRunner("git", [
+        "-C",
+        project.path,
+        "merge-base",
+        branchHead,
+        mainTipBefore,
+      ])).trim() === branchHead;
+    } catch {
+      // merge-base exits non-zero for histories with no common ancestor;
+      // "not contained" is the conservative reading either way.
+    }
     const mergeIntent = {
       resultCommit: record.result?.commit ?? branchHead,
       branchHead,
@@ -9426,10 +9432,34 @@ ${diff}`;
       persist(entry);
       return;
     }
+    let presetLanding = null;
     if (intent.alreadyContained === true) {
-      delete record.mergeIntent;
-      persist(entry);
-      return;
+      // Contained normally means the interrupted merge was a no-op, but the
+      // tracker-divergence strategy lands a real empty-delta merge commit even
+      // for a contained branch. Recognize exactly that commit by its second
+      // parent; anything else on main is unrelated work and must never be
+      // scanned into a fabricated result-to-merge mapping.
+      try {
+        const tip = (
+          await commandRunner("git", ["-C", project.path, "rev-parse", intent.mainBranch])
+        ).trim();
+        if (tip && tip !== intent.mainTipBefore) {
+          const secondParent = (
+            await commandRunner("git", ["-C", project.path, "rev-parse", `${tip}^2`])
+          ).trim();
+          if (secondParent === intendedCommit) {
+            presetLanding = { commit: tip, strategy: "recovered-merge" };
+          }
+        }
+      } catch {
+        // A tip without a second parent (or a transient failure) reads as the
+        // no-op case; clearing is the safe default for a contained branch.
+      }
+      if (!presetLanding) {
+        delete record.mergeIntent;
+        persist(entry);
+        return;
+      }
     }
     let mainTip;
     let commonAncestor;
@@ -9469,7 +9499,9 @@ ${diff}`;
     }
     let commit = intendedCommit;
     let strategy = "ff";
-    if (mainTip !== intendedCommit) {
+    if (presetLanding) {
+      ({ commit, strategy } = presetLanding);
+    } else if (mainTip !== intendedCommit) {
       let landingFound = false;
       try {
         const firstParentCommits = String(await commandRunner("git", [
@@ -9536,7 +9568,14 @@ ${diff}`;
       delete record.mergeFollowUpDebt;
       return;
     }
-    await cleanupMergedArtifacts(entry, project, intent.branchHead || intendedCommit);
+    try {
+      await cleanupMergedArtifacts(entry, project, intent.branchHead || intendedCommit);
+    } catch (error) {
+      // Reconciliation runs at boot and inline under other operations; a
+      // cleanup failure is a warning, never a poisoned recovery pass.
+      const warning = `recovered merge cleanup failed: ${error.message}`;
+      if (!record.warnings.includes(warning)) record.warnings.push(warning);
+    }
     await completeReviewAdvisories(entry, project);
     await drainMergedTicketCloseDebt(entry, project);
     persist(entry);

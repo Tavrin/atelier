@@ -5239,7 +5239,79 @@ test("already-contained intents clear as no-ops without fabricating unrelated la
   );
   assert.equal(dispatcher.get("dispatch-merge").merged, null);
   assert.equal(calls.some((args) => args[2] === "rev-list"), false);
-  assert.equal(calls.some((args) => args[2] === "rev-parse" && args[3] === "main"), false);
+});
+
+test("an already-contained intent whose empty-delta merge landed is recorded, not discarded", async (t) => {
+  const setup = await fixture(t);
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: true,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
+  const calls = [];
+  _setRunFile(async (_file, args) => {
+    calls.push(args);
+    if (args[2] === "rev-parse" && args[3] === "main") return "landed-tip\n";
+    if (args[2] === "rev-parse" && args[3] === "landed-tip^2") return "result-head\n";
+    if (args[2] === "rev-parse" && args.includes("MERGE_HEAD")) throw new Error("no merge in progress");
+    if (args[2] === "merge-base") return "result-head\n";
+    return "";
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await waitForCondition(
+    () => rawRecord(setup, "dispatch-merge").merged !== null &&
+      rawRecord(setup, "dispatch-merge").merged !== undefined,
+    "landed empty-delta merge was not reconciled",
+  );
+  const record = rawRecord(setup, "dispatch-merge");
+  assert.equal(record.merged.commit, "landed-tip");
+  assert.equal(record.merged.strategy, "recovered-merge");
+  assert.equal(record.mergeIntent ?? null, null);
+  assert.equal(calls.some((args) => args[2] === "rev-list"), false,
+    "the landing scan must not run for a contained branch");
+});
+
+test("a cleanup failure during recovery becomes a warning, not a poisoned boot pass", async (t) => {
+  const setup = await fixture(t);
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(setup, {
+    branchHead: "result-head",
+    mergeIntent: intent,
+    worktreePath: join(setup.state, "worktrees", "dispatch-merge"),
+  });
+  await mkdir(join(setup.state, "worktrees", "dispatch-merge"), { recursive: true });
+  _setRunFile(async (_file, args) => {
+    if (args[2] === "rev-parse" && args[3] === "main") return "result-head\n";
+    if (args[2] === "rev-parse" && args.includes("MERGE_HEAD")) throw new Error("no merge in progress");
+    if (args[2] === "merge-base") return "result-head\n";
+    if (args[2] === "worktree" && args[3] === "remove") throw new Error("worktree is locked");
+    return "";
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await waitForCondition(
+    () => rawRecord(setup, "dispatch-merge").merged !== null &&
+      rawRecord(setup, "dispatch-merge").merged !== undefined,
+    "landed intent was not reconciled despite the cleanup failure",
+  );
+  const record = rawRecord(setup, "dispatch-merge");
+  assert.equal(record.mergeIntent ?? null, null);
+  assert.ok(
+    record.warnings.some((warning) => warning.startsWith("recovered merge cleanup failed:")),
+    "cleanup failure must surface as a record warning",
+  );
+  assert.ok(dispatcher.get("dispatch-merge"), "the dispatcher must stay serviceable");
 });
 
 test("audited force abandons an unresolved intent and records exactly what it cleared", async (t) => {
