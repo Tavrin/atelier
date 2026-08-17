@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import {
   appendFileSync,
@@ -62,6 +63,7 @@ import {
   _setSpawner,
   _resolveDispatchLane,
   createDispatcher,
+  invalidateResult,
 } from "./dispatch.mjs";
 
 const FORCE_AUDIT = Object.freeze({
@@ -421,7 +423,12 @@ function withDispatchChanges(runner, changed = PROBE_CHANGED_FILE) {
   };
 }
 
-function stubPreparation({ dirtyCount = 0, strandedStatus = "", onCommand = () => {} } = {}) {
+function stubPreparation({
+  dirtyCount = 0,
+  strandedStatus = "",
+  onCommand = () => {},
+  verificationTree = () => FIXTURE_RESULT_TREE,
+} = {}) {
   _setProbe(async () => ({ git: { dirtyCount, branch: "main" } }));
   _setRunFile(withDispatchChanges(async (file, args, options = {}) => {
     onCommand(file, args, options);
@@ -429,7 +436,15 @@ function stubPreparation({ dirtyCount = 0, strandedStatus = "", onCommand = () =
     assert.equal(file, "git");
     if (args[2] === "status") return strandedStatus;
     if (args[2] === "log") return "";
-    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "rev-parse") {
+      return `${args[3] === "HEAD^{tree}" ? verificationTree() : FIXTURE_BASE_COMMIT}\n`;
+    }
+    if (args[2] === "rev-list") return "0\n";
+    if (args[2] === "worktree" && args[3] === "remove") return "";
+    if (args[2] === "worktree" && args[4] === "--detach") {
+      await mkdir(args[5], { recursive: true });
+      return "";
+    }
     assert.deepEqual(args.slice(0, 5), ["-C", args[1], "worktree", "add", "-b"]);
     const primary = args[1];
     const worktreePath = args[6];
@@ -1731,12 +1746,12 @@ test("worktree verification runs sequential argv steps and records a passed verd
     launches.slice(1).map(({ command, args, options }) => ({
       command,
       args,
-      cwd: options.cwd,
+      detached: options.cwd.includes(`${join("verify-worktrees", "fixture")}`),
       anthropicKey: options.env.ANTHROPIC_API_KEY,
     })),
     [
-      { command: "node", args: ["--test", "one"], cwd: record.worktreePath, anthropicKey: undefined },
-      { command: "printf", args: ["verified"], cwd: record.worktreePath, anthropicKey: undefined },
+      { command: "node", args: ["--test", "one"], detached: true, anthropicKey: undefined },
+      { command: "printf", args: ["verified"], detached: true, anthropicKey: undefined },
     ],
   );
   const events = dispatcher.getEvents(id);
@@ -1767,10 +1782,14 @@ test("worktree verification records the exact tested HEAD and current main drift
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
     assert.equal(file, "git");
     if (args[2] === "worktree" && args[3] === "add") {
-      await mkdir(args[6], { recursive: true });
+      await mkdir(args[4] === "--detach" ? args[5] : args[6], { recursive: true });
       return "";
     }
+    if (args[2] === "worktree" && args[3] === "remove") return "";
     if (args[2] === "status" || args[2] === "log") return "";
+    if (args[2] === "rev-parse" && args[3] === "HEAD^{tree}") {
+      return `${FIXTURE_RESULT_TREE}\n`;
+    }
     if (args[2] === "rev-parse" && args[3] === "HEAD") {
       return "1111111111111111111111111111111111111111\n";
     }
@@ -1791,6 +1810,145 @@ test("worktree verification records the exact tested HEAD and current main drift
   assert.equal(record.verify.mainTip, "2222222222222222222222222222222222222222");
   assert.equal(record.verify.commitsBehind, 3);
   assert.match(record.verify.contextAt, /^2026-/);
+});
+
+test("clean detached verification persists an immutable attestation and removes its worktree", async (t) => {
+  const commands = ["node --test one", "printf verified"];
+  const setup = await fixture(t, { verifyCommands: commands });
+  const gitCalls = [];
+  stubPreparation({ onCommand: (_file, args) => gitCalls.push([...args]) });
+  const verifyCwds = [];
+  _setSpawner((command, _args, options) => {
+    if (command === "claude") return successfulChild();
+    verifyCwds.push(options.cwd);
+    return verifyChild();
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "attest clean bytes" });
+  const record = await waitForState(dispatcher, id, ["completed"]);
+  const added = gitCalls.find((args) => args[2] === "worktree" && args[4] === "--detach");
+  const removed = gitCalls.find((args) => args[2] === "worktree" && args[3] === "remove");
+
+  assert.equal(record.verify.state, "passed");
+  assert.ok(added, "verification never created a detached worktree");
+  assert.equal(added[5].includes(`${join("verify-worktrees", "fixture")}`), true);
+  assert.deepEqual(verifyCwds, [added[5], added[5]]);
+  assert.equal(removed?.[4], added[5], "passing verification left its worktree registered");
+  assert.deepEqual(record.attestation, {
+    resultCommit: FIXTURE_BASE_COMMIT,
+    resultTree: FIXTURE_RESULT_TREE,
+    resultVersion: 1,
+    suite: "project-verify",
+    commandsDigest: createHash("sha256").update(JSON.stringify(commands)).digest("hex"),
+    pre: { head: FIXTURE_BASE_COMMIT, tree: FIXTURE_RESULT_TREE, statusClean: true },
+    post: { head: FIXTURE_BASE_COMMIT, tree: FIXTURE_RESULT_TREE, statusClean: true },
+    attestedAt: record.attestation.attestedAt,
+    attempt: 1,
+  });
+  assert.match(record.attestation.attestedAt, /^2026-/);
+  assert.deepEqual(rawRecord(setup, id).attestation, record.attestation);
+});
+
+test("a zero-exit verifier that mutates the detached tree fails and cannot attest", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["node mutate"] });
+  const gitCalls = [];
+  let verifierRan = false;
+  const mutatedTree = "3333333333333333333333333333333333333333";
+  stubPreparation({
+    onCommand: (_file, args) => gitCalls.push([...args]),
+    verificationTree: () => verifierRan ? mutatedTree : FIXTURE_RESULT_TREE,
+  });
+  _setSpawner((command) => {
+    if (command === "claude") return successfulChild();
+    verifierRan = true;
+    return verifyChild({ code: 0 });
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "detect mutation" });
+  const record = await waitForState(dispatcher, id, ["completed"]);
+  const added = gitCalls.find((args) => args[2] === "worktree" && args[4] === "--detach");
+  const removed = gitCalls.find((args) => args[2] === "worktree" && args[3] === "remove");
+
+  assert.equal(record.verify.steps[0].exitCode, 0);
+  assert.notEqual(record.verify.state, "passed");
+  assert.match(record.verify.detail, /^EATELIER_VERIFICATION_MUTATED_WORKTREE: /);
+  assert.match(record.verify.detail, new RegExp(`${FIXTURE_RESULT_TREE}.*${mutatedTree}`));
+  assert.equal(record.attestation, null);
+  assert.equal(removed?.[4], added?.[5], "failed verification left its worktree registered");
+});
+
+test("result invalidation clears an existing attestation", () => {
+  const entry = {
+    record: {
+      result: { commit: FIXTURE_BASE_COMMIT, tree: FIXTURE_RESULT_TREE, version: 4 },
+      attestation: { resultCommit: FIXTURE_BASE_COMMIT, resultVersion: 4 },
+    },
+  };
+
+  invalidateResult(entry, "new work arrived");
+
+  assert.equal(Object.hasOwn(entry.record, "attestation"), false);
+  assert.equal(entry.record.result.version, 5);
+  assert.deepEqual(entry.record.verify, {
+    state: "invalidated",
+    detail: "new work arrived",
+    steps: [],
+  });
+});
+
+test("merge refuses a branch HEAD that moved after attestation", async (t) => {
+  const setup = await fixture(t);
+  const movedHead = "3333333333333333333333333333333333333333";
+  const record = await seedDispatch(setup, {
+    result: { commit: FIXTURE_BASE_COMMIT, tree: FIXTURE_RESULT_TREE, version: 2 },
+    attestation: { resultCommit: FIXTURE_BASE_COMMIT, resultVersion: 2 },
+  });
+  await mkdir(record.worktreePath, { recursive: true });
+  const calls = [];
+  _setRunFile(async (file, args) => {
+    calls.push({ file, args });
+    if (file === "git" && args[2] === "rev-parse" && args[3] === "--verify") {
+      return `${movedHead}\n`;
+    }
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await assert.rejects(
+    dispatcher.merge(record.id),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /^EATELIER_VERIFICATION_HEAD_MISMATCH: /);
+      return true;
+    },
+  );
+  assert.equal(
+    calls.some(({ args }) => ["merge", "update-ref"].includes(args[2])),
+    false,
+    "stale-attestation refusal still moved main",
+  );
+});
+
+test("a legacy record without a finalized result verifies in place without attesting", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["node --test"] });
+  const record = await seedRerunnable(setup);
+  const calls = stubVerificationRuntime();
+  let verifyCwd;
+  _setSpawner((_file, _args, options) => {
+    verifyCwd = options.cwd;
+    return verifyChild();
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await dispatcher.rerunVerification(record.id);
+  const completed = await waitForState(dispatcher, record.id, ["completed"]);
+
+  assert.equal(completed.verify.state, "passed");
+  assert.equal(completed.attestation, null);
+  assert.equal(verifyCwd, record.worktreePath);
+  assert.equal(calls.some(({ args }) => args[2] === "worktree"), false);
 });
 
 test("verification output is redacted in events and recorded step tails", async (t) => {
@@ -2341,11 +2499,14 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     }
     assert.equal(file, "git");
     gitCalls.push(args);
-    if (args[2] === "worktree") {
-      await mkdir(args[6], { recursive: true });
+    if (args[2] === "worktree" && args[3] === "remove") return "";
+    if (args[2] === "worktree" && args[3] === "add") {
+      const target = args[4] === "--detach" ? args[5] : args[6];
+      await mkdir(target, { recursive: true });
+      if (args[4] === "--detach") return "";
       const gitDir = join(setup.primary, ".git", "worktrees", "fixture-finalizer");
       await mkdir(gitDir, { recursive: true });
-      await writeFile(join(args[6], ".git"), `gitdir: ${gitDir}\n`);
+      await writeFile(join(target, ".git"), `gitdir: ${gitDir}\n`);
       return "";
     }
     if (args[2] === "rev-parse" && args[3] === "--git-common-dir") {
@@ -2353,6 +2514,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     }
     if (args[2] === "rev-parse" && args[3] === "--git-dir") return ".atelier-git\n";
     if (args[2] === "rev-parse" && args[3] === "HEAD") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "rev-parse" && args[3] === "HEAD^{tree}") return `${FIXTURE_RESULT_TREE}\n`;
     if (args[2] === "rev-parse" && args[3] === "--verify") {
       return `${args[4].endsWith("^{tree}") ? FIXTURE_RESULT_TREE : FIXTURE_BASE_COMMIT}\n`;
     }
@@ -2372,6 +2534,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
       order.push("commit");
       return "";
     }
+    if (args[2] === "rev-list") return "0\n";
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
   });
 
@@ -7359,9 +7522,10 @@ test("ready queue ignores an active review on the same project and at the cap", 
       return "reviewed-head\n";
     }
     if (file === "git" && args[2] === "worktree" && args[3] === "add") {
-      await mkdir(args[6], { recursive: true });
+      await mkdir(args[4] === "--detach" ? args[5] : args[6], { recursive: true });
       return "";
     }
+    if (file === "git" && args[2] === "worktree" && args[3] === "remove") return "";
     if (file === "git" && ["status", "log"].includes(args[2])) return "";
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
   });
@@ -9379,6 +9543,15 @@ test("a verify:true codex job that completes during downtime still runs verifica
       return JSON.stringify({ job: { summary: "done while down" } });
     }
     assert.equal(file, "git");
+    if (args[2] === "worktree" && args[3] === "add") {
+      await mkdir(args[5], { recursive: true });
+      return "";
+    }
+    if (args[2] === "worktree" && args[3] === "remove") return "";
+    if (args[2] === "rev-parse" && args[3] === "HEAD") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "rev-parse" && args[3] === "HEAD^{tree}") return `${FIXTURE_RESULT_TREE}\n`;
+    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "rev-list") return "0\n";
     return "";
   });
 
@@ -11035,17 +11208,25 @@ test("queue completion automatically launches review and reports a failed verdic
       if (["update", "sync"].includes(args[0])) return "";
     }
     if (file === "git" && args[2] === "worktree" && args[3] === "add") {
-      await mkdir(args[6], { recursive: true });
+      await mkdir(args[4] === "--detach" ? args[5] : args[6], { recursive: true });
       return "";
     }
+    if (file === "git" && args[2] === "worktree" && args[3] === "remove") return "";
     if (file === "git" && args[2] === "diff") {
       return args.at(-1) === "HEAD"
         ? ""
         : "diff --git a/server.mjs b/server.mjs\n+automatic review candidate";
     }
     if (file === "git" && args[2] === "rev-parse" && args[3] === "HEAD") {
-      return "reviewed-head\n";
+      return args[1].includes(`${join("verify-worktrees", "fixture")}`)
+        ? `${FIXTURE_BASE_COMMIT}\n`
+        : "reviewed-head\n";
     }
+    if (file === "git" && args[2] === "rev-parse" && args[3] === "HEAD^{tree}") {
+      return `${FIXTURE_RESULT_TREE}\n`;
+    }
+    if (file === "git" && args[2] === "rev-parse") return "reviewed-head\n";
+    if (file === "git" && args[2] === "rev-list") return "0\n";
     if (file === "git" && ["status", "log"].includes(args[2])) return "";
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
   });
@@ -11305,6 +11486,15 @@ test("reply-changed HEAD makes a passed review stale and boot launches a fresh g
     requireReview: true,
     verifyCommands: ["node --test"],
   });
+  let currentHead = "head-before-reply";
+  _setResultFinalizer(async ({ baseCommit }) => ({
+    resultCommit: currentHead,
+    resultTree: FIXTURE_RESULT_TREE,
+    baseCommit,
+    manifest: [],
+    workspaceClean: true,
+    commitCreated: false,
+  }));
   const target = await seedDispatch(setup, {
     ticketId: null,
     prompt: "Review every changed fix-round tree.",
@@ -11314,22 +11504,25 @@ test("reply-changed HEAD makes a passed review stale and boot launches a fresh g
   });
   await mkdir(target.worktreePath, { recursive: true });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  let currentHead = "head-before-reply";
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
     assert.equal(file, "git");
     if (args[2] === "diff") return args.at(-1) === "HEAD" ? "" : "diff --git a/a b/a\n+x";
     if (args[2] === "diff-tree") return "";
     if (args[2] === "rev-parse" && args[3] === "HEAD") return `${currentHead}\n`;
+    if (args[2] === "rev-parse" && args[3] === "HEAD^{tree}") {
+      return `${FIXTURE_RESULT_TREE}\n`;
+    }
     if (args[2] === "rev-parse" && args[3] === "--verify") return `${currentHead}\n`;
     if (args[2] === "rev-parse" && args[3] === "main") return "merged-head\n";
     if (args[2] === "worktree" && args[3] === "add") {
-      await mkdir(args[6], { recursive: true });
+      await mkdir(args[4] === "--detach" ? args[5] : args[6], { recursive: true });
       return "";
     }
     if (["status", "log"].includes(args[2])) return "";
     if (["fetch", "branch"].includes(args[2])) return "";
     if (args[2] === "worktree" && args[3] === "remove") return "";
+    if (args[2] === "rev-list") return "0\n";
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
   });
   const freshReviewChild = heldChild();
@@ -16155,10 +16348,18 @@ test("answering a needs_input dispatch clears the stale outcome and lets the res
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   _setRunFile(async (file, args) => {
     if (args[2] === "worktree" && args[3] === "add") {
-      await mkdir(args[6], { recursive: true });
+      await mkdir(args[4] === "--detach" ? args[5] : args[6], { recursive: true });
       return "";
     }
+    if (args[2] === "worktree" && args[3] === "remove") return "";
+    if (args[2] === "rev-parse" && args[3] === "HEAD^{tree}") return `${FIXTURE_RESULT_TREE}\n`;
+    if (
+      args[2] === "rev-parse" &&
+      args[3] === "HEAD" &&
+      args[1].includes(`${join("verify-worktrees", "fixture")}`)
+    ) return `${FIXTURE_BASE_COMMIT}\n`;
     if (args[2] === "rev-parse") return "5555555555555555555555555555555555555555\n";
+    if (args[2] === "rev-list") return "0\n";
     if (["status", "log"].includes(args[2])) return "";
     if (isOutcomeDiffProbe(args)) return produceChanges ? PROBE_CHANGED_FILE : "";
     throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
@@ -16546,6 +16747,7 @@ function stubVerificationRuntime({ calls = [], onRevParseHead } = {}) {
 
 test("integration: a flaky verification is recoverable - the re-run passes, both attempts survive, and merge needs no force", async (t) => {
   const setup = await fixture(t, { tracker: "none" });
+  _setResultFinalizer();
   // A REAL command whose exit code the fixture flips, not a mocked child: the
   // whole point is that the same suite fails then passes.
   const flake = join(setup.root, "flake.mjs");
@@ -19414,13 +19616,15 @@ test("stopping a verifying dispatch reaps its runner to a verdict instead of fla
     calls.push({ file, args });
     if (file === "/fixture/br") return "";
     if (args[2] === "worktree" && args[3] === "add") {
-      await mkdir(args[6], { recursive: true });
+      await mkdir(args[4] === "--detach" ? args[5] : args[6], { recursive: true });
       return "";
     }
+    if (args[2] === "worktree" && args[3] === "remove") return "";
     if (["status", "log", "add", "commit"].includes(args[2])) return "";
     if (args[2] === "rev-parse" && args[3] === "HEAD") {
       return "1111111111111111111111111111111111111111\n";
     }
+    if (args[2] === "rev-parse" && args[3] === "HEAD^{tree}") return `${FIXTURE_RESULT_TREE}\n`;
     if (args[2] === "rev-parse") return "2222222222222222222222222222222222222222\n";
     if (args[2] === "rev-list") return "0\n";
     return "";
@@ -19476,6 +19680,13 @@ test("stopping a verifying dispatch reaps its runner to a verdict instead of fla
   );
   assert.equal(persisted.verify.state, "failed");
   assert.equal(persisted.verify.detail, "stopped by user");
+  const detachedAdd = calls.find(({ args }) => args[2] === "worktree" && args[4] === "--detach");
+  const detachedRemove = calls.find(({ args }) => args[2] === "worktree" && args[3] === "remove");
+  assert.equal(
+    detachedRemove?.args[4],
+    detachedAdd?.args[5],
+    "stopped verification left its detached worktree registered",
+  );
   assert.equal(claimReleased(calls, "fixture-stop"), true, "the stop did not hand the ticket back");
 });
 
