@@ -5,10 +5,14 @@ import { EventEmitter, once } from "node:events";
 import {
   appendFileSync,
   existsSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   readlinkSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import {
@@ -84,6 +88,11 @@ const seededSyntheticBranches = new Set();
 
 function isCommand(file, name) {
   return basename(String(file)).toLowerCase().replace(/\.exe$/, "") === name;
+}
+
+function isAtomicWriteFor(path, name) {
+  const file = basename(String(path));
+  return file === name || (file.startsWith(`.${name}.`) && file.endsWith(".tmp"));
 }
 
 function executionEnvDigest(env) {
@@ -774,7 +783,36 @@ async function seedDispatch(setup, overrides = {}) {
   };
   seededSyntheticBranches.add(record.branch);
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
+  if (record.worktreePath && existsSync(record.worktreePath)) {
+    await writeWorkspaceToken(record);
+  }
   return record;
+}
+
+async function writeWorkspaceToken(record, {
+  path = record.worktreePath,
+  kind = "dispatch",
+} = {}) {
+  await writeFile(
+    join(path, ".atelier-workspace.json"),
+    `${JSON.stringify({
+      recordId: record.id,
+      project: record.project,
+      kind,
+      createdAt: record.startedAt,
+    })}\n`,
+    { mode: 0o600 },
+  );
+}
+
+function stubFastForwardMerge(setup, { branchHead = "validated-head", mainHead = "main-head" } = {}) {
+  _setRunFile(async (file, args) => {
+    assert.equal(file, "git");
+    if (args[2] === "rev-parse" && args[3] === "--verify") return `${branchHead}\n`;
+    if (args[2] === "rev-parse" && args[3] === "main") return `${mainHead}\n`;
+    if (args[2] === "merge-base") return "";
+    return "";
+  });
 }
 
 async function stubHarvestScenario(
@@ -899,6 +937,7 @@ test("observer skips a large unterminated index tail without repair or compactio
     project: "fixture",
     state: "failed",
     ticketId: null,
+    warnings: [],
   });
   const contents = `${Array.from({ length: 1_001 }, () => record).join("\n")}\n{"id":`;
   await writeFile(indexPath, contents);
@@ -920,6 +959,31 @@ test("observer skips a large unterminated index tail without repair or compactio
   assert.ok(warnings.some((message) => /skipped 1 malformed index line/.test(message)));
 });
 
+test("boot compaction counts malformed lines before dropping their evidence", async (t) => {
+  const setup = await fixture(t);
+  const dispatchDir = join(setup.state, "dispatches");
+  const indexPath = join(dispatchDir, "index.jsonl");
+  await mkdir(dispatchDir, { recursive: true });
+  const record = JSON.stringify({
+    id: "compaction-seed",
+    project: "fixture",
+    state: "failed",
+    ticketId: null,
+    warnings: [],
+  });
+  await writeFile(
+    indexPath,
+    `${Array.from({ length: 1_001 }, () => record).join("\n")}\n{"broken":\n`,
+  );
+  const warnings = [];
+  _setPersistenceLogger({ error: (message) => warnings.push(message) });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  assert.equal(dispatcher.get("compaction-seed").state, "failed");
+  assert.ok(warnings.some((message) => /skipped 1 malformed index line/.test(message)));
+  assert.equal((await readFile(indexPath, "utf8")).includes('{"broken":'), false);
+});
+
 test("dispatcher construction failure releases a lock it acquired", async (t) => {
   const setup = await fixture(t);
   await mkdir(setup.state);
@@ -935,6 +999,22 @@ test("dispatcher construction failure releases a lock it acquired", async (t) =>
   lock.release();
   assert.equal(existsSync(join(setup.state, "atelier.lock")), false);
 });
+
+for (const stateFile of ["dispatches/index.jsonl", "queue.json", "convoys.json"]) {
+  test(`dispatcher boot refuses a symlinked ${stateFile} state file`, async (t) => {
+    const setup = await fixture(t);
+    const statePath = join(setup.state, ...stateFile.split("/"));
+    const target = join(setup.root, `outside-${basename(stateFile)}`);
+    await mkdir(dirname(statePath), { recursive: true });
+    await writeFile(target, stateFile.endsWith("index.jsonl") ? "" : "{}\n");
+    await symlink(target, statePath);
+
+    assert.throws(
+      () => createDispatcher({ registry: setup.registry, stateDir: setup.state }),
+      /refuses non-regular or symlinked state file/,
+    );
+  });
+}
 
 test("execution profile resolution ignores relative and empty PATH components", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "atelier-relative-path-"));
@@ -1052,6 +1132,15 @@ test("dispatch runs queued -> preparing -> running -> completed with prompt post
     systemConfig: "trusted-local",
   });
   assert.equal(Number.isNaN(Date.parse(record.executionProfile.capturedAt)), false);
+  const workspaceIdentity = JSON.parse(await readFile(
+    join(record.worktreePath, ".atelier-workspace.json"),
+    "utf8",
+  ));
+  assert.deepEqual(
+    { recordId: workspaceIdentity.recordId, project: workspaceIdentity.project, kind: workspaceIdentity.kind },
+    { recordId: id, project: "fixture", kind: "dispatch" },
+  );
+  assert.equal((await stat(join(record.worktreePath, ".atelier-workspace.json"))).mode & 0o777, 0o600);
   assert.deepEqual(rawRecord(setup, record.id).executionProfile, record.executionProfile);
   const originalDigest = record.executionProfile.envDigest;
   record.executionProfile.envDigest = "consumer-mutation";
@@ -1061,6 +1150,41 @@ test("dispatch runs queued -> preparing -> running -> completed with prompt post
     dispatcher.getEvents(id).filter((event) => event.type === "status").map((event) => event.state),
     ["queued", "preparing", "running", "running", "completed"],
   );
+});
+
+test("workspace token naming collision hard-fails preparation and removes the new checkout", async (t) => {
+  const setup = await fixture(t);
+  _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
+  let createdPath;
+  let launches = 0;
+  _setRunFile(withDispatchChanges(async (file, args) => {
+    assert.equal(file, "git");
+    if (args[2] === "worktree" && args[3] === "add" && args[4] === "-b") {
+      createdPath = args[6];
+      await mkdir(createdPath, { recursive: true });
+      await writeFile(join(createdPath, ".atelier-workspace.json"), "tracked project bytes\n");
+      return "";
+    }
+    if (args[2] === "worktree" && args[3] === "remove") {
+      await rm(args[4], { recursive: true, force: true });
+      return "";
+    }
+    if (["status", "log"].includes(args[2])) return "";
+    if (args[2] === "rev-parse") return `${FIXTURE_BASE_COMMIT}\n`;
+    if (args[2] === "branch") return "";
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  }));
+  _setSpawner(() => {
+    launches += 1;
+    return successfulChild();
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "collision" });
+  const failed = await waitForState(dispatcher, id, ["prepare_failed"]);
+  assert.match(failed.exitSummary, /workspace identity naming collision/);
+  assert.equal(existsSync(createdPath), false);
+  assert.equal(launches, 0);
 });
 
 test("ticket redispatch brief includes bounded, redacted prior-attempt provenance", async (t) => {
@@ -1292,6 +1416,48 @@ test("plan approval exposes execution-profile acceptance before its spawn", asyn
   assert.equal(accepted.executionProfile.superseded.length, 1);
   assert.equal(launches, 2);
   await waitForState(dispatcher, id, ["completed"]);
+});
+
+test("execution-profile acceptance refuses when its re-stamp is not durable", async (t) => {
+  const setup = await fixture(t, { dispatchEnv: { PLAN_PROFILE_FLAG: "before" } });
+  stubPreparation();
+  let launches = 0;
+  _setSpawner(() => {
+    launches += 1;
+    return claudeResultChild({ summary: "1. Implement it." });
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({
+    project: "fixture",
+    prompt: "persist accepted profile",
+    planFirst: true,
+  });
+  await waitForState(dispatcher, id, ["plan_ready"]);
+  setup.project.dispatchEnv = { PLAN_PROFILE_FLAG: "after" };
+  _setPersistenceFileOps({
+    appendDescriptorSync(descriptor, contents, options, path) {
+      if (path.endsWith("index.jsonl")) {
+        const record = JSON.parse(contents.trim());
+        if (record.executionProfile?.superseded?.length > 0) {
+          throw Object.assign(new Error("fixture acceptance EIO"), { code: "EIO" });
+        }
+      }
+      appendFileSync(descriptor, contents, options);
+    },
+  });
+  _setPersistenceLogger({ error() {} });
+
+  await assert.rejects(
+    dispatcher.plan(id, {
+      action: "approve",
+      acceptExecutionProfile: true,
+      actor: "human",
+    }),
+    (error) => error.status === 409 && /acceptance refused: persistence degradation/.test(error.message),
+  );
+  assert.equal(launches, 1);
+  assert.equal(dispatcher.get(id).executionProfile.superseded, undefined);
+  assert.equal(dispatcher.get(id).state, "plan_ready");
 });
 
 test("boot preserves plan_ready and it does not hold the concurrent cap", async (t) => {
@@ -1832,11 +1998,11 @@ test("persistence write failures warn, keep transitions live, and resync on reco
   _setSpawner(() => child);
   let writesFail = true;
   _setPersistenceFileOps({
-    appendFileSync(...args) {
+    appendDescriptorSync(descriptor, contents, options) {
       if (writesFail) {
         throw Object.assign(new Error("fixture disk full"), { code: "ENOSPC" });
       }
-      appendFileSync(...args);
+      appendFileSync(descriptor, contents, options);
     },
   });
   const logLines = [];
@@ -1852,8 +2018,8 @@ test("persistence write failures warn, keep transitions live, and resync on reco
   const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "survive persistence" });
   const running = await waitForState(dispatcher, id, ["running"]);
   assert.equal(running.state, "running");
-  assert.equal(existsSync(join(setup.state, "dispatches", "index.jsonl")), false);
-  assert.equal(existsSync(join(setup.state, "dispatches", `${id}.jsonl`)), false);
+  assert.equal(await readFile(join(setup.state, "dispatches", "index.jsonl"), "utf8"), "");
+  assert.equal(await readFile(join(setup.state, "dispatches", `${id}.jsonl`), "utf8"), "");
 
   writesFail = false;
   child.complete();
@@ -1888,8 +2054,10 @@ test("persistence write failures warn, keep transitions live, and resync on reco
     .trim()
     .split("\n")
     .map(JSON.parse);
-  assert.ok(persistedEvents[0].seq > 1);
+  assert.equal(persistedEvents[0].seq, 1);
   assert.equal(persistedEvents.at(-1).state, "completed");
+  assert.equal((await stat(join(setup.state, "dispatches", "index.jsonl"))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(setup.state, "dispatches", `${id}.jsonl`))).mode & 0o777, 0o600);
 });
 
 test("terminal event-only persistence failure preserves its warning in record, live SSE, and replay", async (t) => {
@@ -1899,7 +2067,7 @@ test("terminal event-only persistence failure preserves its warning in record, l
   _setSpawner(() => child);
   let failedTerminalEvent = false;
   _setPersistenceFileOps({
-    appendFileSync(path, contents, encoding) {
+    appendDescriptorSync(descriptor, contents, encoding, path) {
       const event = path.endsWith("index.jsonl") ? null : JSON.parse(contents.trim());
       if (
         !failedTerminalEvent &&
@@ -1909,7 +2077,7 @@ test("terminal event-only persistence failure preserves its warning in record, l
         failedTerminalEvent = true;
         throw Object.assign(new Error("fixture event EIO"), { code: "EIO" });
       }
-      appendFileSync(path, contents, encoding);
+      appendFileSync(descriptor, contents, encoding);
     },
     writeFileSync,
   });
@@ -1948,19 +2116,84 @@ test("terminal event-only persistence failure preserves its warning in record, l
   assert.equal(replayedCompleted.warning, warning);
 });
 
+test("an event append whose fsync fails is not duplicated on retry", async (t) => {
+  const setup = await fixture(t);
+  stubPreparation();
+  _setSpawner(() => successfulChild());
+  let appendedPath;
+  let failedEventFsync = false;
+  _setPersistenceFileOps({
+    appendDescriptorSync(descriptor, contents, options, path) {
+      appendFileSync(descriptor, contents, options);
+      appendedPath = path;
+    },
+    fsyncSync(descriptor) {
+      if (!failedEventFsync && appendedPath?.endsWith(".jsonl") &&
+        !appendedPath.endsWith("index.jsonl")) {
+        failedEventFsync = true;
+        appendedPath = undefined;
+        throw Object.assign(new Error("fixture event fsync failure"), { code: "EIO" });
+      }
+      appendedPath = undefined;
+      fsyncSync(descriptor);
+    },
+  });
+  _setPersistenceLogger({ error() {} });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "fsync once" });
+  await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(failedEventFsync, true);
+  const events = (await readFile(join(setup.state, "dispatches", `${id}.jsonl`), "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.equal(new Set(events.map((event) => event.seq)).size, events.length);
+  assert.deepEqual(events.map((event) => event.seq),
+    Array.from({ length: events.length }, (_, index) => index + 1));
+});
+
+test("streamed output events skip fsync while lifecycle status events remain durable", async (t) => {
+  const setup = await fixture(t);
+  stubPreparation();
+  _setSpawner(() => secretOutputChild("ordinary output"));
+  let appendedEventType = null;
+  const fsyncedEventTypes = [];
+  _setPersistenceFileOps({
+    appendDescriptorSync(descriptor, contents, options, path) {
+      appendedEventType = path.endsWith("index.jsonl")
+        ? null
+        : JSON.parse(contents.trim()).type;
+      appendFileSync(descriptor, contents, options);
+    },
+    fsyncSync(descriptor) {
+      if (appendedEventType) fsyncedEventTypes.push(appendedEventType);
+      appendedEventType = null;
+      fsyncSync(descriptor);
+    },
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "fsync classes" });
+  await waitForState(dispatcher, id, ["completed"]);
+
+  assert.ok(fsyncedEventTypes.includes("status"));
+  assert.equal(fsyncedEventTypes.includes("message"), false);
+});
+
 test("partial record append is separated and malformed JSONL is skipped on recovery", async (t) => {
   const setup = await fixture(t);
   stubPreparation();
   _setSpawner(() => successfulChild());
   let wrotePartialRecord = false;
   _setPersistenceFileOps({
-    appendFileSync(path, contents, encoding) {
+    appendDescriptorSync(descriptor, contents, encoding, path) {
       if (!wrotePartialRecord && path.endsWith("index.jsonl")) {
         wrotePartialRecord = true;
-        appendFileSync(path, contents.slice(0, 12), encoding);
+        appendFileSync(descriptor, contents.slice(0, 12), encoding);
         throw Object.assign(new Error("fixture partial write"), { code: "ENOSPC" });
       }
-      appendFileSync(path, contents, encoding);
+      appendFileSync(descriptor, contents, encoding);
     },
     writeFileSync,
   });
@@ -1995,21 +2228,21 @@ test("a second dispatch repairs a malformed shared index tail left by another en
   });
   let firstId;
   _setPersistenceFileOps({
-    appendFileSync(path, contents, encoding) {
+    appendDescriptorSync(descriptor, contents, encoding, path) {
       if (!path.endsWith("index.jsonl")) {
-        appendFileSync(path, contents, encoding);
+        appendFileSync(descriptor, contents, encoding);
         return;
       }
       const record = JSON.parse(contents.trim());
       if (!firstId) {
         firstId = record.id;
-        appendFileSync(path, contents.slice(0, 12), encoding);
+        appendFileSync(descriptor, contents.slice(0, 12), encoding);
         throw Object.assign(new Error("fixture entry A partial write"), { code: "ENOSPC" });
       }
       if (record.id === firstId) {
         throw Object.assign(new Error("fixture entry A still blocked"), { code: "ENOSPC" });
       }
-      appendFileSync(path, contents, encoding);
+      appendFileSync(descriptor, contents, encoding);
     },
     writeFileSync,
   });
@@ -2051,6 +2284,7 @@ test("dispatcher boot skips and repairs a malformed index tail before the next a
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   assert.equal(dispatcher.get(seeded.id).state, "completed");
   assert.ok(logLines.some((line) => line.includes("malformed final line")));
+  assert.ok(logLines.some((line) => line.includes("skipped 1 malformed index line")));
   const next = await dispatcher.dispatch({ project: "fixture", prompt: "after restart repair" });
   await waitForState(dispatcher, next.id, ["completed"]);
 
@@ -2073,14 +2307,14 @@ test("periodic drain retries a terminal record snapshot that stayed unpersisted"
   _setSpawner(() => child);
   let failTerminalRecord = true;
   _setPersistenceFileOps({
-    appendFileSync(path, contents, encoding) {
+    appendDescriptorSync(descriptor, contents, encoding, path) {
       if (path.endsWith("index.jsonl")) {
         const record = JSON.parse(contents.trim());
         if (failTerminalRecord && record.state === "completed") {
           throw Object.assign(new Error("fixture terminal record ESTALE"), { code: "ESTALE" });
         }
       }
-      appendFileSync(path, contents, encoding);
+      appendFileSync(descriptor, contents, encoding);
     },
     writeFileSync,
   });
@@ -2115,6 +2349,401 @@ test("periodic drain retries a terminal record snapshot that stayed unpersisted"
   assert.equal(reloaded.get(id).state, "completed");
 });
 
+test("persistence degradation blocks forced merge and queue automation while manual dispatch continues", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  const seeded = await seedDispatch(setup);
+  const logged = [];
+  let queueWritesFail = true;
+  let readyCalls = 0;
+  const fakeBr = join(setup.root, "br");
+  await writeFile(fakeBr, "");
+  _setBrResolver(() => fakeBr);
+  stubPreparation({
+    onCommand(file, args) {
+      if (file === fakeBr && args[0] === "ready") readyCalls += 1;
+    },
+  });
+  _setSpawner(() => successfulChild());
+  _setPersistenceFileOps({
+    writeDescriptorSync(descriptor, contents, options, path) {
+      if (queueWritesFail && isAtomicWriteFor(path, "queue.json")) {
+        throw Object.assign(new Error("fixture queue disk outage"), { code: "EIO" });
+      }
+      writeFileSync(descriptor, contents, options);
+    },
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog: { append: (kind, payload) => logged.push({ kind, payload }) },
+  });
+
+  const queue = dispatcher.setQueue("fixture", { enabled: true });
+  assert.equal(queue.persistenceDegraded, true);
+  assert.ok(queue.persistenceFailureTargets.some((path) => path.endsWith("queue.json")));
+  await dispatcher.drainQueuesOnce();
+  assert.equal(readyCalls, 0);
+  assert.ok(logged.some(({ kind, payload }) =>
+    kind === "queue.drain" &&
+    payload.decision === "skipped" &&
+    payload.reason === "persistence-degraded"));
+
+  const manual = await dispatcher.dispatch({ project: "fixture", prompt: "manual recovery work" });
+  const completed = await waitForState(dispatcher, manual.id, ["completed"]);
+  assert.equal(completed.persistenceDegraded, true);
+  assert.ok(completed.warnings.some((warning) => warning.startsWith("PERSISTENCE DEGRADED:")));
+  await assert.rejects(
+    dispatcher.merge(seeded.id, { force: true, ...FORCE_AUDIT }),
+    (error) =>
+      error.status === 409 &&
+      /persistence degradation gate failed/.test(error.message) &&
+      /queue\.json/.test(error.message),
+  );
+  await assert.rejects(
+    dispatcher.merge(manual.id, { force: true, ...FORCE_AUDIT }),
+    (error) =>
+      error.status === 409 &&
+      /persistence degradation gate failed/.test(error.message) &&
+      /queue\.json/.test(error.message),
+  );
+
+  queueWritesFail = false;
+  assert.equal(dispatcher.setQueue("fixture", { enabled: false }).persistenceDegraded, false);
+  assert.equal((await stat(join(setup.state, "queue.json"))).mode & 0o777, 0o600);
+  stubFastForwardMerge(setup);
+  const merged = await dispatcher.merge(seeded.id);
+  assert.equal(merged.merged.strategy, "ff");
+  assert.equal(merged.persistenceDegraded, false);
+});
+
+test("an entry event failure blocks only that merge and dismissal clears its aggregate debt", async (t) => {
+  const setup = await fixture(t);
+  const unrelated = await seedDispatch(setup, {
+    id: "dispatch-unrelated",
+    ticketId: null,
+    branch: "atelier/unrelated",
+  });
+  stubPreparation();
+  _setSpawner(() => successfulChild());
+  let failedDispatchId;
+  _setPersistenceFileOps({
+    appendDescriptorSync(descriptor, contents, encoding, path) {
+      if (!path.endsWith("index.jsonl")) {
+        const event = JSON.parse(contents.trim());
+        failedDispatchId ??= event.dispatchId;
+        if (event.dispatchId === failedDispatchId) {
+          throw Object.assign(new Error("fixture entry event EIO"), { code: "EIO" });
+        }
+      }
+      appendFileSync(descriptor, contents, encoding);
+    },
+    writeFileSync,
+  });
+  _setPersistenceLogger({ error() {} });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const started = await dispatcher.dispatch({ project: "fixture", prompt: "entry-scoped failure" });
+  const failedEntry = await waitForState(dispatcher, started.id, ["completed"]);
+
+  assert.equal(failedDispatchId, started.id);
+  assert.equal(failedEntry.persistenceDegraded, true);
+  assert.equal(dispatcher.get(unrelated.id).persistenceDegraded, false);
+  assert.equal(dispatcher.persistenceStatus().degraded, true);
+  stubFastForwardMerge(setup);
+  await assert.rejects(
+    dispatcher.merge(started.id),
+    (error) => error.status === 409 &&
+      /persistence degradation gate failed/.test(error.message) &&
+      error.message.includes(`${started.id}.jsonl`),
+  );
+  const merged = await dispatcher.merge(unrelated.id);
+  assert.equal(merged.merged.strategy, "ff");
+
+  const dismissed = await dispatcher.dismiss(started.id);
+  assert.ok(dismissed.dismissed);
+  assert.equal(dispatcher.persistenceStatus().degraded, false);
+});
+
+test("merge retries and clears a transient persistence failure without restart", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  const seeded = await seedDispatch(setup);
+  let queueWritesFail = true;
+  _setPersistenceFileOps({
+    writeDescriptorSync(descriptor, contents, options, path) {
+      if (queueWritesFail && isAtomicWriteFor(path, "queue.json")) {
+        throw Object.assign(new Error("fixture transient queue failure"), { code: "EIO" });
+      }
+      writeFileSync(descriptor, contents, options);
+    },
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  assert.equal(dispatcher.setQueue("fixture", { enabled: true }).persistenceDegraded, true);
+
+  queueWritesFail = false;
+  stubFastForwardMerge(setup);
+  const merged = await dispatcher.merge(seeded.id);
+  assert.equal(merged.merged.strategy, "ff");
+  assert.equal(merged.persistenceDegraded, false);
+  assert.equal(JSON.parse(await readFile(join(setup.state, "queue.json"), "utf8")).fixture.enabled, true);
+});
+
+test("merge refuses persistence degradation that lands during late git probes", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  const seeded = await seedDispatch(setup);
+  let dispatcher;
+  let failQueueWrite = false;
+  let fetches = 0;
+  _setPersistenceFileOps({
+    writeDescriptorSync(descriptor, contents, options, path) {
+      if (failQueueWrite && isAtomicWriteFor(path, "queue.json")) {
+        throw Object.assign(new Error("fixture late merge EIO"), { code: "EIO" });
+      }
+      writeFileSync(descriptor, contents, options);
+    },
+  });
+  _setPersistenceLogger({ error() {} });
+  _setRunFile(async (file, args) => {
+    assert.equal(file, "git");
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
+    if (args[2] === "rev-parse" && args[3] === "main") {
+      failQueueWrite = true;
+      dispatcher.setQueue("fixture", { enabled: false });
+      return "main-head\n";
+    }
+    if (args[2] === "merge-base") return "";
+    if (args[2] === "fetch") fetches += 1;
+    return "";
+  });
+  dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await assert.rejects(
+    dispatcher.merge(seeded.id),
+    (error) => error.status === 409 && /persistence degradation gate failed/.test(error.message),
+  );
+  assert.equal(fetches, 0);
+  assert.equal(dispatcher.get(seeded.id).merged, null);
+});
+
+test("queue drain rechecks persistence immediately before unattended dispatch", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  await enablePersistedQueue(setup);
+  const fakeBr = join(setup.root, "br");
+  await writeFile(fakeBr, "");
+  _setBrResolver(() => fakeBr);
+  let dispatcher;
+  let failQueueWrite = false;
+  let worktreeAdds = 0;
+  const logged = [];
+  _setPersistenceFileOps({
+    writeDescriptorSync(descriptor, contents, options, path) {
+      if (failQueueWrite && isAtomicWriteFor(path, "queue.json")) {
+        throw Object.assign(new Error("fixture late drain EIO"), { code: "EIO" });
+      }
+      writeFileSync(descriptor, contents, options);
+    },
+  });
+  _setPersistenceLogger({ error() {} });
+  _setRunFile(async (file, args) => {
+    if (file === fakeBr && args[0] === "ready") {
+      failQueueWrite = true;
+      dispatcher.setQueue("fixture", { enabled: true });
+      return `${JSON.stringify([{ id: "fixture-late", priority: 1 }])}\n`;
+    }
+    if (file === "git" && args[2] === "worktree" && args[3] === "add") {
+      worktreeAdds += 1;
+    }
+    return "";
+  });
+  dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog: { append: (kind, payload) => logged.push({ kind, payload }) },
+  });
+
+  await dispatcher.drainQueuesOnce();
+  assert.equal(worktreeAdds, 0);
+  assert.ok(logged.some(({ kind, payload }) =>
+    kind === "queue.drain" &&
+    payload.decision === "skipped" &&
+    payload.reason === "persistence-degraded"));
+});
+
+test("an unpersisted verification verdict blocks merge until its record lands", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["node --test fixture.test.mjs"] });
+  stubPreparation();
+  _setSpawner(() => successfulChild());
+  let verdictWritesFail = true;
+  _setPersistenceFileOps({
+    appendDescriptorSync(descriptor, contents, options, path) {
+      if (path.endsWith("index.jsonl")) {
+        const record = JSON.parse(contents.trim());
+        if (verdictWritesFail && record.verify?.state === "passed") {
+          throw Object.assign(new Error("fixture verdict write failed"), { code: "EIO" });
+        }
+      }
+      appendFileSync(descriptor, contents, options);
+    },
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const started = await dispatcher.dispatch({ project: "fixture", prompt: "verify durably" });
+  const completed = await waitForState(dispatcher, started.id, ["completed"]);
+  assert.equal(completed.verify.state, "passed");
+  assert.equal(completed.persistenceDegraded, true);
+  assert.ok(completed.warnings.includes(
+    "VERIFICATION PERSISTENCE DEGRADED: the verification attempt or verdict was not made durable",
+  ));
+  await assert.rejects(
+    dispatcher.merge(started.id),
+    (error) => error.status === 409 && /persistence degradation gate failed/.test(error.message),
+  );
+
+  verdictWritesFail = false;
+  setup.project.verifyCommands = [];
+  stubFastForwardMerge(setup, { branchHead: FIXTURE_BASE_COMMIT });
+  const merged = await dispatcher.merge(started.id);
+  assert.equal(merged.merged.strategy, "ff");
+  assert.equal(merged.persistenceDegraded, false);
+  assert.equal(rawRecord(setup, started.id).verify.state, "passed");
+});
+
+test("corrupt queue state is preserved and merge retry durably acknowledges it", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  const seeded = await seedDispatch(setup);
+  const corrupt = Buffer.from("{ definitely not queue json\n", "utf8");
+  await writeFile(join(setup.state, "queue.json"), corrupt);
+  const logLines = [];
+  _setPersistenceLogger({ error: (line) => logLines.push(line) });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  const evidenceName = (await readdir(setup.state)).find((name) =>
+    name.startsWith("queue.json.corrupt-"));
+  assert.ok(evidenceName);
+  assert.deepEqual(await readFile(join(setup.state, evidenceName)), corrupt);
+  assert.equal((await stat(join(setup.state, evidenceName))).mode & 0o777, 0o600);
+  assert.ok(logLines.some((line) => /corrupt state.*queue\.json/.test(line)));
+  assert.equal(dispatcher.getQueue("fixture").persistenceDegraded, true);
+  stubFastForwardMerge(setup);
+  const merged = await dispatcher.merge(seeded.id);
+  assert.equal(merged.merged.strategy, "ff");
+  assert.equal(merged.persistenceDegraded, false);
+  assert.deepEqual(JSON.parse(await readFile(join(setup.state, "queue.json"), "utf8")), {
+    fixture: { enabled: false },
+  });
+  assert.ok(existsSync(join(setup.state, evidenceName)));
+});
+
+test("trackerless registry retries corrupt queue state to a durable empty snapshot", async (t) => {
+  const setup = await fixture(t);
+  await mkdir(setup.state, { recursive: true });
+  await writeFile(join(setup.state, "queue.json"), "{ broken queue\n");
+  _setPersistenceLogger({ error() {} });
+  const dispatcher = createDispatcher({
+    registry: { defaults: {}, projects: [] },
+    stateDir: setup.state,
+  });
+
+  await dispatcher.drainQueuesOnce();
+  assert.deepEqual(JSON.parse(await readFile(join(setup.state, "queue.json"), "utf8")), {});
+  assert.ok((await readdir(setup.state)).some((name) => name.startsWith("queue.json.corrupt-")));
+});
+
+test("schema-invalid queue entries are preserved and degrade instead of filtering silently", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  await mkdir(setup.state, { recursive: true });
+  const raw = `${JSON.stringify({
+    fixture: {
+      enabled: true,
+      ticketAttempts: { broken: { attempts: 0 } },
+    },
+  })}\n`;
+  await writeFile(join(setup.state, "queue.json"), raw);
+  _setPersistenceLogger({ error() {} });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  assert.equal(dispatcher.getQueue("fixture").persistenceDegraded, true);
+  const evidence = (await readdir(setup.state)).find((name) =>
+    name.startsWith("queue.json.corrupt-"));
+  assert.ok(evidence);
+  assert.equal(await readFile(join(setup.state, evidence), "utf8"), raw);
+});
+
+test("schema-invalid convoy entries are preserved and degrade instead of filtering silently", async (t) => {
+  const setup = await fixture(t);
+  await mkdir(setup.state, { recursive: true });
+  const raw = `${JSON.stringify([{ id: "broken", project: "fixture" }])}\n`;
+  await writeFile(join(setup.state, "convoys.json"), raw);
+  _setPersistenceLogger({ error() {} });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const queue = dispatcher.getQueue("fixture");
+  assert.equal(queue.persistenceDegraded, true);
+  assert.ok(queue.persistenceFailureTargets.some((path) => path.endsWith("convoys.json")));
+  const evidence = (await readdir(setup.state)).find((name) =>
+    name.startsWith("convoys.json.corrupt-"));
+  assert.ok(evidence);
+  assert.equal(await readFile(join(setup.state, evidence), "utf8"), raw);
+});
+
+test("deregistered project queue and convoy state survives restart and unrelated rewrites", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  await mkdir(setup.state, { recursive: true });
+  const removedQueue = {
+    enabled: true,
+    ticketAttempts: {
+      "removed-1": {
+        attempts: 2,
+        lastFailureAt: "2026-08-16T08:00:00.000Z",
+        lastFailureKind: "agent_error",
+        lastDispatchId: "removed-dispatch",
+        parked: true,
+      },
+    },
+    ticketResumes: { "removed-2": "2026-08-16T09:00:00.000Z" },
+    preservedExtension: { owner: "removed" },
+  };
+  const removedConvoy = {
+    id: "convoy-removed",
+    project: "removed",
+    ticketIds: ["removed-1", "removed-2"],
+    cursor: 1,
+    preservedExtension: { owner: "removed" },
+  };
+  const currentConvoy = {
+    id: "convoy-current",
+    project: "fixture",
+    ticketIds: ["fixture-1", "fixture-2"],
+    cursor: 0,
+    state: "paused",
+    currentDispatchId: null,
+    reason: "operator pause",
+    createdAt: "2026-08-16T08:00:00.000Z",
+    updatedAt: "2026-08-16T09:00:00.000Z",
+    warnings: [],
+  };
+  await writeFile(join(setup.state, "queue.json"), `${JSON.stringify({
+    fixture: { enabled: false },
+    removed: removedQueue,
+  })}\n`);
+  await writeFile(
+    join(setup.state, "convoys.json"),
+    `${JSON.stringify([currentConvoy, removedConvoy])}\n`,
+  );
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  assert.equal(dispatcher.getQueue("fixture").persistenceDegraded, false);
+  assert.equal((await readdir(setup.state)).some((name) => name.includes(".corrupt-")), false);
+
+  dispatcher.setQueue("fixture", { enabled: true });
+  dispatcher.cancelConvoy(currentConvoy.id);
+  const persistedQueue = JSON.parse(await readFile(join(setup.state, "queue.json"), "utf8"));
+  const persistedConvoys = JSON.parse(await readFile(join(setup.state, "convoys.json"), "utf8"));
+  assert.deepEqual(persistedQueue.removed, removedQueue);
+  assert.deepEqual(
+    persistedConvoys.find((convoy) => convoy.id === removedConvoy.id),
+    removedConvoy,
+  );
+  assert.equal(dispatcher.getQueue("fixture").persistenceDegraded, false);
+});
+
 test("non-filesystem programming errors inside transitions still propagate", async (t) => {
   const setup = await fixture(t);
   stubPreparation();
@@ -2125,7 +2754,7 @@ test("non-filesystem programming errors inside transitions still propagate", asy
   await waitForState(dispatcher, id, ["running"]);
 
   _setPersistenceFileOps({
-    appendFileSync() {
+    appendDescriptorSync() {
       throw new TypeError("fixture programming defect");
     },
     writeFileSync,
@@ -2246,7 +2875,18 @@ test("clean detached verification persists an immutable attestation and removes 
   const commands = ["node --test one", "printf verified"];
   const setup = await fixture(t, { verifyCommands: commands });
   const gitCalls = [];
-  stubPreparation({ onCommand: (_file, args) => gitCalls.push([...args]) });
+  let verifyIdentity;
+  stubPreparation({
+    onCommand: (_file, args) => {
+      gitCalls.push([...args]);
+      if (args[2] === "worktree" && args[3] === "remove" && args[4].includes("verify-worktrees")) {
+        verifyIdentity = JSON.parse(readFileSync(
+          join(args[4], ".atelier-workspace.json"),
+          "utf8",
+        ));
+      }
+    },
+  });
   const verifyCwds = [];
   _setSpawner((command, _args, options) => {
     if (isCommand(command, "claude")) return successfulChild();
@@ -2265,6 +2905,10 @@ test("clean detached verification persists an immutable attestation and removes 
   assert.equal(added[5].includes(`${join("verify-worktrees", "fixture")}`), true);
   assert.deepEqual(verifyCwds, [added[5], added[5]]);
   assert.equal(removed?.[4], added[5], "passing verification left its worktree registered");
+  assert.deepEqual(
+    { recordId: verifyIdentity.recordId, project: verifyIdentity.project, kind: verifyIdentity.kind },
+    { recordId: id, project: "fixture", kind: "verify" },
+  );
   assert.equal(existsSync(added[5]), false, "passing verification left its worktree directory");
   assert.deepEqual(record.attestation, {
     resultCommit: FIXTURE_BASE_COMMIT,
@@ -2360,7 +3004,7 @@ test("a failed post-command snapshot is classified as verifier mutation", async 
   assert.equal(record.attestation, null);
 });
 
-test("verification removes a checkout left behind by a timed-out worktree add", async (t) => {
+test("verification removes a tokenless partial checkout left by a timed-out worktree add", async (t) => {
   const setup = await fixture(t, { verifyCommands: ["node never"] });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   let verificationWorktree;
@@ -2395,9 +3039,40 @@ test("verification removes a checkout left behind by a timed-out worktree add", 
   const record = await waitForState(dispatcher, id, ["completed"]);
 
   assert.match(record.verify.detail, /^verification checkout failed: git worktree add timed out/);
-  assert.ok(calls.some(({ args }) =>
-    args[2] === "worktree" && args[3] === "remove" && args[4] === verificationWorktree));
+  assert.equal(calls.some(({ args }) =>
+    args[2] === "worktree" && args[3] === "remove" && args[4] === verificationWorktree), true);
   assert.equal(existsSync(verificationWorktree), false);
+  assert.equal(record.verify.worktreePath, undefined);
+  assert.equal(record.warnings.some((warning) =>
+    warning.includes("workspace cleanup skipped: identity token unavailable")), false);
+});
+
+test("verification cleans its in-process checkout after a verifier wipes the token", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["node clean-build"] });
+  const calls = [];
+  stubPreparation({
+    onCommand(_file, args) {
+      calls.push([...args]);
+    },
+  });
+  let verifyWorktree;
+  _setSpawner((command, _args, options) => {
+    if (isCommand(command, "claude")) return successfulChild();
+    verifyWorktree = options.cwd;
+    rmSync(join(verifyWorktree, ".atelier-workspace.json"));
+    return verifyChild();
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "clean build" });
+  const record = await waitForState(dispatcher, id, ["completed"]);
+
+  assert.equal(record.verify.state, "passed");
+  assert.equal(existsSync(verifyWorktree), false);
+  assert.ok(calls.some((args) =>
+    args[2] === "worktree" && args[3] === "remove" && args[4] === verifyWorktree));
+  assert.equal(record.warnings.some((warning) =>
+    warning.includes("workspace cleanup skipped: identity token unavailable")), false);
 });
 
 test("verification reports only the checkout failure when worktree add never registered a path", async (t) => {
@@ -2445,6 +3120,45 @@ test("verification reports only the checkout failure when worktree add never reg
       args[2] === "worktree" && args[3] === "remove" && args[4] === verificationWorktree),
     false,
   );
+});
+
+test("failed verification add never recursively removes a path that pre-existed the attempt", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["node never"] });
+  let preexistingPath;
+  stubPreparation({
+    onCommand(_file, args) {
+      if (args[2] === "worktree" && args[3] === "add" && args[4] === "--detach") {
+        throw new Error("git refused the pre-existing checkout path");
+      }
+      if (args[2] === "worktree" && args[3] === "remove" && args[4] === preexistingPath) {
+        throw new Error("not a registered worktree");
+      }
+    },
+  });
+  _setPersistenceFileOps({
+    appendDescriptorSync(descriptor, contents, encoding, path) {
+      if (path.endsWith("index.jsonl")) {
+        const record = JSON.parse(contents.trim());
+        if (record.verify?.worktreePath && !preexistingPath) {
+          preexistingPath = record.verify.worktreePath;
+          mkdirSync(preexistingPath, { recursive: true });
+          writeFileSync(join(preexistingPath, "owner-marker"), "foreign\n");
+        }
+      }
+      appendFileSync(descriptor, contents, encoding);
+    },
+    writeFileSync,
+  });
+  _setSpawner(() => successfulChild());
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "pre-existing verify path" });
+  const record = await waitForState(dispatcher, id, ["completed"]);
+
+  assert.match(record.verify.detail, /git refused the pre-existing checkout path/);
+  assert.equal(await readFile(join(preexistingPath, "owner-marker"), "utf8"), "foreign\n");
+  assert.ok(record.warnings.some((warning) =>
+    warning.includes("retained pre-existing path after failed worktree add")));
 });
 
 test("result invalidation clears an existing attestation", () => {
@@ -3501,6 +4215,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     "--",
     ".",
     ":(exclude).beads",
+    ":(exclude).atelier-workspace.json",
   ]);
   assert.deepEqual(gitCalls.find((args) => args[2] === "add"), [
     "-C",
@@ -3510,6 +4225,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     "--",
     ".",
     ":(exclude).beads",
+    ":(exclude).atelier-workspace.json",
   ]);
   assert.deepEqual(gitCalls.find((args) => args[2] === "commit"), [
     "-C",
@@ -3520,6 +4236,7 @@ test("Atelier commits completed Codex changes before worktree verification", asy
     "--",
     ".",
     ":(exclude).beads",
+    ":(exclude).atelier-workspace.json",
   ]);
 });
 
@@ -3582,7 +4299,7 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
   assert.equal(
     record.exitSummary,
     "Atelier could not finalize completed Codex result [ERESULT_GIT]: Result finalization git command failed: git " +
-      `-C ${record.worktreePath} commit -m chore(dispatch): finalize result [atelier-finalized] -- . :(exclude).beads: identity unavailable`,
+      `-C ${record.worktreePath} commit -m chore(dispatch): finalize result [atelier-finalized] -- . :(exclude).beads :(exclude).atelier-workspace.json: identity unavailable`,
   );
 });
 
@@ -3746,6 +4463,56 @@ test("merge fast-forwards the captured validated SHA with the exact argv cleanup
   );
 });
 
+test("legacy tokenless dispatch worktrees remain removable by merge and dismissal", async (t) => {
+  const mergeSetup = await fixture(t);
+  const mergeRecord = await seedDispatch(mergeSetup, { id: "legacy-merge" });
+  await mkdir(mergeRecord.worktreePath, { recursive: true });
+  _setRunFile(async (file, args) => {
+    assert.equal(file, "git");
+    if (args[2] === "worktree" && args[3] === "list") {
+      return `worktree ${mergeSetup.primary}\n\nworktree ${mergeRecord.worktreePath}\n`;
+    }
+    if (args[2] === "worktree" && args[3] === "remove") {
+      await rm(args[4], { recursive: true, force: true });
+      return "";
+    }
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
+    if (args[2] === "rev-parse" && args[3] === "main") return "main-head\n";
+    if (args[2] === "merge-base") return "";
+    return "";
+  });
+  const mergeDispatcher = createDispatcher({
+    registry: mergeSetup.registry,
+    stateDir: mergeSetup.state,
+  });
+  const merged = await mergeDispatcher.merge(mergeRecord.id);
+  assert.equal(merged.merged.strategy, "ff");
+  assert.equal(existsSync(mergeRecord.worktreePath), false);
+
+  const dismissSetup = await fixture(t);
+  const dismissRecord = await seedDispatch(dismissSetup, { id: "legacy-dismiss" });
+  await mkdir(dismissRecord.worktreePath, { recursive: true });
+  _setRunFile(async (file, args) => {
+    assert.equal(file, "git");
+    if (args[2] === "worktree" && args[3] === "list") {
+      return `worktree ${dismissSetup.primary}\n\nworktree ${dismissRecord.worktreePath}\n`;
+    }
+    if (args[2] === "worktree" && args[3] === "remove") {
+      await rm(args[4], { recursive: true, force: true });
+      return "";
+    }
+    if (args[2] === "branch") return "";
+    return "";
+  });
+  const dismissDispatcher = createDispatcher({
+    registry: dismissSetup.registry,
+    stateDir: dismissSetup.state,
+  });
+  const dismissed = await dismissDispatcher.dismiss(dismissRecord.id);
+  assert.ok(dismissed.dismissed);
+  assert.equal(existsSync(dismissRecord.worktreePath), false);
+});
+
 test("legacy post-merge verification stamps legacy evidence without a fabricated mismatch", async (t) => {
   const setup = await fixture(t, { verifyCommands: ["verify-tool"] });
   const seeded = await seedDispatch(setup, { executionProfile: null });
@@ -3833,6 +4600,16 @@ test("merge discards divergent dispatch .beads and preserves the committed main 
     "git",
     ["worktree", "add", "-b", seeded.branch, seeded.worktreePath, "main"],
     { cwd: setup.primary, stdio: "ignore" },
+  );
+  await writeFile(
+    join(seeded.worktreePath, ".atelier-workspace.json"),
+    `${JSON.stringify({
+      recordId: seeded.id,
+      project: seeded.project,
+      kind: "dispatch",
+      createdAt: seeded.startedAt,
+    })}\n`,
+    { mode: 0o600 },
   );
   await writeFile(
     join(seeded.worktreePath, ".beads", "issues.jsonl"),
@@ -4419,6 +5196,7 @@ test("post-merge crash after worktree creation still cleans the detached worktre
   const commit = "4444444444444444444444444444444444444444";
   let addedPath;
   let removedPath;
+  let postMergeIdentity;
   _setRunFile(async (_file, args) => {
     if (args[2] === "rev-parse" && args[3] === "main") return `${commit}\n`;
     if (args[2] === "worktree" && args[3] === "add" && args[4] === "--detach") {
@@ -4427,6 +5205,10 @@ test("post-merge crash after worktree creation still cleans the detached worktre
     }
     if (args[2] === "worktree" && args[3] === "remove") {
       removedPath = args[4];
+      postMergeIdentity = JSON.parse(readFileSync(
+        join(args[4], ".atelier-workspace.json"),
+        "utf8",
+      ));
       return "";
     }
     return "";
@@ -4445,6 +5227,14 @@ test("post-merge crash after worktree creation still cleans the detached worktre
   );
   assert.ok(addedPath);
   assert.equal(removedPath, addedPath);
+  assert.deepEqual(
+    {
+      recordId: postMergeIdentity.recordId,
+      project: postMergeIdentity.project,
+      kind: postMergeIdentity.kind,
+    },
+    { recordId: seeded.id, project: "fixture", kind: "post-merge" },
+  );
   assert.equal(dispatcher.get(seeded.id).postMerge.worktreePath, undefined);
 });
 
@@ -4982,8 +5772,15 @@ test("merge falls back to a detached worktree when primary is not on main", asyn
   const setup = await fixture(t);
   const seeded = await seedDispatch(setup);
   const calls = [];
+  let mergeIdentity;
   _setRunFile(async (file, args) => {
     calls.push([file, args]);
+    if (args[2] === "worktree" && args[3] === "remove" && args[4].includes("merge-worktrees")) {
+      mergeIdentity = JSON.parse(readFileSync(
+        join(args[4], ".atelier-workspace.json"),
+        "utf8",
+      ));
+    }
     if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
     if (args[2] === "fetch") throw new Error("non-fast-forward");
     if (args[2] === "rev-parse" && args[3] === "--abbrev-ref") return "feature\n";
@@ -4998,6 +5795,10 @@ test("merge falls back to a detached worktree when primary is not on main", asyn
   const mergeWorktree = calls.find(([, args]) => args[2] === "worktree" && args[3] === "add")[1][5];
 
   assert.ok(mergeWorktree.startsWith(join(setup.state, "merge-worktrees")));
+  assert.deepEqual(
+    { recordId: mergeIdentity.recordId, project: mergeIdentity.project, kind: mergeIdentity.kind },
+    { recordId: seeded.id, project: "fixture", kind: "merge" },
+  );
   assert.deepEqual(calls, [
     ["git", ["-C", setup.primary, "rev-parse", "--verify", seeded.branch]],
     ["git", ["-C", setup.primary, "rev-parse", "main"]],
@@ -5392,6 +6193,56 @@ test("manifest deletion checks refuse a resurrected file or directory before fas
     assert.equal(calls.some(({ args }) => args[2] === "fetch"), false);
     assert.equal(rawRecord(setup, seeded.id).mergeIntent, null);
   }
+});
+
+test("a result manifest containing the workspace token refuses even forced merge until cleaned", async (t) => {
+  const setup = await fixture(t);
+  const polluted = await seedDispatch(setup, {
+    branchHead: "polluted-head",
+    result: {
+      commit: "polluted-head",
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      manifest: [{ path: ".atelier-workspace.json", blobHash: "polluted-token-blob" }],
+      version: 1,
+    },
+    attestation: { resultCommit: "polluted-head", resultVersion: 1 },
+  });
+  const cleaned = {
+    ...rawRecord(setup, polluted.id),
+    id: "dispatch-cleaned-token",
+    ticketId: null,
+    branch: "atelier/cleaned-token",
+    branchHead: "clean-head",
+    result: {
+      commit: "clean-head",
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      manifest: [],
+      version: 2,
+    },
+    attestation: { resultCommit: "clean-head", resultVersion: 2 },
+  };
+  appendFileSync(
+    join(setup.state, "dispatches", "index.jsonl"),
+    `${JSON.stringify(cleaned)}\n`,
+  );
+  _setRunFile(async () => {
+    throw new Error("manifest containment must refuse before invoking git");
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  for (const options of [{}, { force: true, ...FORCE_AUDIT }]) {
+    await assert.rejects(dispatcher.merge(polluted.id, options), (error) =>
+      error.status === 409 &&
+      /^EATELIER_RESULT_VERIFICATION_MISMATCH: /.test(error.message) &&
+      error.message.includes(".atelier-workspace.json"));
+  }
+
+  stubFastForwardMerge(setup, { branchHead: "clean-head" });
+  const merged = await dispatcher.merge(cleaned.id);
+  assert.equal(merged.merged.strategy, "ff");
+  assert.equal(merged.merged.resultCommit, "clean-head");
 });
 
 test("merge-commit strategy validates the staged merged tree before committing", async (t) => {
@@ -5937,12 +6788,13 @@ test("a cleanup failure during recovery becomes a warning, not a poisoned boot p
     mainTipBefore: "main-before",
     startedAt: "2026-08-17T08:00:00.000Z",
   };
-  await seedDispatch(setup, {
+  const seeded = await seedDispatch(setup, {
     branchHead: "result-head",
     mergeIntent: intent,
     worktreePath: join(setup.state, "worktrees", "dispatch-merge"),
   });
   await mkdir(join(setup.state, "worktrees", "dispatch-merge"), { recursive: true });
+  await writeWorkspaceToken(seeded);
   _setRunFile(async (_file, args) => {
     if (args[2] === "rev-parse" && args[3] === "main") return "result-head\n";
     if (args[2] === "rev-parse" && args.includes("MERGE_HEAD")) throw new Error("no merge in progress");
@@ -6003,6 +6855,49 @@ test("audited force abandons an unresolved intent and records exactly what it cl
   assert.match(forced.merged.abandonedMergeIntentAt, /^2026-/);
   assert.ok(forced.warnings.some((warning) => /abandoned by audited force merge/.test(warning)));
   assert.equal(rawRecord(setup, "dispatch-merge").mergeIntent, null);
+});
+
+test("audited force restores an unresolved merge intent when abandonment is not durable", async (t) => {
+  const setup = await fixture(t);
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: false,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
+  let commands = 0;
+  _setRunFile(async () => {
+    commands += 1;
+    throw new Error("recovery unavailable");
+  });
+  _setPersistenceFileOps({
+    appendDescriptorSync(descriptor, contents, encoding, path) {
+      if (path.endsWith("index.jsonl")) {
+        const record = JSON.parse(contents.trim());
+        if (!record.mergeIntent && record.warnings.some((warning) =>
+          warning.includes("abandoned by audited force merge"))) {
+          throw Object.assign(new Error("fixture abandonment EIO"), { code: "EIO" });
+        }
+      }
+      appendFileSync(descriptor, contents, encoding);
+    },
+    writeFileSync,
+  });
+  _setPersistenceLogger({ error() {} });
+
+  await assert.rejects(
+    dispatcher.merge("dispatch-merge", { force: true, ...FORCE_AUDIT }),
+    (error) => error.status === 409 &&
+      /persistence degradation gate failed/.test(error.message) &&
+      /index\.jsonl/.test(error.message),
+  );
+  assert.equal(commands, 1);
+  assert.equal(dispatcher.get("dispatch-merge").mergeRecoveryPending, true);
+  assert.deepEqual(rawRecord(setup, "dispatch-merge").mergeIntent, intent);
 });
 
 test("dismiss abandons a still-unresolved intent before removing the record artifacts", async (t) => {
@@ -7098,6 +7993,7 @@ test("concurrent merge and reply reserve exactly one lifecycle winner", async (t
     branchHead: "merge-race-head",
   });
   await mkdir(mergeTarget.worktreePath, { recursive: true });
+  await writeWorkspaceToken(mergeTarget);
   const mergeCalls = [];
   let resumeLaunches = 0;
   _setSpawner(() => {
@@ -7132,6 +8028,7 @@ test("concurrent merge and reply reserve exactly one lifecycle winner", async (t
   const replySetup = await fixture(t);
   const replyTarget = await seedDispatch(replySetup, { sessionId: "reply-race-session" });
   await mkdir(replyTarget.worktreePath, { recursive: true });
+  await writeWorkspaceToken(replyTarget);
   const replyCalls = [];
   const replyChild = heldChild();
   _setSpawner(() => replyChild);
@@ -7237,6 +8134,7 @@ test("concurrent merge and dismiss reserve exactly one lifecycle winner", async 
   const mergeSetup = await fixture(t);
   const mergeTarget = await seedDispatch(mergeSetup, { branchHead: "merge-dismiss-head" });
   await mkdir(mergeTarget.worktreePath, { recursive: true });
+  await writeWorkspaceToken(mergeTarget);
   const mergeCalls = [];
   let markMergeStarted;
   const mergeStarted = new Promise((resolvePromise) => {
@@ -7284,6 +8182,7 @@ test("concurrent merge and dismiss reserve exactly one lifecycle winner", async 
   const dismissSetup = await fixture(t);
   const dismissTarget = await seedDispatch(dismissSetup);
   await mkdir(dismissTarget.worktreePath, { recursive: true });
+  await writeWorkspaceToken(dismissTarget);
   const dismissCalls = [];
   let markDismissStarted;
   const dismissStarted = new Promise((resolvePromise) => {
@@ -7493,6 +8392,21 @@ test("gc sweeps registered and stale orphan worktrees through stubbed fs and git
     "crash-orphaned-verify",
   );
   await seedDispatch(setup, { worktreePath: known, dismissed: { at: "2026-07-02T00:00:00.000Z" } });
+  for (const [path, kind] of [
+    [registered, "dispatch"],
+    [stale, "dispatch"],
+    [stalePostMerge, "post-merge"],
+    [staleVerify, "verify"],
+  ]) {
+    await mkdir(path, { recursive: true });
+    if (path !== registered) {
+      await writeWorkspaceToken({
+        id: `orphan-${kind}`,
+        project: "fixture",
+        startedAt: "2026-07-01T00:00:00.000Z",
+      }, { path, kind });
+    }
+  }
   const removedDirectories = [];
   const dirent = (name) => ({ name, isDirectory: () => true });
   _setGcFileOps({
@@ -7546,6 +8460,135 @@ test("gc sweeps registered and stale orphan worktrees through stubbed fs and git
     [staleVerify, { recursive: true, force: true }],
     [stalePostMerge, { recursive: true, force: true }],
   ]);
+});
+
+test("gc reclaims a tokened verify worktree for a deregistered project", async (t) => {
+  const setup = await fixture(t);
+  const orphan = join(
+    setup.state,
+    "verify-worktrees",
+    "removed-project",
+    "orphaned-verify",
+  );
+  await mkdir(orphan, { recursive: true });
+  await writeWorkspaceToken({
+    id: "removed-dispatch",
+    project: "removed-project",
+    startedAt: "2026-08-01T00:00:00.000Z",
+  }, { path: orphan, kind: "verify" });
+  _setRunFile(async () => {
+    throw new Error("deregistered orphan cleanup must not need git");
+  });
+  const dispatcher = createDispatcher({
+    registry: { defaults: {}, projects: [] },
+    stateDir: setup.state,
+  });
+
+  const result = await dispatcher.gc({
+    olderThanDays: 1,
+    now: new Date("2030-01-01T00:00:00.000Z"),
+  });
+  assert.deepEqual(result.orphans, [orphan]);
+  assert.equal(existsSync(orphan), false);
+  assert.ok(result.warnings.some((warning) =>
+    warning.includes("deregistered project removed-project")));
+  assert.deepEqual(result.errors, []);
+});
+
+test("dismissal refuses a workspace whose identity token mismatches the record", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  await mkdir(seeded.worktreePath, { recursive: true });
+  await writeWorkspaceToken({ ...seeded, id: "different-dispatch" });
+  const calls = [];
+  _setRunFile(async (file, args) => {
+    calls.push([file, args]);
+    return "";
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await assert.rejects(
+    dispatcher.dismiss(seeded.id),
+    (error) => error.status === 409 && /identity token mismatch/.test(error.message),
+  );
+  assert.equal(existsSync(seeded.worktreePath), true);
+  assert.equal(calls.some(([, args]) =>
+    args[2] === "worktree" && args[3] === "remove" && args[4] === seeded.worktreePath), false);
+  assert.ok(dispatcher.get(seeded.id).warnings.some((warning) =>
+    /identity token mismatch/.test(warning)));
+});
+
+test("gc refuses a symlinked orphan candidate that escapes its owning root", async (t) => {
+  const setup = await fixture(t);
+  const projectRoot = join(setup.state, "worktrees", "fixture");
+  const outside = join(setup.root, "outside-worktree");
+  const candidate = join(projectRoot, "symlink-orphan");
+  await mkdir(projectRoot, { recursive: true });
+  await mkdir(outside);
+  await writeFile(join(outside, "marker"), "keep\n");
+  await symlink(outside, candidate, "dir");
+  const calls = [];
+  _setRunFile(async (file, args) => {
+    calls.push([file, args]);
+    if (args[2] === "worktree" && args[3] === "list") {
+      return `worktree ${setup.primary}\n`;
+    }
+    return "";
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  const result = await dispatcher.gc({ olderThanDays: 0 });
+  assert.deepEqual(result.orphans, []);
+  assert.ok(result.warnings.some((warning) =>
+    warning.includes(candidate) && /not a real directory|escapes/.test(warning)));
+  assert.equal(await readFile(join(outside, "marker"), "utf8"), "keep\n");
+  assert.equal(calls.some(([, args]) => args.includes(candidate) && args.includes("remove")), false);
+});
+
+test("gc aborts when an authorized orphan directory is replaced before removal", async (t) => {
+  const setup = await fixture(t);
+  const projectRoot = join(setup.state, "worktrees", "fixture");
+  const candidate = join(projectRoot, "replace-before-remove");
+  const displaced = `${candidate}-original`;
+  await mkdir(candidate, { recursive: true });
+  await writeWorkspaceToken({
+    id: "replace-before-remove",
+    project: "fixture",
+    startedAt: "2026-07-01T00:00:00.000Z",
+  }, { path: candidate, kind: "dispatch" });
+  const dirent = (name) => ({ name, isDirectory: () => true, isSymbolicLink: () => false });
+  let candidateLstats = 0;
+  let removals = 0;
+  _setGcFileOps({
+    readdirSync(path) {
+      if (path === join(setup.state, "worktrees")) return [dirent("fixture")];
+      if (path === projectRoot) return [dirent("replace-before-remove")];
+      return [];
+    },
+    lstatSync(path) {
+      if (path === candidate) {
+        candidateLstats += 1;
+        if (candidateLstats === 2) {
+          renameSync(candidate, displaced);
+          mkdirSync(candidate);
+        }
+      }
+      return lstatSync(path);
+    },
+    rmSync() {
+      removals += 1;
+    },
+  });
+  _setRunFile(async (_file, args) =>
+    args[2] === "worktree" && args[3] === "list" ? `worktree ${setup.primary}\n` : "");
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  const result = await dispatcher.gc({ olderThanDays: 0 });
+  assert.equal(removals, 0);
+  assert.equal(existsSync(candidate), true);
+  assert.equal(existsSync(displaced), true);
+  assert.ok(result.warnings.some((warning) =>
+    warning.includes(candidate) && /changed before removal/.test(warning)));
 });
 
 for (const readyMetadata of [
@@ -7951,16 +8994,16 @@ test("convoy pause persistence failure keeps the failed transition and surfaces 
   let failedPauseWrite = false;
   _setPersistenceFileOps({
     appendFileSync,
-    writeFileSync(path, contents, encoding) {
+    writeDescriptorSync(descriptor, contents, encoding, path) {
       if (
         !failedPauseWrite &&
-        path.endsWith("convoys.json") &&
+        isAtomicWriteFor(path, "convoys.json") &&
         contents.includes('"state": "paused"')
       ) {
         failedPauseWrite = true;
         throw Object.assign(new Error("fixture convoy ENOSPC"), { code: "ENOSPC" });
       }
-      writeFileSync(path, contents, encoding);
+      writeFileSync(descriptor, contents, encoding);
     },
   });
   const logLines = [];
@@ -8606,6 +9649,7 @@ test("ready queue claims the oldest highest-priority ticket before dispatching",
     enabled: true,
     consecutiveFailures: 0,
     lastError: null,
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
   });
@@ -8842,11 +9886,11 @@ test("ready queue resume rolls back when queue persistence fails", async (t) => 
   _setPersistenceLogger({ error() {} });
   _setPersistenceFileOps({
     appendFileSync,
-    writeFileSync(path, contents, encoding) {
-      if (path.endsWith("queue.json")) {
+    writeDescriptorSync(descriptor, contents, encoding, path) {
+      if (isAtomicWriteFor(path, "queue.json")) {
         throw Object.assign(new Error("fixture queue EIO"), { code: "EIO" });
       }
-      writeFileSync(path, contents, encoding);
+      writeFileSync(descriptor, contents, encoding);
     },
   });
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
@@ -9197,7 +10241,7 @@ test("success append failure cannot replay an older queue failure after restart"
   let failSuccessAppend = true;
   _setPersistenceLogger({ error() {} });
   _setPersistenceFileOps({
-    appendFileSync(path, contents, encoding) {
+    appendDescriptorSync(descriptor, contents, encoding, path) {
       if (
         failSuccessAppend &&
         path.endsWith("index.jsonl") &&
@@ -9205,7 +10249,7 @@ test("success append failure cannot replay an older queue failure after restart"
       ) {
         throw Object.assign(new Error("fixture success append EIO"), { code: "EIO" });
       }
-      appendFileSync(path, contents, encoding);
+      appendFileSync(descriptor, contents, encoding);
     },
     writeFileSync,
   });
@@ -9474,11 +10518,11 @@ test("boot reconciles a parked outcome while queue writes remain unavailable", a
   let failQueueWrite = true;
   _setPersistenceFileOps({
     appendFileSync,
-    writeFileSync(path, contents, encoding) {
-      if (failQueueWrite && path.endsWith("queue.json")) {
+    writeDescriptorSync(descriptor, contents, encoding, path) {
+      if (failQueueWrite && isAtomicWriteFor(path, "queue.json")) {
         throw Object.assign(new Error("fixture queue EIO"), { code: "EIO" });
       }
-      writeFileSync(path, contents, encoding);
+      writeFileSync(descriptor, contents, encoding);
     },
   });
   let launches = 0;
@@ -9497,14 +10541,16 @@ test("boot reconciles a parked outcome while queue writes remain unavailable", a
     () => calls.some(({ args }) => args[0] === "update" && args[2] === "--status"),
     "failed queue dispatch did not release its claim",
   );
-  assert.match(dispatcher.getQueue("fixture").lastError, /PERSISTENCE DEGRADED/);
+  assert.equal(dispatcher.getQueue("fixture").lastError, null);
+  assert.match(dispatcher.getQueue("fixture").persistenceDetail, /queue\.json/);
   assert.deepEqual(JSON.parse(await readFile(join(setup.state, "queue.json"), "utf8")), {
     fixture: { enabled: true },
   });
 
   const successor = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   assert.equal(successor.getQueue("fixture").parkedTickets[0].ticketId, "fixture-bad");
-  assert.match(successor.getQueue("fixture").lastError, /PERSISTENCE DEGRADED/);
+  assert.equal(successor.getQueue("fixture").lastError, null);
+  assert.match(successor.getQueue("fixture").persistenceDetail, /queue\.json/);
 
   failQueueWrite = false;
   await successor.drainQueuesOnce();
@@ -9630,6 +10676,7 @@ test("ready queue reports a daily budget skip without counting a breaker failure
     enabled: true,
     consecutiveFailures: 0,
     lastError: "daily budget reached ($1.25 of $1.00)",
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
     // atelier-e5x: the queue payload carries the spend readout whenever a cap is
@@ -9644,6 +10691,7 @@ test("ready queue reports a daily budget skip without counting a breaker failure
     enabled: true,
     consecutiveFailures: 0,
     lastError: null,
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
     budget: { spentUSD: 1.25, budgetUSD: 2, exceeded: false },
@@ -9691,6 +10739,7 @@ test("ready queue reports an unpriced dispatch cap without counting a breaker fa
     enabled: true,
     consecutiveFailures: 0,
     lastError: "daily unpriced dispatch cap reached (2 of 2)",
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
     // atelier-e5x: same readout for the unpriced-dispatch cap, computed exactly as
@@ -9706,6 +10755,7 @@ test("ready queue reports an unpriced dispatch cap without counting a breaker fa
     enabled: true,
     consecutiveFailures: 0,
     lastError: null,
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
     unpricedDispatches: { dispatchesToday: 2, dispatchCap: 3, exceeded: false },
@@ -9744,6 +10794,7 @@ test("ready queue treats an unpriced slot consumed during br ready as benign con
     enabled: true,
     consecutiveFailures: 0,
     lastError: "daily unpriced dispatch cap reached (1 of 1)",
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
     unpricedDispatches: { dispatchesToday: 1, dispatchCap: 1, exceeded: true },
@@ -9875,6 +10926,7 @@ test("ready queue circuit breaker disables after three failures and re-enable re
     enabled: false,
     consecutiveFailures: 3,
     lastError: "tracker unavailable",
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
   });
@@ -9886,6 +10938,7 @@ test("ready queue circuit breaker disables after three failures and re-enable re
     enabled: true,
     consecutiveFailures: 0,
     lastError: null,
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
   });
@@ -9899,11 +10952,11 @@ test("setQueue keeps its memory mutation and surfaces a guarded persistence fail
   let failQueueWrite = true;
   _setPersistenceFileOps({
     appendFileSync,
-    writeFileSync(path, contents, encoding) {
-      if (failQueueWrite && path.endsWith("queue.json")) {
+    writeDescriptorSync(descriptor, contents, encoding, path) {
+      if (failQueueWrite && isAtomicWriteFor(path, "queue.json")) {
         throw Object.assign(new Error("fixture queue ESTALE"), { code: "ESTALE" });
       }
-      writeFileSync(path, contents, encoding);
+      writeFileSync(descriptor, contents, encoding);
     },
   });
   const logLines = [];
@@ -9913,7 +10966,9 @@ test("setQueue keeps its memory mutation and surfaces a guarded persistence fail
   const degraded = dispatcher.setQueue("fixture", { enabled: true });
   assert.equal(degraded.enabled, true);
   assert.equal(degraded.consecutiveFailures, 0);
-  assert.match(degraded.lastError, /^PERSISTENCE DEGRADED:/);
+  assert.equal(degraded.lastError, null);
+  assert.equal(degraded.persistenceDegraded, true);
+  assert.match(degraded.persistenceDetail, /queue\.json/);
   assert.equal(existsSync(join(setup.state, "queue.json")), false);
   assert.equal(logLines.length, 1);
 
@@ -9922,6 +10977,7 @@ test("setQueue keeps its memory mutation and surfaces a guarded persistence fail
     enabled: false,
     consecutiveFailures: 0,
     lastError: null,
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
   });
@@ -9941,11 +10997,11 @@ test("timer-style queue drain persistence failure resolves and keeps the breaker
   });
   _setPersistenceFileOps({
     appendFileSync,
-    writeFileSync(path, contents, encoding) {
-      if (path.endsWith("queue.json")) {
+    writeDescriptorSync(descriptor, contents, encoding, path) {
+      if (isAtomicWriteFor(path, "queue.json")) {
         throw Object.assign(new Error("fixture queue EIO"), { code: "EIO" });
       }
-      writeFileSync(path, contents, encoding);
+      writeFileSync(descriptor, contents, encoding);
     },
   });
   const logLines = [];
@@ -9966,7 +11022,8 @@ test("timer-style queue drain persistence failure resolves and keeps the breaker
   const queue = dispatcher.getQueue("fixture");
   assert.equal(queue.enabled, false);
   assert.equal(queue.consecutiveFailures, 3);
-  assert.match(queue.lastError, /^tracker unavailable; PERSISTENCE DEGRADED:/);
+  assert.equal(queue.lastError, "tracker unavailable");
+  assert.match(queue.persistenceDetail, /queue\.json/);
   assert.equal(logLines.length, 1);
 });
 
@@ -9974,7 +11031,11 @@ test("tracker-less project queue is unavailable and rejects enabling", async (t)
   const setup = await fixture(t, { tracker: "none" });
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
 
-  assert.deepEqual(dispatcher.getQueue("fixture"), { enabled: false, unavailable: true });
+  assert.deepEqual(dispatcher.getQueue("fixture"), {
+    enabled: false,
+    unavailable: true,
+    persistenceDegraded: false,
+  });
   await assert.rejects(
     async () => dispatcher.setQueue("fixture", { enabled: true }),
     (error) => error.status === 409 && /no tracker/.test(error.message),
@@ -10073,11 +11134,11 @@ test("dispatcher boots with intact records when oversized-index compaction hits 
   await writeFile(indexPath, `${lines.join("\n")}\n`);
   _setPersistenceFileOps({
     appendFileSync,
-    writeFileSync(path, contents, options) {
-      if (path.includes(".tmp-")) {
+    writeDescriptorSync(descriptor, contents, options, path) {
+      if (isAtomicWriteFor(path, "index.jsonl")) {
         throw Object.assign(new Error("fixture compaction ENOSPC"), { code: "ENOSPC" });
       }
-      writeFileSync(path, contents, options);
+      writeFileSync(descriptor, contents, options);
     },
   });
   const logLines = [];
@@ -10094,7 +11155,7 @@ test("dispatcher boots with intact records when oversized-index compaction hits 
   assert.ok(logLines.some((line) =>
     line.includes("could not compact") && line.includes("fixture compaction ENOSPC"),
   ));
-  assert.equal((await readdir(dispatchDir)).some((name) => name.includes(".tmp-")), false);
+  assert.equal((await readdir(dispatchDir)).some((name) => name.endsWith(".tmp")), false);
 });
 
 test("deregistered project history stays visible; stop and merge still refuse, dismiss does not (atelier-2nx)", async (t) => {
@@ -10325,6 +11386,7 @@ test("rollup de-duplicates persisted history and sums projects and local days", 
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
 
   assert.deepEqual(dispatcher.rollup(), {
+    persistenceDegraded: false,
     projects: [
       {
         project: "alpha",
@@ -12244,6 +13306,11 @@ async function seedIndex(setup, records) {
     join(dispatchDir, "index.jsonl"),
     `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
   );
+  for (const record of records) {
+    if (record.worktreePath && existsSync(record.worktreePath)) {
+      await writeWorkspaceToken(record);
+    }
+  }
   return records;
 }
 
@@ -13018,6 +14085,8 @@ test("integration: a real git worktree is added for a dispatch", async (t) => {
     ],
     { cwd: setup.primary },
   );
+  const excludePath = join(setup.primary, ".git", "info", "exclude");
+  const excludeBefore = await readFile(excludePath, "utf8");
   _setProbe();
   _setRunFile();
   // Writes a real file into the real worktree, so real git reports real work and
@@ -13037,6 +14106,58 @@ test("integration: a real git worktree is added for a dispatch", async (t) => {
   });
   assert.match(worktreeList, new RegExp(record.worktreePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal((await readFile(join(record.worktreePath, "README.md"), "utf8")), "fixture\n");
+  assert.equal(await readFile(excludePath, "utf8"), excludeBefore);
+  assert.match(
+    execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+      cwd: record.worktreePath,
+      encoding: "utf8",
+    }),
+    /\.atelier-workspace\.json/,
+  );
+});
+
+test("integration: a tracked valid workspace token is replaced as checkout pollution", async (t) => {
+  const setup = await fixture(t);
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: setup.primary });
+  execFileSync("git", ["config", "user.name", "Atelier Test"], { cwd: setup.primary });
+  execFileSync("git", ["config", "user.email", "atelier@example.invalid"], {
+    cwd: setup.primary,
+  });
+  await writeFile(join(setup.primary, "README.md"), "fixture\n");
+  await writeFile(
+    join(setup.primary, ".atelier-workspace.json"),
+    `${JSON.stringify({
+      recordId: "polluting-dispatch",
+      project: "fixture",
+      kind: "dispatch",
+      createdAt: "2026-08-16T08:00:00.000Z",
+    })}\n`,
+  );
+  execFileSync("git", ["add", "README.md", ".atelier-workspace.json"], { cwd: setup.primary });
+  execFileSync("git", ["commit", "-q", "-m", "polluting token"], { cwd: setup.primary });
+  const pollutingCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: setup.primary,
+    encoding: "utf8",
+  }).trim();
+  _setProbe();
+  _setRunFile();
+  _setSpawner((_file, _args, options) => successfulChild(async () => {
+    await writeFile(join(options.cwd, "feature.txt"), "work\n");
+  }));
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "replace polluted token" });
+  const record = await waitForState(dispatcher, id, ["completed"]);
+  const identity = JSON.parse(await readFile(
+    join(record.worktreePath, ".atelier-workspace.json"),
+    "utf8",
+  ));
+
+  assert.equal(identity.recordId, id);
+  assert.equal(identity.project, "fixture");
+  assert.equal(identity.kind, "dispatch");
+  assert.ok(record.warnings.some((warning) =>
+    warning.includes(pollutingCommit) && warning.includes("tracked Atelier workspace token")));
 });
 
 test("integration: a self-committing agent's dirty result is clean, attested, and survives worktree deletion", async (t) => {
@@ -13076,6 +14197,7 @@ test("integration: a self-committing agent's dirty result is clean, attested, an
       "--",
       ".",
       ":(exclude).beads",
+      ":(exclude).atelier-workspace.json",
     ],
     { cwd: record.worktreePath, encoding: "utf8" },
   );
@@ -13602,6 +14724,7 @@ test("queue completion automatically launches review and reports a failed verdic
     enabled: true,
     consecutiveFailures: 0,
     lastError: null,
+    persistenceDegraded: false,
     failureLimit: 2,
     parkedTickets: [],
   });
@@ -13625,6 +14748,7 @@ test("boot recovers a missing automatic review exactly once after the completion
     review: null,
   });
   await mkdir(target.worktreePath, { recursive: true });
+  await writeWorkspaceToken(target);
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   _setRunFile(async (_file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
@@ -13820,6 +14944,7 @@ test("reply-changed HEAD makes a passed review stale and boot launches a fresh g
     review: null,
   });
   await mkdir(target.worktreePath, { recursive: true });
+  await writeWorkspaceToken(target);
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
@@ -19047,6 +20172,7 @@ async function seedRerunnable(setup, overrides = {}) {
     ...overrides,
   }]);
   await mkdir(record.worktreePath, { recursive: true });
+  await writeWorkspaceToken(record);
   return record;
 }
 
@@ -19480,9 +20606,9 @@ test("a verification re-run persists its attempt before it emits anything about 
   _setSpawner(() => held);
   const writes = [];
   _setPersistenceFileOps({
-    appendFileSync(path, contents, encoding) {
+    appendDescriptorSync(descriptor, contents, encoding, path) {
       writes.push({ path, contents });
-      appendFileSync(path, contents, encoding);
+      appendFileSync(descriptor, contents, encoding);
     },
     writeFileSync,
   });
@@ -20184,6 +21310,7 @@ async function seedCodexRecord(setup, overrides = {}) {
     worktreePath,
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
+  if (existsSync(worktreePath)) await writeWorkspaceToken(record);
   return record;
 }
 
@@ -21074,6 +22201,7 @@ test("a record written before process trees existed is reaped over safely - no t
     warnings: [],
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
+  await writeWorkspaceToken(record);
   _setRunFile(async () => "");
 
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
@@ -21597,6 +22725,7 @@ test("an unconfirmable verification runner lands unresolved, refuses the re-run,
     verifyPidIdentity: null,
   }]);
   await mkdir(record.worktreePath, { recursive: true });
+  await writeWorkspaceToken(record);
   const calls = stubVerificationRuntime();
   const spawns = [];
   _setSpawner((file) => {
@@ -22371,6 +23500,7 @@ test("gc retains a failed post-merge worktree while its runner is unconfirmed, t
       steps: [],
     },
   }]);
+  await writeWorkspaceToken(incident, { path: worktreePath, kind: "post-merge" });
   _setRunFile(async () => "");
   const dispatcher = createDispatcher({
     registry: setup.registry,

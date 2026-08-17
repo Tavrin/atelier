@@ -1,9 +1,9 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { configDir } from "./paths.mjs";
+import { readFileNoFollowSync, writeFileAtomic } from "./fs-integrity.mjs";
 import { agents } from "./agents/index.mjs";
 import { SECRET_ENV_KEY } from "./exec.mjs";
 import { assertAllowedDispatchEnvKey } from "./execution/environment-policy.mjs";
@@ -348,7 +348,7 @@ export function validateRegistry(registry) {
         names.add(project.name);
       }
       if (typeof project.path === "string" && isAbsolute(project.path)) {
-        const normalizedPath = resolve(project.path);
+        const normalizedPath = canonicalize(project.path);
         if (paths.has(normalizedPath)) {
           problems.push(`projects[${index}].path duplicates ${project.path}`);
         }
@@ -359,11 +359,62 @@ export function validateRegistry(registry) {
           if (otherIndex === index) continue;
           const otherPath = registry.projects[otherIndex]?.path;
           if (typeof otherPath !== "string" || !isAbsolute(otherPath)) continue;
-          if (pathIsStrictlyInside(resolve(project.trackerPath), resolve(otherPath))) {
+          const trackerPath = canonicalize(project.trackerPath);
+          const canonicalOtherPath = canonicalize(otherPath);
+          if (
+            trackerPath === canonicalOtherPath ||
+            pathIsStrictlyInside(trackerPath, canonicalOtherPath)
+          ) {
             problems.push(
-              `projects[${index}].trackerPath must not be inside projects[${otherIndex}].path`,
+              `projects[${index}].trackerPath must not be inside projects[${otherIndex}].path ` +
+                `or equal to it`,
             );
           }
+        }
+      }
+    }
+    for (let leftIndex = 0; leftIndex < registry.projects.length; leftIndex += 1) {
+      const left = registry.projects[leftIndex];
+      if (typeof left?.path !== "string" || !isAbsolute(left.path)) continue;
+      for (let rightIndex = leftIndex + 1; rightIndex < registry.projects.length; rightIndex += 1) {
+        const right = registry.projects[rightIndex];
+        if (typeof right?.path !== "string" || !isAbsolute(right.path)) continue;
+        const leftPath = canonicalize(left.path);
+        const rightPath = canonicalize(right.path);
+        if (
+          pathIsStrictlyInside(leftPath, rightPath) ||
+          pathIsStrictlyInside(rightPath, leftPath)
+        ) {
+          problems.push(
+            `projects[${leftIndex}] (${left.name}).path overlaps projects[${rightIndex}] ` +
+              `(${right.name}).path; move one project so neither path contains the other`,
+          );
+        }
+        if (
+          typeof left.trackerPath === "string" &&
+          isAbsolute(left.trackerPath) &&
+          (
+            rightPath === canonicalize(left.trackerPath) ||
+            pathIsStrictlyInside(rightPath, canonicalize(left.trackerPath))
+          )
+        ) {
+          problems.push(
+            `projects[${rightIndex}] (${right.name}).path must not be inside ` +
+              `projects[${leftIndex}] (${left.name}).trackerPath`,
+          );
+        }
+        if (
+          typeof right.trackerPath === "string" &&
+          isAbsolute(right.trackerPath) &&
+          (
+            leftPath === canonicalize(right.trackerPath) ||
+            pathIsStrictlyInside(leftPath, canonicalize(right.trackerPath))
+          )
+        ) {
+          problems.push(
+            `projects[${leftIndex}] (${left.name}).path must not be inside ` +
+              `projects[${rightIndex}] (${right.name}).trackerPath`,
+          );
         }
       }
     }
@@ -515,23 +566,17 @@ function normalizedRegistry(registry) {
   };
 }
 
-export async function writeRegistryAtomic(registry, filePath = join(configDir(), "projects.json")) {
+export async function writeRegistryAtomic(
+  registry,
+  filePath = join(configDir(), "projects.json"),
+  { fileOps } = {},
+) {
   const directory = dirname(filePath);
-  const temporary = join(
-    directory,
-    `.${basename(filePath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
-  );
   await mkdir(directory, { recursive: true });
-  try {
-    await writeFile(temporary, `${JSON.stringify(registryForStorage(registry), null, 2)}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-    });
-    await rename(temporary, filePath);
-  } catch (error) {
-    await unlink(temporary).catch(() => {});
-    throw error;
-  }
+  writeFileAtomic(filePath, `${JSON.stringify(registryForStorage(registry), null, 2)}\n`, {
+    mode: 0o600,
+    fileOps,
+  });
 }
 
 export async function addProject(
@@ -626,17 +671,29 @@ export async function removeProject(
 export async function loadRegistry(filePath = join(configDir(), "projects.json")) {
   let registry;
   try {
-    registry = JSON.parse(await readFile(filePath, "utf8"));
+    // projects.json is trusted-local configuration and is commonly managed by
+    // a dotfiles symlink. Follow that one config path, then retain the strict
+    // regular-file/no-follow read at its final target. State under stateDir is
+    // deliberately not granted this exception.
+    const resolvedFilePath = realpathSync(filePath);
+    registry = JSON.parse(readFileNoFollowSync(resolvedFilePath, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") {
-      return {
-        version: STARTER_REGISTRY.version,
-        defaults: {},
-        groups: [],
-        projects: [],
-      };
+      try {
+        lstatSync(filePath);
+      } catch (pathError) {
+        if (pathError.code === "ENOENT") {
+          return {
+            version: STARTER_REGISTRY.version,
+            defaults: {},
+            groups: [],
+            projects: [],
+          };
+        }
+      }
     }
-    throw new RegistryError([`cannot read or parse ${filePath}: ${error.message}`]);
+    const detail = String(error.message).replaceAll("state file", "config file");
+    throw new RegistryError([`cannot read or parse config ${filePath}: ${detail}`]);
   }
 
   if (!isObject(registry)) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -287,6 +287,52 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   } else {
     assert.match(gc.stdout, /codex process sweep unavailable on this platform/);
   }
+});
+
+test("atelier doctor prints degraded persistence targets", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-cli-persistence-doctor-"));
+  const projectPath = join(root, "project");
+  const atelierState = join(root, "state");
+  await mkdir(projectPath);
+  await mkdir(atelierState);
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: projectPath });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, "projects.json"),
+    JSON.stringify({
+      version: 1,
+      defaults: {},
+      groups: [],
+      projects: [{
+        name: "fixture",
+        path: projectPath,
+        mainBranch: "main",
+        tracker: "none",
+        containerized: false,
+        verifyMode: "worktree",
+        verifyCommands: [],
+      }],
+    }),
+  );
+  await writeFile(join(atelierState, "queue.json"), "{ broken queue state\n");
+
+  const result = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor"],
+    {
+      cwd: resolve("."),
+      env: { ...process.env, ATELIER_CONFIG_DIR: root, ATELIER_STATE_DIR: atelierState },
+    },
+  ).then((value) => value, (error) => error);
+
+  assert.match(result.stdout, new RegExp(
+    `persistence degraded: ${join(atelierState, "queue.json").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+  ));
+  assert.equal(
+    (await readdir(atelierState)).some((name) => name.startsWith("queue.json.corrupt-")),
+    false,
+    "read-only doctor must not write corrupt-state evidence",
+  );
 });
 
 test("atelier doctor --gc --offline-maintenance refuses while an instance lock is live", async (t) => {

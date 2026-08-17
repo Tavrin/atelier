@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { fsyncSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,6 +15,7 @@ import {
   updateProject,
   validateProject,
   validateRegistry,
+  writeRegistryAtomic,
 } from "./registry.mjs";
 
 async function fixture(t) {
@@ -286,13 +288,137 @@ test("trackerPath must be an absolute directory outside other registered project
     ],
   };
   assert.match(validateRegistry(base).join("\n"), /trackerPath must not be inside projects\[1\]\.path/);
-  assert.deepEqual(
+  assert.match(
     validateRegistry({
       ...base,
       projects: [{ ...base.projects[0], trackerPath: otherPath }, base.projects[1]],
-    }),
-    [],
+    }).join("\n"),
+    /trackerPath must not be inside projects\[1\]\.path or equal to it/,
   );
+});
+
+test("registry rejects nested project paths and project/tracker overlap in both directions", async (t) => {
+  const { root, projectPath } = await fixture(t);
+  const nestedProject = join(projectPath, "nested-project");
+  const otherProject = join(root, "other-project");
+  const nestedTracker = join(otherProject, "nested-tracker");
+  await mkdir(nestedProject, { recursive: true });
+  await mkdir(nestedTracker, { recursive: true });
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: nestedProject });
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: otherProject });
+
+  const nestedProblems = validateRegistry({
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [
+      validProject(projectPath),
+      { ...validProject(nestedProject), name: "nested" },
+    ],
+  }).join("\n");
+  assert.match(nestedProblems, /atelier\.test.*path overlaps.*nested.*path/);
+
+  const trackerInsideProject = validateRegistry({
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [
+      { ...validProject(projectPath), trackerPath: nestedTracker },
+      { ...validProject(otherProject), name: "other" },
+    ],
+  }).join("\n");
+  assert.match(trackerInsideProject, /trackerPath must not be inside projects\[1\]\.path/);
+
+  const projectInsideTracker = validateRegistry({
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [
+      validProject(projectPath),
+      { ...validProject(otherProject), name: "other", trackerPath: root },
+    ],
+  }).join("\n");
+  assert.match(projectInsideTracker, /atelier\.test.*path must not be inside.*other.*trackerPath/);
+
+  const reverseExact = validateRegistry({
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [
+      validProject(projectPath),
+      { ...validProject(otherProject), name: "other", trackerPath: projectPath },
+    ],
+  }).join("\n");
+  assert.match(reverseExact, /projects\[1\]\.trackerPath must not be inside projects\[0\]\.path/);
+
+  const projectAlias = join(root, "project-alias");
+  await symlink(projectPath, projectAlias, "dir");
+  const aliasProblems = validateRegistry({
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [
+      validProject(projectPath),
+      { ...validProject(projectAlias), name: "alias" },
+    ],
+  }).join("\n");
+  assert.match(aliasProblems, /projects\[1\]\.path duplicates/);
+});
+
+test("registry writes fsync and replace the destination with mode 0600", async (t) => {
+  const { registryPath } = await fixture(t);
+  await writeFile(registryPath, "legacy\n", { mode: 0o644 });
+  let fsyncs = 0;
+  await writeRegistryAtomic(
+    { version: 1, defaults: {}, groups: [], projects: [] },
+    registryPath,
+    {
+      fileOps: {
+        fsyncSync(descriptor) {
+          fsyncs += 1;
+          fsyncSync(descriptor);
+        },
+      },
+    },
+  );
+  assert.ok(fsyncs >= 1);
+  assert.equal((await stat(registryPath)).mode & 0o777, 0o600);
+});
+
+test("loadRegistry follows a trusted-local config symlink to a regular file", async (t) => {
+  const { root, registryPath } = await fixture(t);
+  const target = join(root, "registry-target.json");
+  await writeFile(target, JSON.stringify({ version: 1, defaults: {}, groups: [], projects: [] }));
+  await symlink(target, registryPath);
+  assert.deepEqual(await loadRegistry(registryPath), {
+    version: 1,
+    defaults: { dispatchProfile: {} },
+    groups: [],
+    projects: [],
+  });
+});
+
+test("loadRegistry requires a config symlink's final target to be a regular file", async (t) => {
+  const { root, registryPath } = await fixture(t);
+  const target = join(root, "registry-target-directory");
+  await mkdir(target);
+  await symlink(target, registryPath);
+  await assert.rejects(loadRegistry(registryPath), (error) => {
+    assert.ok(error instanceof RegistryError);
+    assert.match(error.message, /config file/);
+    assert.match(error.message, /non-regular/);
+    assert.doesNotMatch(error.message, /state file/);
+    return true;
+  });
+});
+
+test("loadRegistry rejects a dangling config symlink instead of treating it as absent", async (t) => {
+  const { root, registryPath } = await fixture(t);
+  await symlink(join(root, "missing-registry-target.json"), registryPath);
+  await assert.rejects(loadRegistry(registryPath), (error) =>
+    error instanceof RegistryError &&
+    /cannot read or parse config/.test(error.message) &&
+    /ENOENT/.test(error.message));
 });
 
 test("updateProject preserves trackerPath unless an internal update explicitly removes it", async (t) => {

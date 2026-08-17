@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -75,5 +75,22 @@ test("explicit bearer configuration wins and missing installation state is clear
   assert.throws(
     () => clientBearerToken("cli", { directory, env: {} }),
     /start the daemon or set ATELIER_AUTH_TOKEN/,
+  );
+});
+
+test("auth secret reads refuse symlinks", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "atelier-auth-symlink-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const target = join(directory, "outside-secret");
+  writeFileSync(target, `${"a".repeat(43)}\n`, { mode: 0o600 });
+  symlinkSync(target, join(directory, AUTH_SECRET_FILE));
+
+  assert.throws(
+    () => ensureAuthSecret(directory),
+    /refuses non-regular or symlinked state file/,
+  );
+  assert.throws(
+    () => clientBearerToken("cli", { directory, env: {} }),
+    /refuses non-regular or symlinked state file/,
   );
 });

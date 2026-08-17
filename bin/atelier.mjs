@@ -13,6 +13,7 @@ import { createDispatcher } from "../server/lib/dispatch.mjs";
 import { createEventLog } from "../server/lib/event-log.mjs";
 import { resolveBrExecutable, runFile } from "../server/lib/exec.mjs";
 import { acquireInstanceLock } from "../server/lib/instance-lock.mjs";
+import { writeFileAtomic } from "../server/lib/fs-integrity.mjs";
 import { configDir, stateDir } from "../server/lib/paths.mjs";
 import {
   loadRegistry,
@@ -66,6 +67,7 @@ async function init(args) {
     await writeFile(filePath, `${JSON.stringify(STARTER_REGISTRY, null, 2)}\n`, {
       encoding: "utf8",
       flag: "wx",
+      mode: 0o600,
     });
   } catch (error) {
     if (error.code === "EEXIST") {
@@ -150,7 +152,7 @@ async function serve(args) {
       return;
     }
     const listenUrl = `http://127.0.0.1:${address.port}`;
-    await writeFile(urlPath, `${listenUrl}\n`, "utf8");
+    writeFileAtomic(urlPath, `${listenUrl}\n`, { mode: 0o600 });
     console.log(`Atelier listening at ${listenUrl}`);
     eventLog.append("service.start", {
       actor: "cli",
@@ -608,6 +610,9 @@ async function doctor(args) {
         `for ${debt.ticketId ?? "unknown ticket"} (${attemptDetail}${errorDetail})`,
       );
     }
+    for (const target of result.persistenceFailureTargets ?? []) {
+      console.log(`persistence degraded: ${target}`);
+    }
     for (const error of result.errors) console.error(`gc error: ${error}`);
     for (const error of codexProcesses.errors ?? []) {
       console.error(`gc error: codex process sweep: ${error}`);
@@ -624,6 +629,16 @@ async function doctor(args) {
     );
     if (errorCount > 0) process.exitCode = 1;
     return;
+  }
+
+  const persistence = createDispatcher({
+    registry,
+    stateDir: stateDir(),
+    sweepCodexProcessesAtBoot: false,
+    observer: true,
+  }).persistenceStatus();
+  for (const target of persistence.targets) {
+    console.log(`persistence degraded: ${target}`);
   }
 
   const checks = await Promise.all([

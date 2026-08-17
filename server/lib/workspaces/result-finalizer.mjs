@@ -1,7 +1,11 @@
 import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-const NON_TRACKER_PATHS = Object.freeze([".", ":(exclude).beads"]);
+const NON_TRACKER_PATHS = Object.freeze([
+  ".",
+  ":(exclude).beads",
+  ":(exclude).atelier-workspace.json",
+]);
 const FINALIZE_SUBJECT = "chore(dispatch): finalize result [atelier-finalized]";
 const COMMIT_PATTERN = /^[0-9a-f]{7,64}$/i;
 

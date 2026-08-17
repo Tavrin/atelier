@@ -307,6 +307,17 @@ test("dashboard merge reasons mirror every result and attestation binding refusa
   );
 });
 
+test("persistence degradation disables merge with its actionable target detail", () => {
+  const record = {
+    ...mergeBinding("bound-head"),
+    verify: { state: "passed" },
+    strandedBrWrites: false,
+    persistenceDegraded: true,
+    persistenceDetail: "Persistence degraded for: /state/dispatches/a.jsonl",
+  };
+  assert.deepEqual(mergeGateReasons(record, {}), [record.persistenceDetail]);
+});
+
 test("review staleness is decided by the reviewed head, not the verdict alone", () => {
   assert.equal(reviewIsStale({ verdict: "pass", reviewedHead: "old-head" }, "new-head"), true);
   assert.equal(reviewIsStale({ verdict: "pass", reviewedHead: "same-head" }, "same-head"), false);

@@ -149,6 +149,9 @@ export function mergeGateReasons(record, project = {}) {
 
   if (record.strandedBrWrites) reasons.push("stranded tracker writes");
   if (record.mergeRecoveryPending) reasons.push("merge recovery pending");
+  if (record.persistenceDegraded) {
+    reasons.push(record.persistenceDetail || "persistence degraded - run atelier doctor for targets");
+  }
   if (!record.result?.commit) {
     reasons.push("finalized result missing");
   } else if (record.result.commit !== record.branchHead) {

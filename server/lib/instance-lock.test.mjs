@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, renameSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -100,4 +100,19 @@ test("stale takeover interleaving leaves only the fresh contender owning the loc
   assert.equal(await readFile(path, "utf8"), `${freshPid}\n`);
   freshLock.release();
   assert.equal(existsSync(path), false);
+});
+
+test("instance lock reads refuse symlinks without changing their targets", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "atelier-lock-symlink-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = join(directory, "outside-lock");
+  const path = join(directory, "atelier.lock");
+  await writeFile(target, "999999999\n");
+  await symlink(target, path);
+
+  assert.throws(
+    () => acquireInstanceLock(directory, { pid: 456, killProcess: () => true }),
+    /refuses non-regular or symlinked state file/,
+  );
+  assert.equal(await readFile(target, "utf8"), "999999999\n");
 });
