@@ -512,7 +512,7 @@ function stubConvoyRuntime(
   setup,
   issues,
   calls = [],
-  { changed = PROBE_CHANGED_FILE, readyIssues = issues } = {},
+  { changed = PROBE_CHANGED_FILE, readyIssues = issues, gitHandler } = {},
 ) {
   mkdirSync(join(setup.primary, ".beads"), { recursive: true });
   writeFileSync(
@@ -535,6 +535,10 @@ function stubConvoyRuntime(
       throw new Error(`unexpected br command: ${args.join(" ")}`);
     }
     assert.equal(file, "git");
+    if (gitHandler) {
+      const handled = await gitHandler(args, options);
+      if (handled !== undefined) return handled;
+    }
     if (args[2] === "worktree" && args[3] === "add" && args[4] === "-b") {
       await mkdir(args[6], { recursive: true });
       return "";
@@ -3080,12 +3084,14 @@ test("merge fast-forwards the captured validated SHA with the exact argv cleanup
     calls.push([file, args]);
     if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
     if (args[2] === "rev-parse" && args[3] === "main") return "abcdef1234567890\n";
+    if (args[2] === "merge-base") return "validated-head\n";
     if (args[2] === "fetch") {
       assert.deepEqual(rawRecord(setup, seeded.id).mergeIntent, {
         resultCommit: "validated-head",
         branchHead: "validated-head",
         mainBranch: "main",
         mainTipBefore: "abcdef1234567890",
+        alreadyContained: true,
         startedAt: rawRecord(setup, seeded.id).mergeIntent.startedAt,
       });
     }
@@ -3097,6 +3103,7 @@ test("merge fast-forwards the captured validated SHA with the exact argv cleanup
   assert.deepEqual(calls, [
     ["git", ["-C", setup.primary, "rev-parse", "--verify", seeded.branch]],
     ["git", ["-C", setup.primary, "rev-parse", "main"]],
+    ["git", ["-C", setup.primary, "merge-base", "validated-head", "abcdef1234567890"]],
     [
       "git",
       [
@@ -4203,6 +4210,7 @@ test("merge falls back to a clean checked-out primary branch", async (t) => {
   assert.deepEqual(calls, [
     ["git", ["-C", setup.primary, "rev-parse", "--verify", seeded.branch]],
     ["git", ["-C", setup.primary, "rev-parse", "main"]],
+    ["git", ["-C", setup.primary, "merge-base", "validated-head", "1234567890abcdef"]],
     [
       "git",
       [
@@ -4341,6 +4349,7 @@ test("merge falls back to a detached worktree when primary is not on main", asyn
   assert.deepEqual(calls, [
     ["git", ["-C", setup.primary, "rev-parse", "--verify", seeded.branch]],
     ["git", ["-C", setup.primary, "rev-parse", "main"]],
+    ["git", ["-C", setup.primary, "merge-base", "validated-head", "feedface12345678"]],
     [
       "git",
       [
@@ -4812,6 +4821,8 @@ test("merge-commit validation binds result mode and object id before commit-tree
       assert.equal(error.status, 409, scenario.label);
       assert.match(error.message, /^EATELIER_RESULT_VERIFICATION_MISMATCH: /);
       assert.match(error.message, /feature\.txt/);
+      assert.match(error.message, /main branch moved/);
+      assert.match(error.message, /integrate main and re-verify, or use an audited force merge/);
       return true;
     });
     assert.equal(calls.some((args) => args[2] === "commit-tree"), false, scenario.label);
@@ -5081,6 +5092,383 @@ test("a no-op duplicate merge does not append another persisted record", async (
 
   assert.equal(duplicate.merged.commit, "already");
   assert.equal(readFileSync(indexPath, "utf8"), before);
+});
+
+test("reply reconciles a pending merge intent before it can add commits", async (t) => {
+  const setup = await fixture(t);
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: false,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  const seeded = await seedDispatch(setup, {
+    branchHead: "result-head",
+    result: {
+      commit: "result-head",
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      manifest: [],
+      version: 1,
+    },
+    attestation: { resultCommit: "result-head", resultVersion: 1 },
+    mergeIntent: intent,
+    sessionId: "fixture-session",
+  });
+  await mkdir(seeded.worktreePath, { recursive: true });
+  _setSpawner(() => successfulChild());
+  let recoveryAvailable = false;
+  _setRunFile(async (_file, args) => {
+    if (args[2] === "rev-parse" && args[3] === "main") {
+      if (!recoveryAvailable) throw new Error("git temporarily unavailable");
+      return "main-before\n";
+    }
+    if (args[2] === "merge-base") return "different-base\n";
+    if (args[2] === "rev-parse" && args[3] === "-q") return "";
+    return "";
+  });
+
+  await assert.rejects(
+    dispatcher.reply(seeded.id, { text: "do not discard the merge" }),
+    (error) => error.status === 409 && /merge intent is pending recovery/.test(error.message),
+  );
+  assert.deepEqual(rawRecord(setup, seeded.id).mergeIntent, intent);
+
+  recoveryAvailable = true;
+  const resumed = await dispatcher.reply(seeded.id, { text: "continue after reconciliation" });
+  assert.equal(resumed.mergeRecoveryPending, false);
+  assert.ok(["resuming", "running"].includes(resumed.state));
+  assert.equal(rawRecord(setup, seeded.id).mergeIntent, null);
+  await waitForState(dispatcher, seeded.id, ["completed", "completed_empty"]);
+});
+
+test("landed recovery resets interrupted primary state and leaves later merges usable", async (t) => {
+  const setup = await fixture(t);
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: false,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  const first = await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
+  let phase = "recover";
+  let secondMain = "landed-main";
+  const calls = [];
+  _setRunFile(async (_file, args) => {
+    calls.push(args);
+    if (phase === "recover") {
+      if (args[2] === "rev-parse" && args[3] === "main") return "result-head\n";
+      if (args[2] === "merge-base") return "result-head\n";
+      if (args[2] === "rev-parse" && args[3] === "-q") return "result-head\n";
+      if (args[2] === "reset" && args[3] === "--hard") return "";
+      if (args[2] === "rev-parse" && args[3] === "--verify") return "result-head\n";
+      return "";
+    }
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
+    if (args[2] === "rev-parse" && args[3] === "main") return `${secondMain}\n`;
+    if (args[2] === "merge-base") return "";
+    if (args[2] === "fetch") {
+      secondMain = "second-merged";
+      return "";
+    }
+    return "";
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await waitForCondition(
+    () => Boolean(dispatcher.get(first.id)?.merged),
+    "restart did not recover the landed merge",
+  );
+  await settleAsyncWork();
+  const recovered = dispatcher.get(first.id);
+  assert.equal(recovered.merged.commit, "result-head");
+  assert.ok(calls.some((args) =>
+    args.join("\0") === ["-C", setup.primary, "reset", "--hard", "main"].join("\0")));
+
+  phase = "second";
+  const second = {
+    ...rawRecord(setup, first.id),
+    id: "dispatch-second",
+    branch: "atelier/fixture-2-dispatch-second",
+    worktreePath: join(setup.state, "worktrees", "fixture", "dispatch-second"),
+    ticketId: "fixture-2",
+    branchHead: "validated-head",
+    result: { ...first.result, commit: "validated-head" },
+    attestation: { resultCommit: "validated-head", resultVersion: 1 },
+    merged: null,
+    mergeIntent: null,
+    mergeFollowUpDebt: undefined,
+  };
+  seededSyntheticBranches.add(second.branch);
+  appendFileSync(
+    join(setup.state, "dispatches", "index.jsonl"),
+    `${JSON.stringify(second)}\n`,
+  );
+  const later = await dispatcher.merge(second.id);
+  assert.equal(later.merged.commit, "second-merged");
+});
+
+test("already-contained intents clear as no-ops without fabricating unrelated landing commits", async (t) => {
+  const setup = await fixture(t);
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: true,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
+  const calls = [];
+  _setRunFile(async (_file, args) => {
+    calls.push(args);
+    if (args[2] === "rev-parse" && args[3] === "main") return "unrelated-main-advance\n";
+    if (args[2] === "rev-list") return "unrelated-commit\n";
+    return "";
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await waitForCondition(
+    () => rawRecord(setup, "dispatch-merge").mergeIntent === null,
+    "already-contained intent did not clear",
+  );
+  assert.equal(dispatcher.get("dispatch-merge").merged, null);
+  assert.equal(calls.some((args) => args[2] === "rev-list"), false);
+  assert.equal(calls.some((args) => args[2] === "rev-parse" && args[3] === "main"), false);
+});
+
+test("audited force abandons an unresolved intent and records exactly what it cleared", async (t) => {
+  const setup = await fixture(t);
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: false,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
+  let recoveryAttempt = true;
+  let main = "main-before";
+  _setRunFile(async (_file, args) => {
+    if (recoveryAttempt) {
+      recoveryAttempt = false;
+      throw new Error("recovery cannot identify main");
+    }
+    if (args[2] === "rev-parse" && args[3] === "main") return `${main}\n`;
+    if (args[2] === "merge-base") return "";
+    if (args[2] === "fetch") {
+      main = "forced-merge";
+      return "";
+    }
+    return "";
+  });
+
+  const forced = await dispatcher.merge("dispatch-merge", {
+    force: true,
+    ...FORCE_AUDIT,
+  });
+  assert.equal(forced.merged.commit, "forced-merge");
+  assert.deepEqual(forced.merged.abandonedMergeIntent, intent);
+  assert.match(forced.merged.abandonedMergeIntentAt, /^2026-/);
+  assert.ok(forced.warnings.some((warning) => /abandoned by audited force merge/.test(warning)));
+  assert.equal(rawRecord(setup, "dispatch-merge").mergeIntent, null);
+});
+
+test("dismiss abandons a still-unresolved intent before removing the record artifacts", async (t) => {
+  const setup = await fixture(t);
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: false,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
+  let first = true;
+  _setRunFile(async () => {
+    if (first) {
+      first = false;
+      throw new Error("recovery unavailable");
+    }
+    return "";
+  });
+
+  const dismissed = await dispatcher.dismiss("dispatch-merge");
+  assert.ok(dismissed.dismissed);
+  assert.equal(dismissed.mergeRecoveryPending, false);
+  assert.ok(dismissed.warnings.includes(
+    "merge intent abandoned by dismissal before recovery could resolve it",
+  ));
+  assert.equal(rawRecord(setup, "dispatch-merge").mergeIntent, null);
+});
+
+test("boot never resurrects dismissed intents and clears unreachable ones once", async (t) => {
+  const reachableSetup = await fixture(t);
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: false,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  await seedDispatch(reachableSetup, {
+    branchHead: "result-head",
+    mergeIntent: intent,
+    dismissed: { at: "2026-08-17T09:00:00.000Z" },
+  });
+  const reachableCalls = [];
+  _setRunFile(async (_file, args) => {
+    reachableCalls.push(args);
+    if (args[2] === "for-each-ref") return "refs/heads/main\n";
+    if (args[2] === "rev-parse" && args[3] === "main") return "landed-main\n";
+    if (args[2] === "merge-base") return "result-head\n";
+    return "";
+  });
+  const reachable = createDispatcher({
+    registry: reachableSetup.registry,
+    stateDir: reachableSetup.state,
+  });
+  await settleAsyncWork();
+  assert.ok(reachable.get("dispatch-merge").dismissed);
+  assert.equal(reachable.get("dispatch-merge").merged, null);
+  assert.equal(reachableCalls.some((args) => args[2] === "merge-base"), false);
+
+  const unreachableSetup = await fixture(t);
+  await seedDispatch(unreachableSetup, {
+    branchHead: "result-head",
+    mergeIntent: intent,
+    dismissed: { at: "2026-08-17T09:00:00.000Z" },
+  });
+  let reachabilityChecks = 0;
+  _setRunFile(async (_file, args) => {
+    if (args[2] === "for-each-ref") {
+      reachabilityChecks += 1;
+      return "";
+    }
+    return "";
+  });
+  const unreachable = createDispatcher({
+    registry: unreachableSetup.registry,
+    stateDir: unreachableSetup.state,
+  });
+  await waitForCondition(
+    () => rawRecord(unreachableSetup, "dispatch-merge").mergeIntent === null,
+    "unreachable dismissed intent did not clear",
+  );
+  assert.ok(unreachable.get("dispatch-merge").warnings.some((warning) =>
+    /cleared because commit result-head is unreachable/.test(warning)));
+  createDispatcher({ registry: unreachableSetup.registry, stateDir: unreachableSetup.state });
+  await settleAsyncWork();
+  assert.equal(reachabilityChecks, 1);
+});
+
+test("recovered merges clean artifacts with the live branch-ref recheck", async (t) => {
+  for (const advanced of [false, true]) {
+    const setup = await fixture(t);
+    const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+    const intent = {
+      resultCommit: "result-head",
+      branchHead: "result-head",
+      mainBranch: "main",
+      mainTipBefore: "main-before",
+      alreadyContained: false,
+      startedAt: "2026-08-17T08:00:00.000Z",
+    };
+    const seeded = await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
+    const calls = [];
+    _setRunFile(async (_file, args) => {
+      calls.push(args);
+      if (args[2] === "rev-parse" && args[3] === "main") return "result-head\n";
+      if (args[2] === "merge-base") return "result-head\n";
+      if (args[2] === "rev-parse" && args[3] === "-q") return "";
+      if (args[2] === "rev-parse" && args[3] === "--verify") {
+        return advanced ? "advanced-head\n" : "result-head\n";
+      }
+      return "";
+    });
+
+    const recovered = await dispatcher.merge(seeded.id);
+    assert.equal(recovered.merged.commit, "result-head");
+    assert.ok(calls.some((args) =>
+      args.join("\0") === [
+        "-C", setup.primary, "worktree", "remove", seeded.worktreePath, "--force",
+      ].join("\0")));
+    assert.equal(
+      calls.some((args) => args[2] === "branch" && args[3] === "-D"),
+      !advanced,
+    );
+    if (advanced) {
+      assert.ok(recovered.warnings.includes(
+        `branch cleanup skipped: ${seeded.branch} advanced from merged result-head to advanced-head`,
+      ));
+    }
+  }
+});
+
+test("inline recovered convoy merge starts the next member without a restart", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  const issues = [
+    { id: "fixture-1", status: "open", dependencies: [] },
+    { id: "fixture-2", status: "open", dependencies: [] },
+  ];
+  stubConvoyRuntime(setup, issues);
+  _setSpawner(() => successfulChild());
+  const firstDispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const convoy = await firstDispatcher.createConvoy("fixture", {
+    ticketIds: ["fixture-1", "fixture-2"],
+  });
+  const first = await waitForState(firstDispatcher, convoy.currentDispatchId, ["completed"]);
+  const rawFirst = rawRecord(setup, first.id);
+  const intent = {
+    resultCommit: rawFirst.result.commit,
+    branchHead: rawFirst.result.commit,
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    alreadyContained: false,
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  appendFileSync(
+    join(setup.state, "dispatches", "index.jsonl"),
+    `${JSON.stringify({ ...rawFirst, mergeIntent: intent })}\n`,
+  );
+
+  let mainReads = 0;
+  stubConvoyRuntime(setup, issues, [], {
+    gitHandler: async (args) => {
+      if (args[2] === "rev-parse" && args[3] === "main") {
+        mainReads += 1;
+        if (mainReads === 1) throw new Error("boot git unavailable");
+        return "landed-main\n";
+      }
+      if (args[2] === "merge-base") return `${rawFirst.result.commit}\n`;
+      if (args[2] === "rev-list") return "landing-commit\n";
+      if (args[2] === "rev-parse" && args[3] === "-q") return "";
+      return undefined;
+    },
+  });
+  _setSpawner(() => successfulChild());
+  const successor = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await waitForCondition(() => mainReads === 1, "boot recovery did not attempt reconciliation");
+
+  const recovered = await successor.merge(first.id);
+  assert.equal(recovered.merged.commit, "landing-commit");
+  const advanced = await waitForConvoy(
+    successor,
+    convoy.id,
+    (candidate) => candidate.cursor === 1 && Boolean(candidate.currentDispatchId),
+  );
+  assert.equal(successor.get(advanced.currentDispatchId).ticketId, "fixture-2");
+  await waitForState(successor, advanced.currentDispatchId, ["completed"]);
 });
 
 test("strict unforced merge accepts refuted, redirected, and waived MAJOR dispositions", async (t) => {
@@ -12463,6 +12851,7 @@ test("reply-changed HEAD makes a passed review stale and boot launches a fresh g
     }
     if (args[2] === "rev-parse" && args[3] === "--verify") return `${currentHead}\n`;
     if (args[2] === "rev-parse" && args[3] === "main") return "merged-head\n";
+    if (args[2] === "merge-base") return "";
     if (args[2] === "worktree" && args[3] === "add") {
       await mkdir(args[4] === "--detach" ? args[5] : args[6], { recursive: true });
       return "";
