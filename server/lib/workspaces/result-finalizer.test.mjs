@@ -133,6 +133,32 @@ test("ignored-file surprises abort without creating a commit", async (t) => {
   assert.match(await runGit(["-C", fixture.root, "status", "--porcelain=v1"]), /code\.mjs/);
 });
 
+test("an ignored file created during staging is skipped and caught by the post-check", async (t) => {
+  const fixture = await repository(t);
+  await writeFile(join(fixture.root, ".gitignore"), "late-ignored.log\n");
+  await runGit(["-C", fixture.root, "add", ".gitignore"]);
+  await runGit(["-C", fixture.root, "commit", "-q", "-m", "ignore policy"]);
+  fixture.baseCommit = (await runGit(["-C", fixture.root, "rev-parse", "HEAD"])).trim();
+  await writeFile(join(fixture.root, "code.mjs"), "export const value = 40;\n");
+  let addArgs;
+  const injectingRunGit = async (args) => {
+    if (args[2] === "add") {
+      addArgs = [...args];
+      await writeFile(join(fixture.root, "late-ignored.log"), "arrived during finalize\n");
+    }
+    return runGit(args);
+  };
+
+  await assertTypedFailure(finalizeResult({
+    ...finalizationInput(fixture),
+    runGit: injectingRunGit,
+  }), "ERESULT_IGNORED_FILES");
+  assert.equal(addArgs.includes("--force"), false);
+  await assert.rejects(
+    runGit(["-C", fixture.root, "show", "HEAD:late-ignored.log"]),
+  );
+});
+
 test("a symlink escaping the worktree aborts before staging", async (t) => {
   const fixture = await repository(t);
   await symlink(tmpdir(), join(fixture.root, "escape"));

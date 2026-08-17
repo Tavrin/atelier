@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
-  chmodSync,
   closeSync,
   constants,
+  fchmodSync,
   fsyncSync,
   fstatSync,
   lstatSync,
@@ -16,9 +16,9 @@ import {
 import { basename, dirname, join } from "node:path";
 
 const DEFAULT_FILE_OPS = Object.freeze({
-  appendFileSync,
-  chmodSync,
+  appendDescriptorSync: appendFileSync,
   closeSync,
+  fchmodSync,
   fsyncSync,
   fstatSync,
   lstatSync,
@@ -26,6 +26,7 @@ const DEFAULT_FILE_OPS = Object.freeze({
   readFileSync,
   renameSync,
   rmSync,
+  writeDescriptorSync: writeFileSync,
   writeFileSync,
 });
 
@@ -57,14 +58,19 @@ export function writeFileAtomic(path, contents, { mode = 0o600, fileOps } = {}) 
     `.${basename(path)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
   );
   try {
-    ops.writeFileSync(temporary, contents, {
-      encoding: "utf8",
-      flag: "wx",
-      mode,
-    });
     const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
-    const descriptor = ops.openSync(temporary, constants.O_RDWR | noFollow);
-    closeAfter(ops, descriptor, () => ops.fsyncSync(descriptor));
+    const descriptor = ops.openSync(
+      temporary,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | noFollow,
+      mode,
+    );
+    closeAfter(ops, descriptor, () => {
+      // Creation modes are filtered through the process umask. Correct the
+      // already-open inode before making it visible at the destination.
+      ops.fchmodSync(descriptor, mode);
+      ops.writeDescriptorSync(descriptor, contents, { encoding: "utf8" }, temporary);
+      ops.fsyncSync(descriptor);
+    });
     ops.renameSync(temporary, path);
   } catch (error) {
     try {
@@ -97,13 +103,52 @@ export function writeFileAtomic(path, contents, { mode = 0o600, fileOps } = {}) 
 
 export function appendDurable(path, line, { fileOps } = {}) {
   const ops = operations(fileOps);
-  ops.appendFileSync(path, line, { encoding: "utf8", mode: 0o600 });
-  // `mode` only applies when append creates the file. Tighten an existing
-  // legacy product too so every successful durable append leaves it owner-only.
-  ops.chmodSync(path, 0o600);
   const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
-  const descriptor = ops.openSync(path, constants.O_RDONLY | noFollow);
-  closeAfter(ops, descriptor, () => ops.fsyncSync(descriptor));
+  const mode = 0o600;
+  let descriptor;
+  let created = false;
+  try {
+    descriptor = ops.openSync(
+      path,
+      constants.O_WRONLY |
+        constants.O_APPEND |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        noFollow,
+      mode,
+    );
+    created = true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    descriptor = ops.openSync(path, constants.O_WRONLY | constants.O_APPEND | noFollow);
+  }
+  closeAfter(ops, descriptor, () => {
+    // Never chmod a pre-existing state file. For a newly-created product,
+    // fchmod defeats a permissive umask while retaining descriptor identity.
+    if (created) ops.fchmodSync(descriptor, mode);
+    ops.appendDescriptorSync(descriptor, line, { encoding: "utf8" }, path);
+    // The append and fsync intentionally use the same descriptor/inode.
+    ops.fsyncSync(descriptor);
+  });
+}
+
+export function writeFileExclusiveDurable(
+  path,
+  contents,
+  { mode = 0o600, fileOps } = {},
+) {
+  const ops = operations(fileOps);
+  const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
+  const descriptor = ops.openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow,
+    mode,
+  );
+  closeAfter(ops, descriptor, () => {
+    ops.fchmodSync(descriptor, mode);
+    ops.writeDescriptorSync(descriptor, contents, { encoding: "utf8" }, path);
+    ops.fsyncSync(descriptor);
+  });
 }
 
 export function readFileNoFollowSync(path, options, { fileOps } = {}) {

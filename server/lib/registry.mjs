@@ -348,7 +348,7 @@ export function validateRegistry(registry) {
         names.add(project.name);
       }
       if (typeof project.path === "string" && isAbsolute(project.path)) {
-        const normalizedPath = resolve(project.path);
+        const normalizedPath = canonicalize(project.path);
         if (paths.has(normalizedPath)) {
           problems.push(`projects[${index}].path duplicates ${project.path}`);
         }
@@ -359,9 +359,15 @@ export function validateRegistry(registry) {
           if (otherIndex === index) continue;
           const otherPath = registry.projects[otherIndex]?.path;
           if (typeof otherPath !== "string" || !isAbsolute(otherPath)) continue;
-          if (pathIsStrictlyInside(resolve(project.trackerPath), resolve(otherPath))) {
+          const trackerPath = canonicalize(project.trackerPath);
+          const canonicalOtherPath = canonicalize(otherPath);
+          if (
+            trackerPath === canonicalOtherPath ||
+            pathIsStrictlyInside(trackerPath, canonicalOtherPath)
+          ) {
             problems.push(
-              `projects[${index}].trackerPath must not be inside projects[${otherIndex}].path`,
+              `projects[${index}].trackerPath must not be inside projects[${otherIndex}].path ` +
+                `or equal to it`,
             );
           }
         }
@@ -373,8 +379,8 @@ export function validateRegistry(registry) {
       for (let rightIndex = leftIndex + 1; rightIndex < registry.projects.length; rightIndex += 1) {
         const right = registry.projects[rightIndex];
         if (typeof right?.path !== "string" || !isAbsolute(right.path)) continue;
-        const leftPath = resolve(left.path);
-        const rightPath = resolve(right.path);
+        const leftPath = canonicalize(left.path);
+        const rightPath = canonicalize(right.path);
         if (
           pathIsStrictlyInside(leftPath, rightPath) ||
           pathIsStrictlyInside(rightPath, leftPath)
@@ -387,7 +393,10 @@ export function validateRegistry(registry) {
         if (
           typeof left.trackerPath === "string" &&
           isAbsolute(left.trackerPath) &&
-          pathIsStrictlyInside(rightPath, resolve(left.trackerPath))
+          (
+            rightPath === canonicalize(left.trackerPath) ||
+            pathIsStrictlyInside(rightPath, canonicalize(left.trackerPath))
+          )
         ) {
           problems.push(
             `projects[${rightIndex}] (${right.name}).path must not be inside ` +
@@ -397,7 +406,10 @@ export function validateRegistry(registry) {
         if (
           typeof right.trackerPath === "string" &&
           isAbsolute(right.trackerPath) &&
-          pathIsStrictlyInside(leftPath, resolve(right.trackerPath))
+          (
+            leftPath === canonicalize(right.trackerPath) ||
+            pathIsStrictlyInside(leftPath, canonicalize(right.trackerPath))
+          )
         ) {
           problems.push(
             `projects[${leftIndex}] (${left.name}).path must not be inside ` +

@@ -11,13 +11,18 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { appendDurable, writeFileAtomic } from "./fs-integrity.mjs";
+import {
+  appendDurable,
+  writeFileAtomic,
+  writeFileExclusiveDurable,
+} from "./fs-integrity.mjs";
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "atelier-fs-integrity-"));
@@ -73,16 +78,56 @@ test("fsync failures surface from atomic and append writes", (t) => {
   );
 });
 
-test("durable products are owner-only", (t) => {
+test("new durable products are owner-only without chmodding existing append targets", (t) => {
   const root = fixture(t);
   const atomicPath = join(root, "atomic.json");
   const appendPath = join(root, "append.jsonl");
+  const newAppendPath = join(root, "new-append.jsonl");
   writeFileAtomic(atomicPath, "atomic\n");
   writeFileSync(appendPath, "legacy\n", { mode: 0o666 });
   chmodSync(appendPath, 0o666);
   appendDurable(appendPath, "append\n");
+  appendDurable(newAppendPath, "new\n");
   assert.equal(statSync(atomicPath).mode & 0o777, 0o600);
-  assert.equal(statSync(appendPath).mode & 0o777, 0o600);
+  assert.equal(statSync(appendPath).mode & 0o777, 0o666);
+  assert.equal(statSync(newAppendPath).mode & 0o777, 0o600);
   assert.equal(readFileSync(atomicPath, "utf8"), "atomic\n");
   assert.equal(readFileSync(appendPath, "utf8"), "legacy\nappend\n");
+});
+
+test("atomic and append creation modes defeat a permissive umask", (t) => {
+  const root = fixture(t);
+  const previous = process.umask(0o777);
+  try {
+    const atomicPath = join(root, "atomic.json");
+    const appendPath = join(root, "append.jsonl");
+    writeFileAtomic(atomicPath, "atomic\n");
+    appendDurable(appendPath, "append\n");
+    assert.equal(statSync(atomicPath).mode & 0o777, 0o600);
+    assert.equal(statSync(appendPath).mode & 0o777, 0o600);
+  } finally {
+    process.umask(previous);
+  }
+});
+
+test("append refuses a symlink before writing any bytes", (t) => {
+  const root = fixture(t);
+  const target = join(root, "outside.jsonl");
+  const link = join(root, "append.jsonl");
+  writeFileSync(target, "before\n");
+  symlinkSync(target, link);
+  assert.throws(() => appendDurable(link, "after\n"), (error) =>
+    ["ELOOP", "EEXIST"].includes(error?.code));
+  assert.equal(readFileSync(target, "utf8"), "before\n");
+});
+
+test("exclusive durable writes cannot overwrite same-name evidence", (t) => {
+  const root = fixture(t);
+  const evidence = join(root, "queue.json.corrupt-fixture");
+  writeFileExclusiveDurable(evidence, "first\n");
+  assert.throws(
+    () => writeFileExclusiveDurable(evidence, "second\n"),
+    (error) => error?.code === "EEXIST",
+  );
+  assert.equal(readFileSync(evidence, "utf8"), "first\n");
 });

@@ -422,7 +422,6 @@ export async function finalizeResult({ worktreePath, baseCommit, runGit, expecte
       worktreePath,
       "add",
       "--all",
-      "--force",
       "--",
       ...NON_TRACKER_PATHS,
     ]);

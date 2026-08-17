@@ -288,12 +288,12 @@ test("trackerPath must be an absolute directory outside other registered project
     ],
   };
   assert.match(validateRegistry(base).join("\n"), /trackerPath must not be inside projects\[1\]\.path/);
-  assert.deepEqual(
+  assert.match(
     validateRegistry({
       ...base,
       projects: [{ ...base.projects[0], trackerPath: otherPath }, base.projects[1]],
-    }),
-    [],
+    }).join("\n"),
+    /trackerPath must not be inside projects\[1\]\.path or equal to it/,
   );
 });
 
@@ -339,6 +339,30 @@ test("registry rejects nested project paths and project/tracker overlap in both 
     ],
   }).join("\n");
   assert.match(projectInsideTracker, /atelier\.test.*path must not be inside.*other.*trackerPath/);
+
+  const reverseExact = validateRegistry({
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [
+      validProject(projectPath),
+      { ...validProject(otherProject), name: "other", trackerPath: projectPath },
+    ],
+  }).join("\n");
+  assert.match(reverseExact, /projects\[1\]\.trackerPath must not be inside projects\[0\]\.path/);
+
+  const projectAlias = join(root, "project-alias");
+  await symlink(projectPath, projectAlias, "dir");
+  const aliasProblems = validateRegistry({
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [
+      validProject(projectPath),
+      { ...validProject(projectAlias), name: "alias" },
+    ],
+  }).join("\n");
+  assert.match(aliasProblems, /projects\[1\]\.path duplicates/);
 });
 
 test("registry writes fsync and replace the destination with mode 0600", async (t) => {
