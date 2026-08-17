@@ -90,6 +90,7 @@ function dispatcherStub() {
   const reviewDispositions = [];
   const merges = [];
   const verifyReruns = [];
+  const verifyRerunOptions = [];
   const resumedQueueTickets = [];
   const convoys = [{
     id: "convoy-1",
@@ -119,6 +120,7 @@ function dispatcherStub() {
     _reviewDispositions: reviewDispositions,
     _merges: merges,
     _verifyReruns: verifyReruns,
+    _verifyRerunOptions: verifyRerunOptions,
     _resumedQueueTickets: resumedQueueTickets,
     _convoys: convoys,
     _queueDraining: queueDraining,
@@ -175,9 +177,10 @@ function dispatcherStub() {
         })),
       };
     },
-    rerunVerification: async (id) => {
+    rerunVerification: async (id, options) => {
       const record = records.find((candidate) => candidate.id === id);
       verifyReruns.push(id);
+      verifyRerunOptions.push(options);
       return { ...record, state: "verifying", verify: { state: "running", steps: [], attempt: 2 } };
     },
     listConvoys: () => convoys,
@@ -2604,6 +2607,15 @@ test("verify route admits a re-run, reports it as started, and rejects unknown f
   assert.equal(JSON.parse(admitted.text).verify.attempt, 2);
   assert.deepEqual(dispatcher._verifyReruns, ["dispatch-1"]);
 
+  const accepted = await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/verify",
+    body: JSON.stringify({ acceptExecutionProfile: true }),
+    contentType: "application/json",
+  });
+  assert.equal(accepted.status, 202);
+  assert.equal(dispatcher._verifyRerunOptions[1].acceptExecutionProfile, true);
+
   const rejected = await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/verify",
@@ -2620,7 +2632,7 @@ test("verify route admits a re-run, reports it as started, and rejects unknown f
     contentType: "application/json",
   });
   assert.equal(unknown.status, 404);
-  assert.deepEqual(dispatcher._verifyReruns, ["dispatch-1"]);
+  assert.deepEqual(dispatcher._verifyReruns, ["dispatch-1", "dispatch-1"]);
 });
 
 test("dismiss route delegates terminal cleanup and returns the updated record", async (t) => {

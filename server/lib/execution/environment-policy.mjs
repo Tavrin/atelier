@@ -41,7 +41,6 @@ const DENIED_PREFIXES = [
 
 export const SECRET_ENV_KEY = /key|token|secret|password|credential/i;
 const TRUSTED_BASELINE_CLASSES = new Set(["git", "provider", "editor", "tracker"]);
-const SAFE_POLICY_KEY_NAMES = new Set(["GIT_CONFIG_KEY_0"]);
 
 function controlsExecution(key) {
   const normalized = String(key).toUpperCase();
@@ -77,12 +76,16 @@ function trustedChildHome() {
   return process.env.HOME || homedir();
 }
 
-export function sanitizeChildEnv(env, { class: childClass, allowDenied = [] } = {}) {
+function sanitizedChildEnv(
+  env,
+  { class: childClass, allowDenied = [] } = {},
+  safePolicyKeyNames = new Set(),
+) {
   const allowedDeniedKeys = new Set(allowDenied.map((key) => String(key).toUpperCase()));
   const clean = {};
   for (const [key, value] of Object.entries(env || {})) {
     const normalized = key.toUpperCase();
-    if (SECRET_ENV_KEY.test(key) && !SAFE_POLICY_KEY_NAMES.has(normalized)) continue;
+    if (SECRET_ENV_KEY.test(key) && !safePolicyKeyNames.has(normalized)) continue;
     if (controlsExecution(key) && !allowedDeniedKeys.has(normalized)) continue;
     clean[key] = value;
   }
@@ -93,19 +96,32 @@ export function sanitizeChildEnv(env, { class: childClass, allowDenied = [] } = 
   return clean;
 }
 
+export function sanitizeChildEnv(env, options = {}) {
+  return sanitizedChildEnv(env, options);
+}
+
 export function gitChildEnv(env, { allowDenied = [] } = {}) {
+  const requestedCount = String(env?.GIT_CONFIG_COUNT ?? "");
+  const callerCount = /^\d+$/.test(requestedCount) && Number.isSafeInteger(Number(requestedCount))
+    ? Number(requestedCount)
+    : 0;
+  const postureIndex = callerCount;
   const posture = {
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_NOSYSTEM: "1",
     GIT_PAGER: "cat",
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "core.hooksPath",
-    GIT_CONFIG_VALUE_0: "/dev/null",
+    GIT_CONFIG_COUNT: String(callerCount + 1),
+    [`GIT_CONFIG_KEY_${postureIndex}`]: "core.hooksPath",
+    [`GIT_CONFIG_VALUE_${postureIndex}`]: "/dev/null",
   };
+  const callerChannelKeys = Array.from({ length: callerCount }, (_, index) => [
+    `GIT_CONFIG_KEY_${index}`,
+    `GIT_CONFIG_VALUE_${index}`,
+  ]).flat();
   const merged = {
     PATH: trustedChildPath(),
-    // HOME remains trusted-local for credential helpers and repository access;
-    // global/system Git config is deliberately disabled by the posture below.
+    // HOME and the operator's global/system Git config remain trusted-local for
+    // identity, credentials, safe.directory and repository access. Only hooks
+    // and paging are disabled here; repo-local filters and attributes remain
+    // trusted-local, and the broader transform boundary belongs to ATT-008.
     HOME: trustedChildHome(),
     ...(process.env.LANG === undefined ? {} : { LANG: process.env.LANG }),
     ...(process.env.TERM === undefined ? {} : { TERM: process.env.TERM }),
@@ -116,14 +132,19 @@ export function gitChildEnv(env, { allowDenied = [] } = {}) {
       ? { SystemRoot: process.env.SystemRoot }
       : {}),
     ...env,
-    // Applied last so callers cannot restore global/system config, pagers, or
-    // repo-local hooks. Repo-local filters and attributes remain trusted-local;
-    // the broader content-transform boundary belongs to ATT-008 isolation.
+    // Applied last so callers cannot restore pagers or repo-local hooks. The
+    // hook entry is appended after the caller's complete env-config channel,
+    // preserving that channel while giving this posture final precedence.
     ...posture,
     LC_ALL: "C",
   };
-  return sanitizeChildEnv(merged, {
+  const policyKeys = new Set(
+    [...callerChannelKeys, ...Object.keys(posture)]
+      .filter((key) => key.startsWith("GIT_CONFIG_KEY_"))
+      .map((key) => key.toUpperCase()),
+  );
+  return sanitizedChildEnv(merged, {
     class: "git",
-    allowDenied: [...allowDenied, ...Object.keys(posture)],
-  });
+    allowDenied: [...allowDenied, ...callerChannelKeys, ...Object.keys(posture)],
+  }, policyKeys);
 }

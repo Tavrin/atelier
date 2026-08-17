@@ -76,7 +76,7 @@ test("runFile strips denied caller Git env while preserving allowed overrides an
     allowDenied: ["GIT_CONFIG_COUNT"],
   });
 
-  assert.equal(captured[0].GIT_CONFIG_GLOBAL, "/dev/null");
+  assert.equal(captured[0].GIT_CONFIG_GLOBAL, undefined);
   assert.equal(captured[0].GIT_DIR, undefined);
   assert.equal(captured[0].LD_AUDIT, undefined);
   assert.equal(captured[0].SSH_ASKPASS, undefined);
@@ -84,12 +84,30 @@ test("runFile strips denied caller Git env while preserving allowed overrides an
   assert.equal(captured[0].GIT_CONFIG_COUNT, "1");
   assert.equal(captured[0].GIT_CONFIG_KEY_0, "core.hooksPath");
   assert.equal(captured[0].GIT_CONFIG_VALUE_0, "/dev/null");
-  assert.equal(captured[0].GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(captured[0].GIT_CONFIG_NOSYSTEM, undefined);
   assert.equal(captured[0].GIT_PAGER, "cat");
   assert.equal(captured[0].HOME, process.env.HOME);
   assert.equal(captured[0].PATH, process.env.PATH);
   assert.equal(captured[0].LC_ALL, "C");
   assert.equal(captured[1].GIT_CONFIG_COUNT, "1");
+});
+
+test("runFile preserves ENOENT spawn evidence for lifecycle policy", async (t) => {
+  _setExecFileRunner((file, _args, _options, callback) => {
+    const error = new Error(`spawn ${file} ENOENT`);
+    error.code = "ENOENT";
+    error.path = file;
+    callback(error, "", "");
+  });
+  t.after(() => _setExecFileRunner());
+
+  await assert.rejects(
+    runFile("/missing/pinned-node", ["status"]),
+    (error) =>
+      error.code === "ENOENT" &&
+      error.path === "/missing/pinned-node" &&
+      error.cause?.code === "ENOENT",
+  );
 });
 
 test("runFile sanitizes the default tracker child environment", async (t) => {

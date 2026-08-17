@@ -27,6 +27,7 @@ export function poisonAgent(id) {
     resolveModel: refuse,
     validate: refuse,
     preLaunchChecks: refuse,
+    executionEnv: refuse,
     executionProfile: refuse,
     start: refuse,
     launch: refuse,

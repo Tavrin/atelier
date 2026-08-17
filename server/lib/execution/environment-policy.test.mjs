@@ -96,33 +96,62 @@ test("trusted parent PATH resolves a provider stub and survives provider, editor
   assert.equal(stdout.trim(), "resolved");
 });
 
-test("git posture pins cannot be undone by caller env", () => {
+test("secret-shaped git policy names are exempt only inside the git posture merge", () => {
+  const provider = sanitizeChildEnv({
+    GIT_CONFIG_KEY_0: "core.hooksPath",
+  }, {
+    class: "provider",
+    allowDenied: ["GIT_CONFIG_KEY_0"],
+  });
+  assert.equal(provider.GIT_CONFIG_KEY_0, undefined);
+});
+
+test("git posture composes after the caller env-config channel", () => {
   const env = gitChildEnv({
     GIT_CONFIG_GLOBAL: "/hostile/global",
     GIT_CONFIG_NOSYSTEM: "0",
     GIT_PAGER: "hostile-pager",
-    GIT_CONFIG_COUNT: "0",
-    GIT_CONFIG_KEY_0: "core.hooksPath",
-    GIT_CONFIG_VALUE_0: "/hostile/hooks",
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "user.name",
+    GIT_CONFIG_VALUE_0: "Local Operator",
+    GIT_CONFIG_KEY_1: "credential.helper",
+    GIT_CONFIG_VALUE_1: "cache",
     LC_ALL: "hostile-locale",
-  }, {
-    allowDenied: [
-      "GIT_CONFIG_GLOBAL",
-      "GIT_CONFIG_NOSYSTEM",
-      "GIT_PAGER",
-      "GIT_CONFIG_COUNT",
-      "GIT_CONFIG_KEY_0",
-      "GIT_CONFIG_VALUE_0",
-    ],
   });
 
-  assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
-  assert.equal(env.GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(env.GIT_CONFIG_GLOBAL, undefined);
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, undefined);
   assert.equal(env.GIT_PAGER, "cat");
-  assert.equal(env.GIT_CONFIG_COUNT, "1");
-  assert.equal(env.GIT_CONFIG_KEY_0, "core.hooksPath");
-  assert.equal(env.GIT_CONFIG_VALUE_0, "/dev/null");
+  assert.equal(env.GIT_CONFIG_COUNT, "3");
+  assert.equal(env.GIT_CONFIG_KEY_0, "user.name");
+  assert.equal(env.GIT_CONFIG_VALUE_0, "Local Operator");
+  assert.equal(env.GIT_CONFIG_KEY_1, "credential.helper");
+  assert.equal(env.GIT_CONFIG_VALUE_1, "cache");
+  assert.equal(env.GIT_CONFIG_KEY_2, "core.hooksPath");
+  assert.equal(env.GIT_CONFIG_VALUE_2, "/dev/null");
   assert.equal(env.LC_ALL, "C");
+});
+
+test("git posture keeps the operator's trusted-local global config", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-git-global-"));
+  const previousHome = process.env.HOME;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  });
+  process.env.HOME = root;
+  await writeFile(
+    join(root, ".gitconfig"),
+    "[user]\n\tname = Trusted Operator\n\temail = operator@example.invalid\n",
+  );
+
+  const { stdout } = await execFileAsync(
+    "git",
+    ["config", "--global", "--get", "user.email"],
+    { env: gitChildEnv(), windowsHide: true },
+  );
+  assert.equal(stdout.trim(), "operator@example.invalid");
 });
 
 test("git posture neutralizes a hostile repo-local hooksPath", async (t) => {

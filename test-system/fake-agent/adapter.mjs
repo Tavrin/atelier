@@ -33,16 +33,22 @@ function fakeChildEnvironment(env) {
     LC_ALL: env.LC_ALL || "C",
   };
   for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith("ATELIER_TEST_")) childEnv[key] = value;
+    if (key === "ATELIER_FAKE_SCENARIO" || key.startsWith("ATELIER_TEST_")) {
+      childEnv[key] = value;
+    }
   }
   return childEnv;
+}
+
+function executionEnv(env) {
+  return fakeChildEnvironment(env);
 }
 
 function executionProfile({ entry, env }) {
   return createExecutionProfile({
     agentLane: entry.record.lane,
     command: FAKE_AGENT,
-    env: fakeChildEnvironment(env),
+    env,
   });
 }
 
@@ -141,7 +147,7 @@ function launch({ entry, project, worktreePath, env, spawner, callbacks }) {
   const scenario = requireTestGuard(env);
   const child = spawner(FAKE_AGENT, [scenario], {
     cwd: worktreePath,
-    env: fakeChildEnvironment(env),
+    env,
     stdio: ["pipe", "pipe", "pipe"],
   });
   consume({ entry, project, child, callbacks, accumulateUsage: false });
@@ -154,7 +160,7 @@ function resume({ entry, project, worktreePath, env, spawner, callbacks }) {
     [scenario, "--resume", entry.record.sessionId],
     {
       cwd: worktreePath,
-      env: fakeChildEnvironment(env),
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
@@ -167,8 +173,8 @@ async function stop({ entry }) {
   return { finish: false };
 }
 
-async function preLaunchChecks({ entry }) {
-  requireTestGuard(entry.env);
+async function preLaunchChecks({ env }) {
+  requireTestGuard(env);
 }
 
 export const fakeAgent = Object.freeze({
@@ -182,5 +188,6 @@ export const fakeAgent = Object.freeze({
   resume,
   stop,
   preLaunchChecks,
+  executionEnv,
   executionProfile,
 });

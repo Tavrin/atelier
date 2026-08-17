@@ -55,6 +55,7 @@ import {
   spawnTracked,
 } from "./exec.mjs";
 import {
+  EXECUTION_PROFILE_MISMATCH,
   executionProfileMismatch,
   supersedeExecutionProfile,
 } from "./execution/execution-profile.mjs";
@@ -494,7 +495,9 @@ function publicRecord(record) {
     outcome: record.outcome ?? null,
     result: record.result ?? null,
     attestation: record.attestation ?? null,
-    executionProfile: record.executionProfile ?? null,
+    executionProfile: record.executionProfile
+      ? structuredClone(record.executionProfile)
+      : null,
     verify: record.verify ?? null,
     postMerge: record.postMerge ?? null,
     review: reviewState(record),
@@ -3787,9 +3790,16 @@ export function createDispatcher({
         Boolean(project);
       const codexAgentForReattach = codexReattachable ? getAgent("codex") : undefined;
       let reattachProfileMismatch;
+      let reattachProfile;
+      let reattachEnv;
       if (codexReattachable && typeof codexAgentForReattach.reattach === "function") {
-        ensureEntryEnv(entry, project, { refresh: true });
-        reattachProfileMismatch = reconcileExecutionProfile(entry, codexAgentForReattach);
+        reattachEnv = resolvedEntryEnv(project, codexAgentForReattach);
+        reattachProfile = reconcileExecutionProfile(
+          entry,
+          codexAgentForReattach,
+          reattachEnv,
+        );
+        reattachProfileMismatch = reattachProfile.mismatch;
         if (reattachProfileMismatch) {
           addWarningOnce(entry.record, reattachProfileMismatch);
           persist(entry);
@@ -3800,6 +3810,8 @@ export function createDispatcher({
         typeof codexAgentForReattach.reattach === "function" &&
         !reattachProfileMismatch
       ) {
+        entry.env = reattachEnv;
+        applyExecutionProfile(entry, reattachProfile);
         entry.inert = false;
         entry.finished = false;
         entry.result = undefined;
@@ -4961,7 +4973,23 @@ export function createDispatcher({
     if (shuttingDown) {
       throw new Error("server shutdown interrupted queued post-merge verification");
     }
-    ensureEntryEnv(entry, project);
+    const agent = getAgent(entry.record.lane);
+    const postMergeEnv = resolvedEntryEnv(project, agent);
+    const postMergeProfile = agent.executionProfile({
+      entry,
+      env: postMergeEnv,
+      resolveCurrent: true,
+    });
+    const postMergeMismatch = entry.record.executionProfile
+      ? executionProfileMismatch(entry.record.executionProfile, postMergeProfile)
+      : `${EXECUTION_PROFILE_MISMATCH}executionProfile is unavailable`;
+    if (postMergeMismatch) {
+      addWarningOnce(
+        entry.record,
+        `post-merge verification environment diverged: ${postMergeMismatch}`,
+      );
+    }
+    entry.env = postMergeEnv;
     postMergeFileOps.mkdirSync(verifyRoot, { recursive: true });
     entry.record.postMerge = {
       ...entry.record.postMerge,
@@ -5618,36 +5646,34 @@ export function createDispatcher({
         unattendedQueue: entry.record.queueLaunched === true,
       });
       const prompt = opts.planFirst ? `${PLAN_PROMPT_PREFIX}${taskPrompt}` : taskPrompt;
-      const profile = project.dispatchProfile || {};
-      const resolvedDispatchEnv = {
-        ...(registry.defaults?.dispatchProfile?.dispatchEnv || {}),
-        ...(profile.dispatchEnv || {}),
-        ...(project.dispatchEnv || {}),
-      };
-      entry.env = envHygiene({
-        ...envHygiene(process.env),
-        ...resolvedDispatchEnv,
-        ATELIER_PRIMARY_CHECKOUT: project.path,
-        ATELIER_TRACKER_PATH: trackerDirectory(project),
+      const spawnEnv = resolvedEntryEnv(project, agent);
+      await agent.preLaunchChecks({
+        entry,
+        project,
+        worktreePath,
+        env: spawnEnv,
+        commandRunner,
       });
-      await agent.preLaunchChecks({ entry, project, worktreePath, commandRunner });
       if (entry.record.state !== "preparing") {
         await abandonPreparation(entry, project);
         return;
       }
-      const executionProfile = agent.executionProfile({ entry, env: entry.env });
-      requireResolvedExecutionProfile(executionProfile);
-      if (entry.record.executionProfile) {
-        throw new Error("Execution profile already exists before first spawn");
-      }
-      entry.record.executionProfile = executionProfile;
-      persist(entry);
       entry.allowedTools = entry.record.readOnly
         ? []
         : opts.planFirst ? [...PLAN_READ_ONLY_TOOLS] : undefined;
       entry.disallowedTools = entry.record.readOnly
         ? [...REVIEW_DENIED_TOOLS]
         : opts.planFirst ? [...PLAN_DENIED_TOOLS] : undefined;
+      const executionProfile = agent.executionProfile({ entry, env: spawnEnv });
+      requireResolvedExecutionProfile(executionProfile);
+      if (entry.record.executionProfile) {
+        throw new Error("Execution profile already exists before first spawn");
+      }
+      // The profile and durable env are committed only after every preparation
+      // gate has passed, immediately before this exact object reaches launch.
+      entry.env = spawnEnv;
+      entry.record.executionProfile = executionProfile;
+      persist(entry);
       agent.launch({
         entry,
         project,
@@ -5689,31 +5715,20 @@ export function createDispatcher({
     }
   }
 
-  function resolvedEntryEnv(project) {
+  function resolvedEntryEnv(project, agent) {
     const profile = project.dispatchProfile || {};
     const resolvedDispatchEnv = {
       ...(registry.defaults?.dispatchProfile?.dispatchEnv || {}),
       ...(profile.dispatchEnv || {}),
       ...(project.dispatchEnv || {}),
     };
-    return envHygiene({
+    const base = envHygiene({
       ...envHygiene(process.env),
       ...resolvedDispatchEnv,
       ATELIER_PRIMARY_CHECKOUT: project.path,
       ATELIER_TRACKER_PATH: trackerDirectory(project),
     });
-  }
-
-  function ensureEntryEnv(entry, project, { refresh = false } = {}) {
-    // Boot-revived entries (inert history) have no live env - rebuild the
-    // hygienic one so resumed/approved runs never inherit the raw process
-    // env (secret-shaped keys, unscoped vars).
-    if (entry.env && !refresh) return;
-    entry.env = resolvedEntryEnv(project);
-    if (entry.record.readOnly) {
-      entry.allowedTools = [];
-      entry.disallowedTools = [...REVIEW_DENIED_TOOLS];
-    }
+    return agent.executionEnv(base);
   }
 
   function addWarningOnce(record, warning) {
@@ -5746,30 +5761,44 @@ export function createDispatcher({
     persist(entry);
   }
 
-  function reconcileExecutionProfile(entry, agent, { accept = false, actor } = {}) {
+  function reconcileExecutionProfile(entry, agent, env, { accept = false } = {}) {
     const current = agent.executionProfile({
       entry,
-      env: entry.env,
+      env,
       resolveCurrent: true,
     });
     const recorded = entry.record.executionProfile;
     if (!recorded) {
-      legacyExecutionProfile(entry, current);
-      return null;
+      return { current, mismatch: null, stamp: "legacy" };
     }
     const mismatch = executionProfileMismatch(recorded, current);
-    if (!mismatch || !accept) return mismatch;
+    return {
+      current,
+      mismatch: accept ? null : mismatch,
+      stamp: mismatch && accept ? "accepted" : null,
+    };
+  }
 
+  function applyExecutionProfile(entry, reconciliation, { actor } = {}) {
+    const { current, stamp } = reconciliation;
+    if (stamp === "legacy") {
+      legacyExecutionProfile(entry, current);
+      return;
+    }
+    if (stamp !== "accepted") return;
     requireResolvedExecutionProfile(current);
     const at = new Date().toISOString();
-    entry.record.executionProfile = supersedeExecutionProfile(recorded, current, {
-      at,
-      reason: "operator accepted",
-      actor: actionActor(actor),
-    });
+    entry.record.executionProfile = supersedeExecutionProfile(
+      entry.record.executionProfile,
+      current,
+      {
+        at,
+        reason: "operator accepted",
+        actor: actionActor(actor),
+      },
+    );
     if (current.companionPath) entry.companionPath = current.companionPath;
     persist(entry);
-    return null;
   }
 
   async function claimTicket(project, ticketId) {
@@ -7432,7 +7461,10 @@ ${diff}`;
   // a suite can run for the full stage timeout, and neither an HTTP client nor
   // an MCP caller should be held open for it. Progress and the verdict arrive on
   // the dispatch's event stream.
-  async function rerunVerification(id, { actor } = {}) {
+  async function rerunVerification(id, { actor, acceptExecutionProfile } = {}) {
+    if (acceptExecutionProfile !== undefined && typeof acceptExecutionProfile !== "boolean") {
+      throw dispatcherError(400, "acceptExecutionProfile must be a boolean");
+    }
     await bootRecovery;
     mergePersistedEntries();
     if (!entries.get(id)) throw dispatcherError(404, `Unknown dispatch: ${id}`);
@@ -7529,11 +7561,18 @@ ${diff}`;
       if (active.length + bakeoffReservedSlots + inFlightAdmissions >= cap) {
         throw dispatcherError(409, `Concurrent dispatch cap exceeded (${cap})`);
       }
-      ensureEntryEnv(entry, project);
+      const agent = getAgent(record.lane);
+      const verifyEnv = resolvedEntryEnv(project, agent);
+      const profile = reconcileExecutionProfile(entry, agent, verifyEnv, {
+        accept: acceptExecutionProfile === true,
+      });
+      if (profile.mismatch) throw dispatcherError(409, profile.mismatch);
       // A persisted terminal record becomes live for the duration, so background
       // history refreshes cannot replace the object under the running attempt.
       entry.inert = false;
       entry.releaseVerifyRerun = releaseLifecycle;
+      entry.env = verifyEnv;
+      applyExecutionProfile(entry, profile, { actor });
       const settled = runVerification(entry, project, record.exitSummary, { rerun: true });
       entry.verifyRun = settled;
       admitted = true;
@@ -7660,16 +7699,19 @@ ${diff}`;
       entry.inert = false;
     }
 
-    ensureEntryEnv(entry, project, { refresh: true });
     enforceProjectBudget(project, force);
     const agent = getAgent(entry.record.lane);
-    const profileMismatch = reconcileExecutionProfile(entry, agent, {
-      accept: acceptExecutionProfile === true,
-      actor,
-    });
-    if (profileMismatch) throw dispatcherError(409, profileMismatch);
     const { state } = entry.record;
     if (state === "running") {
+      if (acceptExecutionProfile === true) {
+        throw dispatcherError(
+          400,
+          "acceptExecutionProfile applies only to resumes that spawn a new agent turn",
+        );
+      }
+      const liveCandidateEnv = resolvedEntryEnv(project, agent);
+      const liveProfile = reconcileExecutionProfile(entry, agent, liveCandidateEnv);
+      if (liveProfile.mismatch) throw dispatcherError(409, liveProfile.mismatch);
       if (!agent.capabilities.liveInput) {
         throw dispatcherError(409, `${agent.displayName} adapter does not support live input`);
       }
@@ -7766,6 +7808,15 @@ ${diff}`;
         throw error;
       }
 
+      const resumeEnv = resolvedEntryEnv(project, agent);
+      const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnv, {
+        accept: acceptExecutionProfile === true,
+      });
+      if (resumeProfile.mismatch) {
+        if (reclaimed) await releaseClaim(entry, project);
+        throw dispatcherError(409, resumeProfile.mismatch);
+      }
+
       entry.finished = false;
       entry.result = undefined;
       entry.stderrLines = [];
@@ -7814,6 +7865,10 @@ ${diff}`;
         throw dispatcherError(409, "Resume was cancelled before the agent spawned");
       }
       try {
+        // Stamp only on the admitted cold-spawn path. A live-input or refused
+        // reply never mutates either the durable env or immutable profile.
+        entry.env = resumeEnv;
+        applyExecutionProfile(entry, resumeProfile, { actor });
         await agent.resume({
           entry,
           project,
@@ -7892,11 +7947,8 @@ ${diff}`;
       (candidate) => candidate.name === entry.record.project,
     );
     if (!project) throw dispatcherError(404, `Unknown project: ${entry.record.project}`);
-    ensureEntryEnv(entry, project, { refresh: true });
     if (action === "approve") enforceProjectBudget(project, force);
     const agent = getAgent(entry.record.lane);
-    const profileMismatch = reconcileExecutionProfile(entry, agent);
-    if (profileMismatch) throw dispatcherError(409, profileMismatch);
     if (entry.record.lane !== "claude" || !agent.capabilities.canResume) {
       throw dispatcherError(409, "Plan continuation requires the resumable Claude lane");
     }
@@ -7917,7 +7969,17 @@ ${diff}`;
       // exited, but its fencing pid is still on the record until death is
       // PROVEN, and a plan continuation is just as much a spawn-for-an-existing
       // -ticket as a reply-resume is - including the claim re-verification.
-      await admitSpawn({ entry, project, action: "Plan continuation" });
+      const { claimed: reclaimed } = await admitSpawn({
+        entry,
+        project,
+        action: "Plan continuation",
+      });
+      const resumeEnv = resolvedEntryEnv(project, agent);
+      const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnv);
+      if (resumeProfile.mismatch) {
+        if (reclaimed) await releaseClaim(entry, project);
+        throw dispatcherError(409, resumeProfile.mismatch);
+      }
       const resumeText = action === "approve"
         ? `Execute the approved plan exactly:\n${entry.record.plan?.text || ""}`
         : `Revise the plan per this feedback, again WITHOUT modifying files:\n${feedback}`;
@@ -7958,6 +8020,8 @@ ${diff}`;
         throw dispatcherError(409, "Plan continuation was cancelled before the agent spawned");
       }
       try {
+        entry.env = resumeEnv;
+        applyExecutionProfile(entry, resumeProfile, { actor });
         await agent.resume({
           entry,
           project,
@@ -8068,6 +8132,10 @@ ${diff}`;
       }
       const agent = getAgent(reservedEntry.record.lane);
       const stopResult = await agent.stop({ entry: reservedEntry, commandRunner });
+      if (stopResult.warning) {
+        addWarningOnce(reservedEntry.record, stopResult.warning);
+        persist(reservedEntry);
+      }
       if (stopResult.finish) {
         // A user-initiated stop is exactly when killing an identity-matched
         // worker is authorized, so reap before finishing (round 4, item 1c). It

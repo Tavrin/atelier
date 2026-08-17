@@ -33,16 +33,20 @@ const CAPABILITIES = Object.freeze({
 function spawnOptions(worktreePath, env) {
   return {
     cwd: worktreePath,
-    env: sanitizeChildEnv(env, { class: "provider" }),
+    env,
     ...(CAPABILITIES.liveInput ? { stdio: ["pipe", "pipe", "pipe"] } : {}),
   };
+}
+
+function executionEnv(env) {
+  return sanitizeChildEnv(env, { class: "provider" });
 }
 
 function executionProfile({ entry, env }) {
   return createExecutionProfile({
     agentLane: entry.record.lane,
     command: "claude",
-    env: sanitizeChildEnv(env, { class: "provider" }),
+    env,
   });
 }
 
@@ -216,7 +220,11 @@ function launch({
     args.push("--disallowedTools", entry.disallowedTools.join(","));
   }
   if (entry.record.effort) args.push("--effort", entry.record.effort);
-  const child = spawner("claude", args, spawnOptions(worktreePath, env));
+  const child = spawner(
+    pinnedExecutable(entry, "claude"),
+    args,
+    spawnOptions(worktreePath, env),
+  );
   child.stdin.write(userMessageLine(prompt));
   consume({ entry, project, child, callbacks, accumulateUsage: false });
 }
@@ -287,5 +295,6 @@ export const claudeAgent = Object.freeze({
   resume,
   stop,
   preLaunchChecks,
+  executionEnv,
   executionProfile,
 });

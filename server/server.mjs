@@ -1569,7 +1569,8 @@ export function createServer({
           return;
         }
         if (request.method === "POST" && action === "verify") {
-          const rejected = Object.keys(postBody);
+          const rejected = Object.keys(postBody)
+            .filter((key) => key !== "acceptExecutionProfile");
           if (rejected.length > 0) {
             throw new HttpError(400, `Unknown verification fields: ${rejected.join(", ")}`);
           }
@@ -1582,7 +1583,11 @@ export function createServer({
             jsonResponse(
               response,
               202,
-              await dispatcher.rerunVerification(id, dispatchActionContext(request)),
+              await dispatcher.rerunVerification(id, dispatchActionContext(request, {
+                ...(postBody.acceptExecutionProfile !== undefined
+                  ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
+                  : {}),
+              })),
             );
           } catch (error) {
             throw dispatchHttpError(error);

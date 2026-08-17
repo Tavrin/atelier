@@ -11,6 +11,7 @@ const METHODS = [
   "resume",
   "stop",
   "preLaunchChecks",
+  "executionEnv",
   "executionProfile",
 ];
 const CAPABILITIES = [

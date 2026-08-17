@@ -7,8 +7,8 @@ export const EXECUTION_PROFILE_MISMATCH = "EATELIER_EXECUTION_PROFILE_MISMATCH: 
 export const GIT_POSTURE = Object.freeze({
   hooks: "disabled",
   pager: "disabled",
-  globalConfig: "ignored",
-  systemConfig: "ignored",
+  globalConfig: "trusted-local",
+  systemConfig: "trusted-local",
 });
 
 function sha256(value) {
@@ -42,7 +42,10 @@ export function resolveExecutable(command, env = {}) {
       .filter(Boolean)
     : [""];
   const hasExtension = process.platform === "win32" && /\.[^\\/]+$/.test(value);
-  for (const directory of String(env.PATH || "").split(delimiter).filter(Boolean)) {
+  for (const directory of String(env.PATH || "").split(delimiter)) {
+    // Relative and empty PATH components are cwd-relative executable lookups.
+    // A worktree must never influence what the daemon records as trusted.
+    if (!directory || !isAbsolute(directory)) continue;
     for (const extension of hasExtension ? [""] : extensions) {
       const candidate = resolve(directory, `${value}${extension}`);
       if (executableFile(candidate)) return candidate;
