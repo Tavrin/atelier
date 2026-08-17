@@ -29,7 +29,10 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import { envHygiene, LONG_GIT_TIMEOUT_MS } from "./exec.mjs";
-import { sanitizeChildEnv } from "./execution/environment-policy.mjs";
+import {
+  _setGitConfigCountProbe,
+  sanitizeChildEnv,
+} from "./execution/environment-policy.mjs";
 import {
   createExecutionProfile,
   resolveExecutable,
@@ -88,6 +91,48 @@ function executionEnvDigest(env) {
     Object.keys(env).sort().map((key) => [key, env[key]]),
   );
   return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+}
+
+function controlledExecutionEnvDigest(profile, env) {
+  return executionEnvDigest(Object.fromEntries(
+    profile.envKeys.map((key) => [key, env[key]]),
+  ));
+}
+
+function profileFixture(setup, {
+  lane = "claude",
+  companionPath = null,
+  ambient = {},
+} = {}) {
+  const dispatchEnv = {
+    ...(setup.registry.defaults?.dispatchProfile?.dispatchEnv || {}),
+    ...(setup.project.dispatchProfile?.dispatchEnv || {}),
+    ...(setup.project.dispatchEnv || {}),
+    ATELIER_PRIMARY_CHECKOUT: setup.primary,
+    ATELIER_TRACKER_PATH: setup.primary,
+  };
+  const base = envHygiene({
+    ...envHygiene(process.env),
+    ...ambient,
+    ...dispatchEnv,
+  });
+  const env = sanitizeChildEnv(lane === "codex"
+    ? { ...base, CLAUDE_PLUGIN_DATA: join(stateDir(), "codex-companion") }
+    : base, {
+    class: "provider",
+    ...(lane === "codex" ? { allowDenied: ["CLAUDE_PLUGIN_DATA"] } : {}),
+  });
+  return {
+    env,
+    profile: createExecutionProfile({
+      agentLane: lane,
+      command: lane === "codex" ? "node" : "claude",
+      companionPath,
+      env,
+      controlledKeys: Object.keys(dispatchEnv),
+      hooksSupported: true,
+    }),
+  };
 }
 
 // Most dispatch fixtures use a synthetic branch rather than a real repository.
@@ -173,6 +218,7 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
     _setPostMergeHooks();
     _setProcessProbe();
     _setFencedProcessSignal();
+    _setGitConfigCountProbe();
     await rm(root, { recursive: true, force: true });
   });
   return { root, primary, state, project: configuredProject, registry };
@@ -981,8 +1027,20 @@ test("dispatch runs queued -> preparing -> running -> completed with prompt post
   assert.equal(record.executionProfile.executable.command, "claude");
   assert.equal(isAbsolute(record.executionProfile.executable.resolvedPath), true);
   assert.equal(record.executionProfile.companionPath, null);
-  assert.equal(record.executionProfile.envDigest, executionEnvDigest(launches[0].options.env));
-  assert.deepEqual(record.executionProfile.envKeys, Object.keys(launches[0].options.env).sort());
+  assert.equal(
+    record.executionProfile.envDigest,
+    controlledExecutionEnvDigest(record.executionProfile, launches[0].options.env),
+  );
+  assert.deepEqual(record.executionProfile.envKeys, [
+    "ATELIER_PRIMARY_CHECKOUT",
+    "ATELIER_TRACKER_PATH",
+  ]);
+  assert.deepEqual(
+    record.executionProfile.ambientEnvKeys,
+    Object.keys(launches[0].options.env)
+      .filter((key) => !record.executionProfile.envKeys.includes(key) && !["HOME", "PATH"].includes(key))
+      .sort(),
+  );
   assert.equal(record.executionProfile.path, launches[0].options.env.PATH);
   assert.equal(record.executionProfile.home, launches[0].options.env.HOME);
   assert.equal(record.executionProfile.envKeys.includes("ANTHROPIC_API_KEY"), false);
@@ -1201,6 +1259,41 @@ test("plan-first runs read-only, supports revision, then approves with full tool
   );
 });
 
+test("plan approval exposes execution-profile acceptance before its spawn", async (t) => {
+  const setup = await fixture(t, { dispatchEnv: { PLAN_PROFILE_FLAG: "before" } });
+  stubPreparation();
+  let launches = 0;
+  _setSpawner(() => {
+    launches += 1;
+    return claudeResultChild({ summary: launches === 1 ? "1. Implement it." : "done" });
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({
+    project: "fixture",
+    prompt: "plan profile acceptance",
+    planFirst: true,
+  });
+  await waitForState(dispatcher, id, ["plan_ready"]);
+  setup.project.dispatchEnv = { PLAN_PROFILE_FLAG: "after" };
+
+  await assert.rejects(
+    dispatcher.plan(id, { action: "approve" }),
+    (error) => error.status === 409 &&
+      error.message.includes("PLAN_PROFILE_FLAG") &&
+      error.message.includes("--accept-execution-profile"),
+  );
+  assert.equal(launches, 1);
+  const accepted = await dispatcher.plan(id, {
+    action: "approve",
+    acceptExecutionProfile: true,
+    actor: "human",
+  });
+  assert.equal(accepted.state, "running");
+  assert.equal(accepted.executionProfile.superseded.length, 1);
+  assert.equal(launches, 2);
+  await waitForState(dispatcher, id, ["completed"]);
+});
+
 test("boot preserves plan_ready and it does not hold the concurrent cap", async (t) => {
   const setup = await fixture(t, {}, { concurrentDispatchCap: 1 });
   const seeded = await seedDispatch(setup, {
@@ -1383,8 +1476,14 @@ test("reply resumes the captured Claude session, accumulates usage, and re-runs 
   assert.equal(claudeLaunches[1].command, first.executionProfile.executable.resolvedPath);
   assert.deepEqual(claudeLaunches[1].options.stdio, ["pipe", "pipe", "pipe"]);
   assert.deepEqual(claudeLaunches[1].options.env, claudeLaunches[0].options.env);
-  assert.equal(executionEnvDigest(claudeLaunches[0].options.env), first.executionProfile.envDigest);
-  assert.equal(executionEnvDigest(claudeLaunches[1].options.env), first.executionProfile.envDigest);
+  assert.equal(
+    controlledExecutionEnvDigest(first.executionProfile, claudeLaunches[0].options.env),
+    first.executionProfile.envDigest,
+  );
+  assert.equal(
+    controlledExecutionEnvDigest(first.executionProfile, claudeLaunches[1].options.env),
+    first.executionProfile.envDigest,
+  );
 
   const events = dispatcher.getEvents(dispatchId);
   const reply = events.find((event) => event.type === "reply");
@@ -1440,7 +1539,7 @@ test("reply refuses dispatchEnv drift and an operator acceptance re-stamps with 
   assert.equal(launches[1].command, resuming.executionProfile.executable.resolvedPath);
   assert.equal(
     resuming.executionProfile.envDigest,
-    executionEnvDigest(launches[1].options.env),
+    controlledExecutionEnvDigest(resuming.executionProfile, launches[1].options.env),
   );
   assert.equal(resuming.executionProfile.superseded.length, 1);
   assert.deepEqual(
@@ -1457,6 +1556,75 @@ test("reply refuses dispatchEnv drift and an operator acceptance re-stamps with 
     false,
   );
   await waitForState(dispatcher, id, ["completed"]);
+});
+
+test("live input proceeds on controlled profile drift and persists a warning without spawning", async (t) => {
+  const setup = await fixture(t, { dispatchEnv: { LIVE_PROFILE_FLAG: "before" } });
+  stubPreparation();
+  const child = heldChild();
+  let launches = 0;
+  _setSpawner(() => {
+    launches += 1;
+    return child;
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "live profile" });
+  await waitForState(dispatcher, id, ["running"]);
+
+  setup.project.dispatchEnv = { LIVE_PROFILE_FLAG: "after" };
+  const replied = await dispatcher.reply(id, { text: "steer the live turn" });
+  assert.equal(replied.state, "running");
+  assert.equal(launches, 1);
+  assert.ok(replied.warnings.some((warning) =>
+    warning.startsWith("live-input reply proceeded without spawning despite ") &&
+    warning.includes("LIVE_PROFILE_FLAG")));
+  assert.match(child.stdin.read().toString(), /steer the live turn/);
+  child.complete();
+  await waitForState(dispatcher, id, ["completed"]);
+});
+
+test("a revived read-only review resume restores the provider tool clamp", async (t) => {
+  const setup = await fixture(t, { tracker: "none" });
+  const { profile } = profileFixture(setup);
+  const seeded = await seedDispatch(setup, {
+    id: "read-only-review-resume",
+    ticketId: null,
+    readOnly: true,
+    reviewOf: "target-dispatch",
+    sessionId: "review-session",
+    executionProfile: profile,
+  });
+  await mkdir(seeded.worktreePath, { recursive: true });
+  const launches = [];
+  _setSpawner((command, args, options) => {
+    launches.push({ command, args, options });
+    return successfulChild();
+  });
+
+  const successor = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await successor.reply(seeded.id, { text: "continue the audit" });
+  assert.equal(launches.length, 1);
+  assert.ok(launches[0].args.includes("--safe-mode"));
+  assert.equal(launches[0].args[launches[0].args.indexOf("--tools") + 1], "");
+  const denied = launches[0].args[launches[0].args.indexOf("--disallowedTools") + 1];
+  assert.match(denied, /Write/);
+  await waitForState(successor, seeded.id, ["completed"]);
+});
+
+test("unsupported Git env-config support is persisted honestly and warned once", async (t) => {
+  const setup = await fixture(t);
+  _setGitConfigCountProbe(() => ({ status: 1, stdout: "", stderr: "unsupported" }));
+  stubPreparation();
+  _setSpawner(() => successfulChild());
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "old git" });
+  const completed = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(completed.executionProfile.gitPosture.hooks, "unsupported");
+  assert.equal(
+    completed.warnings.filter((warning) => warning.includes("does not support GIT_CONFIG_COUNT")).length,
+    1,
+  );
 });
 
 test("reply refuses when the recorded provider executable no longer resolves", async (t) => {
@@ -2595,7 +2763,9 @@ test("dispatchEnv merges project over defaults, stays hygienic, and reaches veri
     assert.equal(launch.options.env.ANTHROPIC_API_KEY, undefined);
     assert.equal(launch.options.env.ATELIER_PRIMARY_CHECKOUT, setup.primary);
   }
-  assert.equal(launches[0].options.env, launches[1].options.env);
+  assert.notEqual(launches[0].options.env, launches[1].options.env);
+  assert.equal(launches[0].options.env.CLAUDE_PLUGIN_DATA, undefined);
+  assert.equal(launches[1].options.env.CLAUDE_PLUGIN_DATA, process.env.CLAUDE_PLUGIN_DATA);
 });
 
 test("project defaultAgent beats the defaults lane and Codex tolerates a read-only git dir", async (t) => {
@@ -2764,6 +2934,9 @@ test("Codex stop keeps its fence when the pinned cancel executable cannot spawn"
 
   assert.equal(stopped.state, "stopping");
   assert.equal(worker.child.exitCode, null);
+  assert.ok(stopped.warnings.some((warning) =>
+    warning.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ") &&
+    warning.includes("executable.resolvedPath")));
   assert.equal(rawRecord(setup, id).codexWorkerPid, worker.child.pid);
   assert.ok(rawRecord(setup, id).warnings.some((warning) =>
     warning.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ") &&
@@ -2813,6 +2986,75 @@ test("Codex status ENOENT exhausts its retry budget and persists a profile failu
     warning.includes("executable.resolvedPath")));
   assert.ok(rawRecord(setup, id).warnings.some((warning) =>
     warning.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ")));
+});
+
+test("Codex provider identity stays profiled while verification uses workload env without plugin data", async (t) => {
+  const setup = await fixture(t, {
+    tracker: "none",
+    verifyCommands: ["verify-tool"],
+    dispatchEnv: { PROFILED_FLAG: "controlled" },
+  });
+  const companionPath = join(setup.root, "codex-companion.mjs");
+  await writeFile(companionPath, "// fixture companion\n");
+  _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
+  _setCompanionResolver(() => companionPath);
+  _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
+  const providerLaunches = [];
+  const verifyLaunches = [];
+  _setSpawner((command, args, options) => {
+    if (args[1] === "task") {
+      providerLaunches.push({ command, args, options });
+      return codexLaunchChild("codex-profiled-verify");
+    }
+    verifyLaunches.push({ command, args, options });
+    return verifyChild();
+  });
+  _setRunFile(async (file, args) => {
+    if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
+    if (file === "git" && args[2] === "worktree" && args[3] === "add") {
+      const path = args[4] === "--detach" ? args[5] : args[6];
+      await mkdir(path, { recursive: true });
+      return "";
+    }
+    if (file === "git" && args[2] === "worktree" && args[3] === "remove") {
+      await rm(args[4], { recursive: true, force: true });
+      return "";
+    }
+    if (file === "git" && args[2] === "rev-parse") {
+      if (args[3] === "--git-dir") return ".atelier-git\n";
+      return `${args[3] === "HEAD^{tree}" ? FIXTURE_RESULT_TREE : FIXTURE_BASE_COMMIT}\n`;
+    }
+    if (file === "git" && ["status", "log"].includes(args[2])) return "";
+    if (file === "git" && args[2] === "rev-list") return "0\n";
+    if (isCommand(file, "node") && args[1] === "status") {
+      return JSON.stringify({ job: { status: "completed", summary: "done", threadId: "thread" } });
+    }
+    if (isCommand(file, "node") && args[1] === "result") {
+      return JSON.stringify({ storedJob: { result: { rawOutput: "done" } } });
+    }
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({
+    project: "fixture",
+    prompt: "profile provider, verify workload",
+    lane: "codex",
+  });
+  const completed = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(completed.verify.state, "passed");
+  assert.equal(providerLaunches.length, 1);
+  assert.equal(verifyLaunches.length, 1);
+  assert.equal(
+    providerLaunches[0].options.env.CLAUDE_PLUGIN_DATA,
+    join(stateDir(), "codex-companion"),
+  );
+  assert.equal(verifyLaunches[0].options.env.CLAUDE_PLUGIN_DATA, undefined);
+  assert.notEqual(providerLaunches[0].options.env, verifyLaunches[0].options.env);
+  assert.equal(
+    controlledExecutionEnvDigest(completed.executionProfile, providerLaunches[0].options.env),
+    completed.executionProfile.envDigest,
+  );
 });
 
 test("completed Codex reply resumes its captured companion thread with user text", async (t) => {
@@ -3502,6 +3744,49 @@ test("merge fast-forwards the captured validated SHA with the exact argv cleanup
   assert.ok(
     dispatcher.getEvents(seeded.id).some((event) => event.detail === "merged abcdef1"),
   );
+});
+
+test("legacy post-merge verification stamps legacy evidence without a fabricated mismatch", async (t) => {
+  const setup = await fixture(t, { verifyCommands: ["verify-tool"] });
+  const seeded = await seedDispatch(setup, { executionProfile: null });
+  const mergeCommit = "abcdef1234567890abcdef1234567890abcdef12";
+  const verifyEnvs = [];
+  _setSpawner((command, args, options) => {
+    verifyEnvs.push(options.env);
+    return verifyChild();
+  });
+  _setRunFile(async (file, args) => {
+    assert.equal(file, "git");
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "validated-head\n";
+    if (args[2] === "rev-parse" && ["main", "HEAD"].includes(args[3])) {
+      return `${mergeCommit}\n`;
+    }
+    if (args[2] === "merge-base") return "validated-head\n";
+    if (args[2] === "worktree" && args[3] === "add") {
+      await mkdir(args[5], { recursive: true });
+      return "";
+    }
+    if (args[2] === "worktree" && args[3] === "remove") {
+      await rm(args[4], { recursive: true, force: true });
+      return "";
+    }
+    return "";
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await dispatcher.merge(seeded.id);
+  await waitForConditionOverTime(
+    () => ["passed", "failed"].includes(dispatcher.get(seeded.id).postMerge?.state),
+    "legacy post-merge verification did not settle",
+  );
+  const completed = dispatcher.get(seeded.id);
+  assert.equal(completed.postMerge.state, "passed");
+  assert.equal(completed.executionProfile.legacy, true);
+  assert.equal(completed.executionProfile.state, "legacy_profile_unproven");
+  assert.equal(verifyEnvs.length, 1);
+  assert.equal(completed.warnings.some((warning) =>
+    warning.includes("executionProfile is unavailable") ||
+    warning.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ")), false);
 });
 
 test("branch cleanup preserves a dispatch branch that advanced after merge", async (t) => {
@@ -10364,13 +10649,88 @@ test("boot recovery reattaches a still-running codex job instead of failing it (
   assert.match(persisted.codexWorkerPidIdentity, /^linux-proc-start:/);
 });
 
+test("boot reattach tolerates changed ambient daemon variables and persists a named warning", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("codex reattach liveness uses Linux /proc identity");
+    return;
+  }
+  const setup = await fixture(t, { tracker: "none" });
+  const previousInvocationId = process.env.INVOCATION_ID;
+  process.env.INVOCATION_ID = "atelier-before-restart";
+  t.after(() => {
+    if (previousInvocationId === undefined) delete process.env.INVOCATION_ID;
+    else process.env.INVOCATION_ID = previousInvocationId;
+  });
+  const companionPath = join(setup.root, "codex-companion-current.mjs");
+  await writeFile(companionPath, "// fixture companion\n");
+  const worktreePath = join(setup.state, "worktrees", "fixture", "ambient-reattach");
+  await mkdir(worktreePath, { recursive: true });
+  const { profile } = profileFixture(setup, { lane: "codex", companionPath });
+  const record = {
+    id: "boot-codex-ambient-change",
+    project: "fixture",
+    ticketId: null,
+    model: "codex-default",
+    effort: null,
+    lane: "codex",
+    state: "running",
+    branch: "atelier/ambient-reattach",
+    worktreePath,
+    codexJobId: "codex-job-ambient",
+    codexWorkspace: worktreePath,
+    codexWorkerPid: process.pid,
+    codexWorkerPidIdentity: processStartIdentity(process.pid),
+    startedAt: "2026-08-17T08:00:00.000Z",
+    endedAt: null,
+    turns: 0,
+    costUSD: 0,
+    sessionId: "codex-thread-ambient",
+    exitSummary: "",
+    strandedBrWrites: false,
+    verify: null,
+    merged: null,
+    dismissed: null,
+    executionProfile: profile,
+    warnings: [],
+  };
+  await mkdir(join(setup.state, "dispatches"), { recursive: true });
+  await writeFile(
+    join(setup.state, "dispatches", "index.jsonl"),
+    `${JSON.stringify(record)}\n`,
+  );
+  process.env.INVOCATION_ID = "atelier-after-restart";
+  _setCompanionResolver(() => companionPath);
+  const statusCalls = [];
+  _setRunFile(async (file, args) => {
+    if (isCommand(file, "node") && args[1] === "status") {
+      statusCalls.push(args[2]);
+      return JSON.stringify({ status: "running", job: { status: "running", pid: process.pid } });
+    }
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await waitForCondition(
+    () => statusCalls.includes("codex-job-ambient"),
+    "ambient-only drift blocked codex reattach",
+  );
+  const reattached = dispatcher.get(record.id);
+  assert.equal(reattached.state, "running");
+  assert.equal(reattached.executionProfileRefusal, null);
+  assert.ok(reattached.warnings.some((warning) =>
+    warning.startsWith("execution profile ambient environment diverged") &&
+    warning.includes("INVOCATION_ID")));
+});
+
 test("boot refuses codex reattach when companion resolution changed", async (t) => {
   const setup = await fixture(t, { tracker: "none" });
   const dispatchDir = join(setup.state, "dispatches");
   await mkdir(dispatchDir, { recursive: true });
   const worktreePath = join(setup.state, "worktrees", "fixture", "profile-mismatch");
-  const oldCompanion = "/fixture/codex-companion-old.mjs";
-  const newCompanion = "/fixture/codex-companion-new.mjs";
+  const oldCompanion = join(setup.root, "codex-companion-old.mjs");
+  const newCompanion = join(setup.root, "codex-companion-new.mjs");
+  await writeFile(newCompanion, "// newer fixture companion\n");
+  await mkdir(worktreePath, { recursive: true });
   const rawEnv = envHygiene({
     ...envHygiene(process.env),
     ATELIER_PRIMARY_CHECKOUT: setup.primary,
@@ -10437,6 +10797,24 @@ test("boot refuses codex reattach when companion resolution changed", async (t) 
     warning.includes(newCompanion)));
   assert.ok(rawRecord(setup, record.id).warnings.some((warning) =>
     warning.startsWith("EATELIER_EXECUTION_PROFILE_MISMATCH: ")));
+
+  const launches = [];
+  _setSpawner((command, args, options) => {
+    launches.push({ command, args, options });
+    return codexLaunchChild("codex-job-after-profile-acceptance");
+  });
+  const resumed = await dispatcher.reply(record.id, {
+    text: "resume with the updated companion",
+    acceptExecutionProfile: true,
+    actor: "human",
+  });
+  assert.equal(resumed.state, "resuming");
+  assert.equal(resumed.executionProfile.companionPath, newCompanion);
+  assert.equal(resumed.executionProfile.superseded.length, 1);
+  assert.equal(resumed.executionProfile.superseded[0].companionPath, oldCompanion);
+  assert.equal(resumed.executionProfileRefusal, null);
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].args[0], newCompanion);
 });
 
 test("boot recovery honors a codex job that completed during downtime through the normal finish pipeline", async (t) => {
@@ -18628,6 +19006,39 @@ test("verification re-run reconciles profiles in memory and after boot, with exp
   const passed = await waitForState(successor, id, ["completed"]);
   assert.equal(passed.verify.state, "passed");
   assert.equal(verifyRuns, 2);
+});
+
+test("verification re-run compares controlled env only and ignores an unavailable Codex companion", async (t) => {
+  const setup = await fixture(t, {
+    tracker: "none",
+    verifyCommands: ["verify-tool"],
+    dispatchEnv: { VERIFY_PROFILE_FLAG: "stable" },
+  });
+  const { profile } = profileFixture(setup, {
+    lane: "codex",
+    companionPath: join(setup.root, "removed-companion.mjs"),
+  });
+  const seeded = await seedDispatch(setup, {
+    id: "codex-rerun-without-companion",
+    ticketId: null,
+    lane: "codex",
+    model: "codex-default",
+    verify: { ...FAILED_VERIFY, steps: FAILED_VERIFY.steps.map((step) => ({ ...step })) },
+    result: null,
+    attestation: null,
+    executionProfile: profile,
+  });
+  await mkdir(seeded.worktreePath, { recursive: true });
+  _setCompanionResolver(() => null);
+  _setSpawner(() => verifyChild());
+  stubVerificationRuntime();
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const admitted = await dispatcher.rerunVerification(seeded.id);
+  assert.equal(admitted.state, "verifying");
+  const passed = await waitForState(dispatcher, seeded.id, ["completed"]);
+  assert.equal(passed.verify.state, "passed");
+  assert.equal(passed.executionProfile.companionPath, profile.companionPath);
 });
 
 // Answers only what a verification needs: its git provenance probe. Anything

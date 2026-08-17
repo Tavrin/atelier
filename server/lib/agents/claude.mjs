@@ -42,11 +42,13 @@ function executionEnv(env) {
   return sanitizeChildEnv(env, { class: "provider" });
 }
 
-function executionProfile({ entry, env }) {
+function executionProfile({ entry, env, controlledKeys, hooksSupported }) {
   return createExecutionProfile({
     agentLane: entry.record.lane,
     command: "claude",
     env,
+    controlledKeys,
+    hooksSupported,
   });
 }
 

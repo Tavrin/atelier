@@ -7,7 +7,9 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import {
+  _setGitConfigCountProbe,
   assertAllowedDispatchEnvKey,
+  gitConfigCountSupported,
   gitChildEnv,
   minimalChildPath,
   sanitizeChildEnv,
@@ -106,7 +108,7 @@ test("secret-shaped git policy names are exempt only inside the git posture merg
   assert.equal(provider.GIT_CONFIG_KEY_0, undefined);
 });
 
-test("git posture composes after the caller env-config channel", () => {
+test("git posture composes after an explicitly allowed caller env-config channel", () => {
   const env = gitChildEnv({
     GIT_CONFIG_GLOBAL: "/hostile/global",
     GIT_CONFIG_NOSYSTEM: "0",
@@ -117,6 +119,14 @@ test("git posture composes after the caller env-config channel", () => {
     GIT_CONFIG_KEY_1: "credential.helper",
     GIT_CONFIG_VALUE_1: "cache",
     LC_ALL: "hostile-locale",
+  }, {
+    allowDenied: [
+      "GIT_CONFIG_COUNT",
+      "GIT_CONFIG_KEY_0",
+      "GIT_CONFIG_VALUE_0",
+      "GIT_CONFIG_KEY_1",
+      "GIT_CONFIG_VALUE_1",
+    ],
   });
 
   assert.equal(env.GIT_CONFIG_GLOBAL, undefined);
@@ -130,6 +140,37 @@ test("git posture composes after the caller env-config channel", () => {
   assert.equal(env.GIT_CONFIG_KEY_2, "core.hooksPath");
   assert.equal(env.GIT_CONFIG_VALUE_2, "/dev/null");
   assert.equal(env.LC_ALL, "C");
+});
+
+test("git posture does not auto-allow caller env-config slots", () => {
+  const env = gitChildEnv({
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "user.name",
+    GIT_CONFIG_VALUE_0: "Unapproved Caller",
+  });
+
+  assert.equal(env.GIT_CONFIG_COUNT, "1");
+  assert.equal(env.GIT_CONFIG_KEY_0, "core.hooksPath");
+  assert.equal(env.GIT_CONFIG_VALUE_0, "/dev/null");
+  assert.equal(Object.values(env).includes("Unapproved Caller"), false);
+});
+
+test("old Git support is cached and reports hooks posture unsupported", (t) => {
+  let probes = 0;
+  _setGitConfigCountProbe(() => {
+    probes += 1;
+    return { status: 1, stdout: "", stderr: "unknown variable" };
+  });
+  t.after(() => _setGitConfigCountProbe());
+
+  assert.equal(gitConfigCountSupported(), false);
+  assert.equal(gitConfigCountSupported(), false);
+  const first = gitChildEnv();
+  const second = gitChildEnv();
+  assert.equal(probes, 1);
+  assert.equal(first.GIT_PAGER, "cat");
+  assert.equal(first.GIT_CONFIG_COUNT, undefined);
+  assert.equal(second.GIT_CONFIG_KEY_0, undefined);
 });
 
 test("git posture keeps the operator's trusted-local global config", async (t) => {

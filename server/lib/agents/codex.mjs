@@ -507,7 +507,13 @@ function executionEnv(env) {
   return companionEnv(env);
 }
 
-function executionProfile({ entry, env, resolveCurrent = false }) {
+function executionProfile({
+  entry,
+  env,
+  controlledKeys,
+  hooksSupported,
+  resolveCurrent = false,
+}) {
   const companionPath = resolveCurrent
     ? companionResolver() ?? null
     : entry.companionPath ?? companionResolver() ?? null;
@@ -516,6 +522,8 @@ function executionProfile({ entry, env, resolveCurrent = false }) {
     command: "node",
     companionPath,
     env,
+    controlledKeys,
+    hooksSupported,
   });
 }
 
@@ -525,10 +533,7 @@ function companionCommand(entry) {
 
 function profilePathWarning(entry, error, operation) {
   if (error?.code !== "ENOENT") return null;
-  const missing = error?.path === entry.companionPath
-    ? "companionPath"
-    : "executable.resolvedPath";
-  return `${EXECUTION_PROFILE_MISMATCH}${missing} could not spawn during Codex ${operation}: ${error.message}`;
+  return `${EXECUTION_PROFILE_MISMATCH}executable.resolvedPath could not spawn during Codex ${operation}: ${error.message}`;
 }
 
 function addWarningOnce(entry, warning) {

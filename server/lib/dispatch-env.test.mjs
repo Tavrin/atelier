@@ -115,6 +115,18 @@ async function seedDispatch(setup, overrides = {}) {
     exitSummary: "done",
     strandedBrWrites: false,
     verify: { state: "passed", steps: [] },
+    branchHead: "1111111111111111111111111111111111111111",
+    result: {
+      commit: "1111111111111111111111111111111111111111",
+      tree: "2222222222222222222222222222222222222222",
+      base: "1111111111111111111111111111111111111111",
+      manifest: [],
+      version: 1,
+    },
+    attestation: {
+      resultCommit: "1111111111111111111111111111111111111111",
+      resultVersion: 1,
+    },
     merged: null,
     dismissed: null,
     warnings: [],
@@ -288,8 +300,12 @@ test("post-merge verification spawns its verify commands with a hygienic env", a
   const commit = "abcdef1234567890abcdef1234567890abcdef12";
   _setRunFile(async (file, args) => {
     assert.equal(file, "git");
+    if (args[2] === "rev-parse" && args[3] === "--verify") {
+      return "1111111111111111111111111111111111111111\n";
+    }
     if (args[2] === "rev-parse" && args[3] === "main") return `${commit}\n`;
     if (args[2] === "rev-parse" && args[3] === "HEAD") return `${commit}\n`;
+    if (args[2] === "merge-base") return "1111111111111111111111111111111111111111\n";
     return "";
   });
   seedProcessEnvSecrets(t);

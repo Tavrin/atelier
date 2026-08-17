@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { delimiter, dirname } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const DENIED_EXACT = new Set([
   "PATH",
@@ -41,6 +42,8 @@ const DENIED_PREFIXES = [
 
 export const SECRET_ENV_KEY = /key|token|secret|password|credential/i;
 const TRUSTED_BASELINE_CLASSES = new Set(["git", "provider", "editor", "tracker"]);
+let gitConfigCountProbe = spawnSync;
+let cachedGitConfigCountSupport;
 
 function controlsExecution(key) {
   const normalized = String(key).toUpperCase();
@@ -100,17 +103,47 @@ export function sanitizeChildEnv(env, options = {}) {
   return sanitizedChildEnv(env, options);
 }
 
+export function gitConfigCountSupported() {
+  if (cachedGitConfigCountSupport !== undefined) return cachedGitConfigCountSupport;
+  try {
+    const probe = gitConfigCountProbe("git", [
+      "config",
+      "--get",
+      "atelier.execution-profile-probe",
+    ], {
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "atelier.execution-profile-probe",
+        GIT_CONFIG_VALUE_0: "supported",
+        GIT_PAGER: "cat",
+        LC_ALL: "C",
+      },
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    cachedGitConfigCountSupport = probe.status === 0 && String(probe.stdout).trim() === "supported";
+  } catch {
+    cachedGitConfigCountSupport = false;
+  }
+  return cachedGitConfigCountSupport;
+}
+
 export function gitChildEnv(env, { allowDenied = [] } = {}) {
+  const explicitlyAllowed = new Set(allowDenied.map((key) => String(key).toUpperCase()));
   const requestedCount = String(env?.GIT_CONFIG_COUNT ?? "");
-  const callerCount = /^\d+$/.test(requestedCount) && Number.isSafeInteger(Number(requestedCount))
+  const callerCount = explicitlyAllowed.has("GIT_CONFIG_COUNT") &&
+    /^\d+$/.test(requestedCount) && Number.isSafeInteger(Number(requestedCount))
     ? Number(requestedCount)
     : 0;
-  const postureIndex = callerCount;
+  const hooksSupported = gitConfigCountSupported();
   const posture = {
     GIT_PAGER: "cat",
-    GIT_CONFIG_COUNT: String(callerCount + 1),
-    [`GIT_CONFIG_KEY_${postureIndex}`]: "core.hooksPath",
-    [`GIT_CONFIG_VALUE_${postureIndex}`]: "/dev/null",
+    ...(hooksSupported ? {
+      GIT_CONFIG_COUNT: String(callerCount + 1),
+      [`GIT_CONFIG_KEY_${callerCount}`]: "core.hooksPath",
+      [`GIT_CONFIG_VALUE_${callerCount}`]: "/dev/null",
+    } : {}),
   };
   const callerChannelKeys = Array.from({ length: callerCount }, (_, index) => [
     `GIT_CONFIG_KEY_${index}`,
@@ -145,6 +178,13 @@ export function gitChildEnv(env, { allowDenied = [] } = {}) {
   );
   return sanitizedChildEnv(merged, {
     class: "git",
-    allowDenied: [...allowDenied, ...callerChannelKeys, ...Object.keys(posture)],
+    // Caller-owned GIT_CONFIG slots remain denied unless the caller explicitly
+    // opts each one in. Only Atelier's own posture entries are auto-allowed.
+    allowDenied: [...allowDenied, ...Object.keys(posture)],
   }, policyKeys);
+}
+
+export function _setGitConfigCountProbe(nextProbe = spawnSync) {
+  gitConfigCountProbe = nextProbe;
+  cachedGitConfigCountSupport = undefined;
 }

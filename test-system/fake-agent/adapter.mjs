@@ -44,11 +44,13 @@ function executionEnv(env) {
   return fakeChildEnvironment(env);
 }
 
-function executionProfile({ entry, env }) {
+function executionProfile({ entry, env, controlledKeys, hooksSupported }) {
   return createExecutionProfile({
     agentLane: entry.record.lane,
     command: FAKE_AGENT,
     env,
+    controlledKeys,
+    hooksSupported,
   });
 }
 

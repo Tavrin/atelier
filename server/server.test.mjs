@@ -610,7 +610,8 @@ test("MCP bearer cannot exercise server-side force authority", async (t) => {
   });
 
   assert.equal(response.status, 409);
-  assert.match(JSON.parse(response.text).error, /human break-glass policy/);
+  assert.match(JSON.parse(response.text).error, /atelier reply --accept-execution-profile/);
+  assert.match(JSON.parse(response.text).error, /web UI accept checkbox/);
   assert.deepEqual(dispatcher._merges, []);
 });
 
@@ -630,7 +631,7 @@ test("atelier reply reads the live daemon bearer from its disposable state direc
   const { stdout } = await execFileAsync(
     process.execPath,
     [join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "atelier.mjs"),
-      "reply", "dispatch-1", "continue"],
+      "reply", "dispatch-1", "continue", "--accept-execution-profile"],
     {
       cwd: join(dirname(fileURLToPath(import.meta.url)), ".."),
       env: {
@@ -643,7 +644,12 @@ test("atelier reply reads the live daemon bearer from its disposable state direc
   );
 
   assert.match(stdout, /"state":"running"/);
-  assert.deepEqual(replies, [{ id: "dispatch-1", text: "continue", actor: "cli" }]);
+  assert.deepEqual(replies, [{
+    id: "dispatch-1",
+    text: "continue",
+    acceptExecutionProfile: true,
+    actor: "cli",
+  }]);
 });
 
 test("server enforces JSON gates, body cap, API 404s and degraded tracker gate", async (t) => {
@@ -2780,16 +2786,30 @@ test("plan route delegates approve and revise actions through the resume endpoin
     body: JSON.stringify({ action: "approve", force: true }),
     contentType: "application/json",
   });
+  const acceptedApprove = await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/plan",
+    body: JSON.stringify({ action: "approve", acceptExecutionProfile: true }),
+    contentType: "application/json",
+  });
 
   assert.equal(approve.status, 200);
   assert.equal(JSON.parse(approve.text).planAction, "approve");
   assert.equal(revise.status, 200);
   assert.equal(JSON.parse(revise.text).planAction, "revise");
   assert.equal(forcedApprove.status, 200);
+  assert.equal(acceptedApprove.status, 200);
   assert.deepEqual(dispatcher._plans, [
     { id: "dispatch-1", action: "approve", text: undefined, actor: "api" },
     { id: "dispatch-1", action: "revise", text: "cover rollback", actor: "api" },
     { id: "dispatch-1", action: "approve", text: undefined, force: true, actor: "api" },
+    {
+      id: "dispatch-1",
+      action: "approve",
+      text: undefined,
+      acceptExecutionProfile: true,
+      actor: "api",
+    },
   ]);
 
   const missing = await send(port, {

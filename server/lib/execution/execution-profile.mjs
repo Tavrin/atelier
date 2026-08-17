@@ -5,7 +5,6 @@ import { delimiter, isAbsolute, resolve } from "node:path";
 export const EXECUTION_PROFILE_MISMATCH = "EATELIER_EXECUTION_PROFILE_MISMATCH: ";
 
 export const GIT_POSTURE = Object.freeze({
-  hooks: "disabled",
   pager: "disabled",
   globalConfig: "trusted-local",
   systemConfig: "trusted-local",
@@ -59,12 +58,21 @@ export function createExecutionProfile({
   command,
   companionPath = null,
   env,
+  controlledKeys = [],
+  hooksSupported = true,
   capturedAt = new Date().toISOString(),
 }) {
   const sortedEnv = sortedEnvironment(env);
-  const envKeys = Object.keys(sortedEnv);
+  const controlled = new Set(controlledKeys);
+  const envKeys = Object.keys(sortedEnv)
+    .filter((key) => controlled.has(key) && key !== "PATH" && key !== "HOME");
+  const controlledEnv = Object.fromEntries(envKeys.map((key) => [key, sortedEnv[key]]));
+  const ambientEnv = Object.fromEntries(
+    Object.entries(sortedEnv).filter(([key]) =>
+      !controlled.has(key) && key !== "PATH" && key !== "HOME"),
+  );
   const envKeyDigests = Object.fromEntries(
-    envKeys.map((key) => [key, sha256(JSON.stringify([key, sortedEnv[key]]))]),
+    envKeys.map((key) => [key, sha256(JSON.stringify([key, controlledEnv[key]]))]),
   );
   return {
     version: 1,
@@ -76,14 +84,21 @@ export function createExecutionProfile({
       resolvedPath: resolveExecutable(command, sortedEnv),
     },
     companionPath: companionPath ?? null,
-    envDigest: sha256(JSON.stringify(sortedEnv)),
+    // Only operator/project-controlled keys bind process admission. Ambient
+    // daemon state is evidence and may warn, but must not kill restart recovery.
+    envDigest: sha256(JSON.stringify(controlledEnv)),
     envKeys,
-    // Values are never persisted. Per-key digests make an env mismatch useful
-    // after restart without disclosing the value that changed.
+    // Values are never persisted. Per-key digests exist only for the controlled
+    // surface so a refusal can name the exact keys without storing their values.
     envKeyDigests,
+    ambientEnvDigest: sha256(JSON.stringify(ambientEnv)),
+    ambientEnvKeys: Object.keys(ambientEnv),
     path: sortedEnv.PATH ?? null,
     home: sortedEnv.HOME ?? null,
-    gitPosture: { ...GIT_POSTURE },
+    gitPosture: {
+      hooks: hooksSupported ? "disabled" : "unsupported",
+      ...GIT_POSTURE,
+    },
   };
 }
 
@@ -99,20 +114,39 @@ function printable(value) {
   return JSON.stringify(value ?? null);
 }
 
-export function executionProfileMismatch(recorded, current) {
+export function executionProfileMismatch(recorded, current, {
+  executable = false,
+  companionPath = false,
+} = {}) {
   const differences = [];
   if (recorded.envDigest !== current.envDigest) {
     differences.push(`envDigest (keys: ${changedEnvironmentKeys(recorded, current).join(", ")})`);
   }
-  for (const [name, before, after] of [
-    ["executable.resolvedPath", recorded.executable?.resolvedPath, current.executable?.resolvedPath],
-    ["companionPath", recorded.companionPath, current.companionPath],
+  const fields = [
     ["path", recorded.path, current.path],
     ["home", recorded.home, current.home],
-  ]) {
+    ...(executable
+      ? [["executable.resolvedPath", recorded.executable?.resolvedPath, current.executable?.resolvedPath]]
+      : []),
+    ...(companionPath
+      ? [["companionPath", recorded.companionPath, current.companionPath]]
+      : []),
+  ];
+  for (const [name, before, after] of fields) {
     if (before !== after) differences.push(`${name}: ${printable(before)} -> ${printable(after)}`);
   }
   return differences.length > 0 ? `${EXECUTION_PROFILE_MISMATCH}${differences.join("; ")}` : null;
+}
+
+export function executionProfileAmbientWarning(recorded, current) {
+  if (!recorded?.ambientEnvDigest || recorded.ambientEnvDigest === current.ambientEnvDigest) {
+    return null;
+  }
+  const keys = new Set([
+    ...(recorded.ambientEnvKeys || []),
+    ...(current.ambientEnvKeys || []),
+  ]);
+  return `execution profile ambient environment diverged (keys: ${[...keys].sort().join(", ") || "none"})`;
 }
 
 export function supersedeExecutionProfile(previous, current, { reason, actor, at }) {

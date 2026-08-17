@@ -849,7 +849,7 @@ export function createServer({
       ) {
         throw new HttpError(
           409,
-          "MCP operator overrides are forbidden; use the human break-glass policy",
+          "MCP operator overrides are forbidden; use atelier reply --accept-execution-profile or the web UI accept checkbox",
         );
       }
 
@@ -1508,6 +1508,9 @@ export function createServer({
               action: requiredString(postBody, "action"),
               text: optionalString(postBody, "text"),
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.acceptExecutionProfile !== undefined
+                ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
+                : {}),
             })));
           } catch (error) {
             throw dispatchHttpError(error);
