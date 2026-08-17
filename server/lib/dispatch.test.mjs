@@ -4801,7 +4801,7 @@ test("merge-commit validation binds result mode and object id before commit-tree
       if (args[2] === "status") return "";
       if (args[2] === "fetch") throw new Error("non-fast-forward");
       if (args[2] === "write-tree") return "candidate-tree\n";
-      if (args.includes("ls-tree")) return args[6] === "candidate-tree"
+      if (args.includes("ls-tree")) return args.includes("candidate-tree")
         ? scenario.candidate
         : scenario.result;
       return "";

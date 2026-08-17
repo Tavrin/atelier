@@ -9141,6 +9141,10 @@ ${diff}`;
         cwd,
         "ls-tree",
         "-rz",
+        // -t lists tree entries alongside their children: a deleted path
+        // resurrected as a directory is otherwise invisible to a recursive
+        // blob listing and would pass the deletion check.
+        "-t",
         "--full-tree",
         treeish,
         "--",
