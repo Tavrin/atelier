@@ -270,6 +270,10 @@ test("dashboard merge reasons mirror every result and attestation binding refusa
     ["verification attestation missing"],
   );
   assert.deepEqual(
+    mergeGateReasons({ ...base, mergeRecoveryPending: true }, {}),
+    ["merge recovery pending"],
+  );
+  assert.deepEqual(
     mergeGateReasons({
       ...base,
       attestation: { resultCommit: "other-head", resultVersion: 2 },

@@ -148,6 +148,22 @@ export function mergeGateReasons(record, project = {}) {
   if (verifyState !== "passed") reasons.push(`verification ${verifyState || "missing"}`);
 
   if (record.strandedBrWrites) reasons.push("stranded tracker writes");
+  if (record.mergeRecoveryPending) reasons.push("merge recovery pending");
+  if (!record.result?.commit) {
+    reasons.push("finalized result missing");
+  } else if (record.result.commit !== record.branchHead) {
+    reasons.push("finalized result does not match branch HEAD");
+  }
+  if (!record.attestation) {
+    reasons.push("verification attestation missing");
+  } else {
+    if (record.attestation.resultCommit !== record.branchHead) {
+      reasons.push("attested commit does not match branch HEAD");
+    }
+    if (record.attestation.resultVersion !== record.result?.version) {
+      reasons.push("attested result version does not match finalized result");
+    }
+  }
   const reviewState = served ? stateOf("review") : portReview(record);
   const reviewAssessment = assessReview(record, project, { reviewGateState: reviewState });
   const acceptedState = reviewAssessment.eligible ? "passed-with-dispositions" : reviewState;

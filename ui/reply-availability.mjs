@@ -299,6 +299,7 @@ export function mergeGateReasons(record, project) {
     reasons.push(`verification ${record.verify?.state || "missing"}`);
   }
   if (record.strandedBrWrites) reasons.push("stranded tracker writes");
+  if (record.mergeRecoveryPending) reasons.push("merge recovery pending");
   if (!record.result?.commit) {
     reasons.push("finalized result missing");
   } else if (record.result.commit !== record.branchHead) {

@@ -1758,6 +1758,11 @@ export function createDispatcher({
     return release;
   }
 
+  function reserveDispatchLifecycleIfAvailable(id, operation) {
+    if (dispatchLifecycleReservations.has(id)) return null;
+    return reserveDispatchLifecycle(id, operation);
+  }
+
   async function reserveStopLifecycle(id) {
     while (dispatchLifecycleReservations.get(id)?.operation === "reply") {
       await dispatchLifecycleReservations.get(id).released;
@@ -2357,6 +2362,7 @@ export function createDispatcher({
     delete exposed.verifyPid;
     delete exposed.verifyPidIdentity;
     delete exposed.capturedReviewResult;
+    exposed.mergeRecoveryPending = Boolean(record.mergeIntent && !record.merged);
     delete exposed.mergeIntent;
     delete exposed.mergeFollowUpDebt;
     // The post-merge verifier's pair is NESTED, so it needs a copy before the
@@ -3968,25 +3974,32 @@ export function createDispatcher({
   ]).then(async () => {
     if (observer) return;
     await Promise.all([...entries.values()].map(async (entry) => {
-      if (!entry.record.mergeIntent || entry.record.merged) return;
+      const hasPendingIntent = Boolean(entry.record.mergeIntent && !entry.record.merged);
+      const hasPendingAdvisories = Boolean(entry.record.merged) &&
+        reviewRounds(entry.record).some((round) =>
+          round.advisoryFollowUps?.some?.((followUp) => !followUp.filedAt));
+      const hasPendingDebt = Boolean(entry.record.merged) &&
+        owedMergeFollowUps(entry.record).length > 0;
+      if (!hasPendingIntent && !hasPendingAdvisories && !hasPendingDebt) return;
       const project = registry.projects.find((candidate) =>
         candidate.name === entry.record.project);
-      if (project) await reconcileMergeIntent(entry, project);
-    }));
-    await Promise.all([...entries.values()].flatMap((entry) => {
-      if (!entry.record.merged) return [];
-      const pending = reviewRounds(entry.record).some((round) =>
-        round.advisoryFollowUps?.some?.((followUp) => !followUp.filedAt));
-      if (!pending) return [];
-      const project = registry.projects.find((candidate) =>
-        candidate.name === entry.record.project);
-      return project ? [completeReviewAdvisories(entry, project)] : [];
-    }));
-    await Promise.all([...entries.values()].flatMap((entry) => {
-      if (!entry.record.merged || owedMergeFollowUps(entry.record).length === 0) return [];
-      const project = registry.projects.find((candidate) =>
-        candidate.name === entry.record.project);
-      return project ? [drainMergeFollowUpDebt(entry, project)] : [];
+      if (!project) return;
+      const releaseLifecycle = reserveDispatchLifecycleIfAvailable(entry.record.id, "merge");
+      if (!releaseLifecycle) return;
+      try {
+        if (entry.record.mergeIntent && !entry.record.merged) {
+          await reconcileMergeIntent(entry, project);
+        }
+        if (!entry.record.merged) return;
+        const pendingAdvisories = reviewRounds(entry.record).some((round) =>
+          round.advisoryFollowUps?.some?.((followUp) => !followUp.filedAt));
+        if (pendingAdvisories) await completeReviewAdvisories(entry, project);
+        if (owedMergeFollowUps(entry.record).length > 0) {
+          await drainMergeFollowUpDebt(entry, project);
+        }
+      } finally {
+        releaseLifecycle();
+      }
     }));
     await repairMissingReviewLinks();
     await retryPendingReviewParkings();
@@ -8678,14 +8691,20 @@ ${diff}`;
     }
     if (record.merged) {
       await drainMergeFollowUpDebt(entry, project);
-      persist(entry);
       return exposedRecord(record);
     }
     if (record.mergeIntent) {
-      throw dispatcherError(
-        409,
-        "merge intent is pending recovery; restart Atelier to reconcile it before retrying",
-      );
+      await reconcileMergeIntent(entry, project);
+      if (record.merged) {
+        await drainMergeFollowUpDebt(entry, project);
+        return exposedRecord(record);
+      }
+      if (record.mergeIntent) {
+        throw dispatcherError(
+          409,
+          "merge intent is pending recovery; reconciliation could not resolve it",
+        );
+      }
     }
     // Merging removes the worktree. Doing that under a worker Atelier has not
     // proven dead is how you get a half-written tree merged, or a live agent
@@ -8741,6 +8760,33 @@ ${diff}`;
       record.branchHead = branchHead;
       persist(entry);
     }
+    if (!force && !record.result?.commit) {
+      throw dispatcherError(
+        409,
+        "EATELIER_RESULT_VERIFICATION_MISMATCH: no finalized result is bound to this dispatch",
+      );
+    }
+    if (!force && record.result.commit !== branchHead) {
+      if (
+        record.attestation?.resultCommit === record.result.commit &&
+        record.attestation?.resultVersion === record.result.version
+      ) {
+        throw dispatcherError(
+          409,
+          `EATELIER_VERIFICATION_HEAD_MISMATCH: attested finalized result ${record.result.commit} does not match branch HEAD ${branchHead || "missing"}`,
+        );
+      }
+      throw dispatcherError(
+        409,
+        `EATELIER_RESULT_VERIFICATION_MISMATCH: finalized result ${record.result.commit} does not match branch HEAD ${branchHead || "missing"}`,
+      );
+    }
+    if (!force && !record.attestation) {
+      throw dispatcherError(
+        409,
+        "EATELIER_RESULT_VERIFICATION_MISMATCH: no verification attestation is bound to the finalized result",
+      );
+    }
     if (record.attestation && !force) {
       if (record.attestation.resultCommit !== branchHead) {
         throw dispatcherError(
@@ -8754,24 +8800,6 @@ ${diff}`;
           `EATELIER_VERIFICATION_HEAD_MISMATCH: attested result version ${record.attestation.resultVersion ?? "missing"} does not match current result version ${record.result?.version ?? "missing"}`,
         );
       }
-    }
-    if (!force && !record.result?.commit) {
-      throw dispatcherError(
-        409,
-        "EATELIER_RESULT_VERIFICATION_MISMATCH: no finalized result is bound to this dispatch",
-      );
-    }
-    if (!force && record.result.commit !== branchHead) {
-      throw dispatcherError(
-        409,
-        `EATELIER_RESULT_VERIFICATION_MISMATCH: finalized result ${record.result.commit} does not match branch HEAD ${branchHead || "missing"}`,
-      );
-    }
-    if (!force && !record.attestation) {
-      throw dispatcherError(
-        409,
-        "EATELIER_RESULT_VERIFICATION_MISMATCH: no verification attestation is bound to the finalized result",
-      );
     }
     if (
       project.requireReview &&
@@ -8832,6 +8860,7 @@ ${diff}`;
             await validateResultManifest(
               project.path,
               branchHead,
+              record.result.commit,
               record.result.manifest,
             );
           }
@@ -8867,15 +8896,36 @@ ${diff}`;
           const mergeMainHead = (
             await commandRunner("git", ["-C", project.path, "rev-parse", project.mainBranch])
           ).trim();
-          trackerBytesDiscarded = await mergePreservingMainTracker(
+          const mergeResult = await mergePreservingMainTracker(
             project.path,
             mergeMainHead,
             branchHead,
             mergeMessage,
-            force ? null : record.result.manifest,
+            record.result?.commit ?? branchHead,
+            record.result?.manifest,
+            { validateManifest: !force },
           );
+          trackerBytesDiscarded = mergeResult.trackerDiverged;
+          try {
+            await advanceMainRef(
+              project.path,
+              project.mainBranch,
+              mergeResult.commit,
+              mainTipBefore,
+            );
+            mainMoved = true;
+          } catch (error) {
+            await abortMerge(project.path);
+            throw error;
+          }
+          await commandRunner("git", [
+            "-C",
+            project.path,
+            "reset",
+            "--hard",
+            mergeResult.commit,
+          ]);
           strategy = "primary-merge";
-          mainMoved = true;
         } else {
           strategy = "detached-worktree";
           const mergeRoot = join(stateDir, "merge-worktrees");
@@ -8896,24 +8946,22 @@ ${diff}`;
             const mergeMainHead = (
               await commandRunner("git", ["-C", mergeWorktree, "rev-parse", "HEAD"])
             ).trim();
-            trackerBytesDiscarded = await mergePreservingMainTracker(
+            const mergeResult = await mergePreservingMainTracker(
               mergeWorktree,
               mergeMainHead,
               branchHead,
               mergeMessage,
-              force ? null : record.result.manifest,
+              record.result?.commit ?? branchHead,
+              record.result?.manifest,
+              { validateManifest: !force },
             );
-            const mergedSha = (
-              await commandRunner("git", ["-C", mergeWorktree, "rev-parse", "HEAD"])
-            ).trim();
-            await commandRunner("git", [
-              "-C",
+            trackerBytesDiscarded = mergeResult.trackerDiverged;
+            await advanceMainRef(
               project.path,
-              "branch",
-              "-f",
               project.mainBranch,
-              mergedSha,
-            ]);
+              mergeResult.commit,
+              mainTipBefore,
+            );
             mainMoved = true;
           } catch (error) {
             if (error.status) throw error;
@@ -9002,27 +9050,25 @@ ${diff}`;
         }
       }
     }
-    await commandRunner("git", ["-C", project.path, "branch", "-D", record.branch]);
+    let cleanupBranchHead = null;
+    try {
+      cleanupBranchHead = (
+        await commandRunner("git", ["-C", project.path, "rev-parse", "--verify", record.branch])
+      ).trim();
+    } catch {
+      // The branch is already absent, so there is nothing left to clean up.
+    }
+    if (cleanupBranchHead === branchHead) {
+      await commandRunner("git", ["-C", project.path, "branch", "-D", record.branch]);
+    } else if (cleanupBranchHead) {
+      const warning =
+        `branch cleanup skipped: ${record.branch} advanced from merged ${branchHead} to ${cleanupBranchHead}`;
+      if (!record.warnings.includes(warning)) record.warnings.push(warning);
+    }
     await completeReviewAdvisories(entry, project);
     await drainMergedTicketCloseDebt(entry, project);
     persist(entry);
-    emit(entry, {
-      type: "status",
-      state: "completed",
-      detail: `merged ${commit.slice(0, 7)}`,
-    });
-    logEvent("dispatch.merge", {
-      actor: actionActor(actor),
-      project: record.project,
-      dispatchId: record.id,
-      ticketId: record.ticketId ?? null,
-      commit,
-      strategy,
-      branch: record.branch ?? null,
-      reviewVerdict: record.review?.verdict ?? null,
-      forced: force === true,
-      ...(force ? forceAudit : {}),
-    });
+    emitMergedOutcome(entry, { actor });
     startOwedPostMergeVerification(entry, project);
     await advanceConvoyForMergedRecord(record);
     return exposedRecord(entry.record);
@@ -9066,15 +9112,26 @@ ${diff}`;
     );
   }
 
-  async function validateResultManifest(cwd, treeish, manifest) {
+  function validatedManifestEntries(manifest) {
     if (!Array.isArray(manifest)) {
       throw resultManifestMismatch("result manifest", "missing or malformed");
     }
-    if (manifest.length === 0) return;
-    const paths = manifest.map((entry) => entry?.path);
-    if (paths.some((path) => typeof path !== "string" || !path)) {
-      throw resultManifestMismatch("result manifest", "contains a pathless entry");
+    for (const entry of manifest) {
+      if (!entry || typeof entry.path !== "string" || !entry.path) {
+        throw resultManifestMismatch("result manifest", "contains a pathless entry");
+      }
+      const isDeletion = entry.deleted === true;
+      const isBlob = typeof entry.blobHash === "string" && Boolean(entry.blobHash);
+      const isGitlink = entry.type === "gitlink" &&
+        typeof entry.objectId === "string" && Boolean(entry.objectId);
+      if (Number(isDeletion) + Number(isBlob) + Number(isGitlink) !== 1) {
+        throw resultManifestMismatch(entry.path, "result manifest entry is malformed");
+      }
     }
+    return manifest;
+  }
+
+  async function treeEntriesForPaths(cwd, treeish, paths) {
     const treeEntries = new Map();
     for (let offset = 0; offset < paths.length; offset += 500) {
       const chunk = paths.slice(offset, offset + 500);
@@ -9091,30 +9148,113 @@ ${diff}`;
       ]));
       for (const [path, entry] of parsed) treeEntries.set(path, entry);
     }
-    for (const expected of manifest) {
-      const actual = treeEntries.get(expected.path);
-      if (expected.deleted === true) {
-        if (actual) throw resultManifestMismatch(expected.path, "expected deletion but path exists");
-        continue;
-      }
-      if (expected.type === "gitlink") {
-        if (!actual) throw resultManifestMismatch(expected.path, "expected gitlink is absent");
-        if (actual.mode !== "160000" || actual.objectId !== expected.objectId) {
+    return treeEntries;
+  }
+
+  async function validateResultManifest(
+    cwd,
+    treeish,
+    resultCommit,
+    manifest,
+    { exemptTracker = false } = {},
+  ) {
+    const entries = validatedManifestEntries(manifest);
+    const checkedEntries = exemptTracker
+      ? entries.filter((entry) => entry.tracker !== true)
+      : entries;
+    if (checkedEntries.length === 0) return;
+    const paths = checkedEntries.map((entry) => entry.path);
+    const treeEntries = await treeEntriesForPaths(cwd, treeish, paths);
+    const resultEntries = await treeEntriesForPaths(cwd, resultCommit, paths);
+    for (const manifestEntry of checkedEntries) {
+      const actual = treeEntries.get(manifestEntry.path);
+      const expected = resultEntries.get(manifestEntry.path);
+      if (manifestEntry.deleted === true) {
+        if (expected) {
           throw resultManifestMismatch(
-            expected.path,
-            `expected gitlink ${expected.objectId || "missing"}, found ${actual.objectId || "missing"}`,
+            manifestEntry.path,
+            "result manifest marks a deletion that exists in the result commit",
           );
+        }
+        if (actual) {
+          throw resultManifestMismatch(manifestEntry.path, "expected deletion but path exists");
         }
         continue;
       }
-      if (!actual) throw resultManifestMismatch(expected.path, "expected blob is absent");
-      if (!expected.blobHash || actual.mode === "160000" || actual.objectId !== expected.blobHash) {
+      if (!expected) {
+        throw resultManifestMismatch(manifestEntry.path, "path is absent from the result commit");
+      }
+      if (!actual) throw resultManifestMismatch(manifestEntry.path, "expected path is absent");
+      if (actual.mode !== expected.mode || actual.objectId !== expected.objectId) {
         throw resultManifestMismatch(
-          expected.path,
-          `expected blob ${expected.blobHash || "missing"}, found ${actual.objectId || "missing"}`,
+          manifestEntry.path,
+          `expected mode ${expected.mode} object ${expected.objectId}, found mode ${actual.mode || "missing"} object ${actual.objectId || "missing"}`,
         );
       }
     }
+  }
+
+  async function restorePrimaryAfterUnlandedIntent(project) {
+    let mergeHead = "";
+    try {
+      mergeHead = String(await commandRunner("git", [
+        "-C",
+        project.path,
+        "rev-parse",
+        "-q",
+        "--verify",
+        "MERGE_HEAD",
+      ])).trim();
+    } catch {
+      return true;
+    }
+    if (!mergeHead) return true;
+    try {
+      await commandRunner("git", ["-C", project.path, "merge", "--abort"], {
+        timeout: LONG_GIT_TIMEOUT_MS,
+      });
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function surfaceMergeRecoveryWarning(record, detail) {
+    const warning = `merge recovery pending: ${detail}`;
+    if (!record.warnings.includes(warning)) record.warnings.push(warning);
+    logPersistenceWarning(`Atelier ${warning} for ${record.id}`);
+    return warning;
+  }
+
+  function emitMergedOutcome(entry, { actor, recovered = false } = {}) {
+    const { record } = entry;
+    const { commit, strategy } = record.merged;
+    const forced = typeof record.merged.forcedBy === "string";
+    emit(entry, {
+      type: "status",
+      state: "completed",
+      detail: `merged ${commit.slice(0, 7)}`,
+      ...(recovered ? { recovered: true } : {}),
+    });
+    logEvent("dispatch.merge", {
+      actor: actionActor(actor),
+      project: record.project,
+      dispatchId: record.id,
+      ticketId: record.ticketId ?? null,
+      commit,
+      strategy,
+      branch: record.branch ?? null,
+      reviewVerdict: record.review?.verdict ?? null,
+      forced,
+      ...(forced
+        ? {
+            forcedBy: record.merged.forcedBy,
+            reason: record.merged.reason,
+            dispositionRef: record.merged.dispositionRef,
+          }
+        : {}),
+      ...(recovered ? { recovered: true } : {}),
+    });
   }
 
   async function reconcileMergeIntent(entry, project) {
@@ -9143,6 +9283,14 @@ ${diff}`;
       return;
     }
     if (commonAncestor !== intendedCommit) {
+      if (!await restorePrimaryAfterUnlandedIntent(project)) {
+        surfaceMergeRecoveryWarning(
+          record,
+          "primary checkout still has an interrupted merge that could not be aborted",
+        );
+        persist(entry);
+        return;
+      }
       delete record.mergeIntent;
       persist(entry);
       return;
@@ -9150,6 +9298,7 @@ ${diff}`;
     let commit = intendedCommit;
     let strategy = "ff";
     if (mainTip !== intendedCommit) {
+      let landingFound = false;
       try {
         const firstParentCommits = String(await commandRunner("git", [
           "-C",
@@ -9170,12 +9319,24 @@ ${diff}`;
           if (candidateBase !== intendedCommit) continue;
           commit = candidate;
           strategy = candidate === intendedCommit ? "ff" : "recovered-merge";
+          landingFound = true;
           break;
         }
       } catch (error) {
-        logPersistenceWarning(
-          `Atelier could not identify the landing commit for ${record.id}: ${error.message}; recording the intended commit`,
+        surfaceMergeRecoveryWarning(
+          record,
+          `could not identify the landing commit: ${error.message}`,
         );
+        persist(entry);
+        return;
+      }
+      if (!landingFound) {
+        surfaceMergeRecoveryWarning(
+          record,
+          `could not identify the landing commit between ${intent.mainTipBefore} and ${mainTip}`,
+        );
+        persist(entry);
+        return;
       }
     }
     const mergedAt = new Date().toISOString();
@@ -9201,6 +9362,32 @@ ${diff}`;
       record.mergeIntent = intent;
       delete record.merged;
       delete record.mergeFollowUpDebt;
+      return;
+    }
+    emitMergedOutcome(entry, { recovered: true });
+  }
+
+  async function advanceMainRef(cwd, mainBranch, newCommit, expectedOld) {
+    try {
+      await commandRunner("git", [
+        "-C",
+        cwd,
+        "update-ref",
+        `refs/heads/${mainBranch}`,
+        newCommit,
+        expectedOld,
+      ]);
+    } catch (error) {
+      const current = String(await commandRunner("git", [
+        "-C",
+        cwd,
+        "rev-parse",
+        mainBranch,
+      ]).catch(() => "unknown")).trim() || "unknown";
+      throw dispatcherError(
+        409,
+        `concurrent main advance: expected ${mainBranch} at ${expectedOld}, found ${current}; main was not moved`,
+      );
     }
   }
 
@@ -9226,7 +9413,15 @@ ${diff}`;
     }).catch(() => {});
   }
 
-  async function mergePreservingMainTracker(cwd, mainHead, branchHead, message, manifest) {
+  async function mergePreservingMainTracker(
+    cwd,
+    mainHead,
+    branchHead,
+    message,
+    resultCommit,
+    manifest,
+    { validateManifest = true } = {},
+  ) {
     const trackerDiverged = await trackerPathsDiffer(cwd, mainHead, branchHead);
     let mergeError = null;
     try {
@@ -9276,28 +9471,47 @@ ${diff}`;
       }
     }
 
-    if (manifest) {
-      try {
-        const mergedTree = (
-          await commandRunner("git", ["-C", cwd, "write-tree"])
-        ).trim();
-        await validateResultManifest(cwd, mergedTree, manifest);
-      } catch (error) {
-        await abortMerge(cwd);
-        if (error?.status) throw error;
-        throw dispatcherError(409, `merged tree validation failed: ${error.message.slice(-2_000)}`);
+    let mergedTree;
+    try {
+      mergedTree = (
+        await commandRunner("git", ["-C", cwd, "write-tree"])
+      ).trim();
+      if (validateManifest) {
+        await validateResultManifest(
+          cwd,
+          mergedTree,
+          resultCommit,
+          manifest,
+          { exemptTracker: true },
+        );
       }
+    } catch (error) {
+      await abortMerge(cwd);
+      if (error?.status) throw error;
+      throw dispatcherError(409, `merged tree validation failed: ${error.message.slice(-2_000)}`);
     }
 
+    let commit;
     try {
-      await commandRunner("git", ["-C", cwd, "commit", "-m", message], {
+      commit = String(await commandRunner("git", [
+        "-C",
+        cwd,
+        "commit-tree",
+        mergedTree,
+        "-p",
+        mainHead,
+        "-p",
+        branchHead,
+        "-m",
+        message,
+      ], {
         timeout: LONG_GIT_TIMEOUT_MS,
-      });
+      })).trim();
     } catch (error) {
       await abortMerge(cwd);
       throw dispatcherError(409, `merge commit failed: ${error.message.slice(-2_000)}`);
     }
-    return trackerDiverged;
+    return { trackerDiverged, commit, tree: mergedTree };
   }
 
   function redirectedReviewWorkCarriedBy(projectName, ticketId) {
