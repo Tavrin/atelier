@@ -519,19 +519,29 @@ function registryForStorage(registry) {
   return {
     ...registry,
     projects: registry.projects.map((project) => {
-      if (
-        !Object.hasOwn(project, PROJECT_OWN_DISPATCH_PROFILE) &&
-        !Object.hasOwn(project, PROJECT_OWN_MAX_FIX_ROUNDS)
-      ) return project;
+      const hasOwnDispatchProfile = Object.hasOwn(project, PROJECT_OWN_DISPATCH_PROFILE);
+      const hasOwnMaxFixRounds = Object.hasOwn(project, PROJECT_OWN_MAX_FIX_ROUNDS);
+      const hasTrackerNoneDerivedFlags =
+        project.tracker === "none" &&
+        ["autoCommitTracker", "autoCloseOnMerge"].some((key) => Object.hasOwn(project, key));
+      if (!hasOwnDispatchProfile && !hasOwnMaxFixRounds && !hasTrackerNoneDerivedFlags) return project;
       const stored = { ...project };
-      const ownProfile = project[PROJECT_OWN_DISPATCH_PROFILE];
-      delete stored[PROJECT_OWN_DISPATCH_PROFILE];
-      const ownMaxFixRounds = project[PROJECT_OWN_MAX_FIX_ROUNDS];
-      delete stored[PROJECT_OWN_MAX_FIX_ROUNDS];
-      if (ownProfile === undefined) delete stored.dispatchProfile;
-      else stored.dispatchProfile = ownProfile;
-      if (ownMaxFixRounds === undefined) delete stored.maxFixRounds;
-      else stored.maxFixRounds = ownMaxFixRounds;
+      if (hasOwnDispatchProfile) {
+        const ownProfile = project[PROJECT_OWN_DISPATCH_PROFILE];
+        delete stored[PROJECT_OWN_DISPATCH_PROFILE];
+        if (ownProfile === undefined) delete stored.dispatchProfile;
+        else stored.dispatchProfile = ownProfile;
+      }
+      if (hasOwnMaxFixRounds) {
+        const ownMaxFixRounds = project[PROJECT_OWN_MAX_FIX_ROUNDS];
+        delete stored[PROJECT_OWN_MAX_FIX_ROUNDS];
+        if (ownMaxFixRounds === undefined) delete stored.maxFixRounds;
+        else stored.maxFixRounds = ownMaxFixRounds;
+      }
+      if (stored.tracker === "none") {
+        delete stored.autoCommitTracker;
+        delete stored.autoCloseOnMerge;
+      }
       return stored;
     }),
   };

@@ -1729,6 +1729,29 @@ test("fresh install serves, probes, creates, and uses a project without hand-edi
   assert.equal(JSON.parse(await readFile(registryPath, "utf8")).projects.length, 1);
 });
 
+test("tracker-none onboarding persists a registry that the daemon can reload", async (t) => {
+  const { port, root, registryPath } = await serverFixture(t);
+  const candidate = await gitProject(root, "reloadable", "none");
+  const response = await send(port, {
+    method: "POST",
+    path: "/api/projects",
+    body: JSON.stringify({ ...candidate, archetype: "git-only" }),
+    contentType: "application/json",
+  });
+
+  assert.equal(response.status, 201);
+  const stored = JSON.parse(await readFile(registryPath, "utf8"));
+  const persisted = stored.projects.find((project) => project.name === candidate.name);
+  assert.equal("autoCommitTracker" in persisted, false);
+  assert.equal("autoCloseOnMerge" in persisted, false);
+
+  const reloaded = await loadRegistry(registryPath);
+  const loaded = reloaded.projects.find((project) => project.name === candidate.name);
+  assert.equal(loaded.name, candidate.name);
+  assert.equal(loaded.autoCommitTracker, false);
+  assert.equal(loaded.autoCloseOnMerge, false);
+});
+
 test("project probe validates paths and infers commands without executing them", async (t) => {
   const { port, root, atelierStateDir } = await serverFixture(t, {
     defaults: { dispatchProfile: { lane: "codex" } },
