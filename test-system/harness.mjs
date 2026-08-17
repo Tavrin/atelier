@@ -323,16 +323,6 @@ export async function createGoldenHarness(t, {
         dispatchEnv: { ATELIER_FAKE_SCENARIO: scenarioPath },
       },
     });
-    // TODO(atelier-registry-onboard-reload-mismatch-qqa): delete this product-bug
-    // shim when onboarding no longer persists tracker:none fields its reload rejects.
-    const persistedRegistryPath = join(configDir, "projects.json");
-    const persistedRegistry = JSON.parse(await readFile(persistedRegistryPath, "utf8"));
-    for (const project of persistedRegistry.projects) {
-      if (project.tracker !== "none") continue;
-      if (project.autoCommitTracker === false) delete project.autoCommitTracker;
-      if (project.autoCloseOnMerge === false) delete project.autoCloseOnMerge;
-    }
-    await writeFile(persistedRegistryPath, `${JSON.stringify(persistedRegistry, null, 2)}\n`);
   } catch (error) {
     try {
       await teardown();
