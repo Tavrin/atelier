@@ -25,5 +25,10 @@ for (const file of scenario.writes || []) {
 const receipt = isAbsolute(scenario.receiptPath)
   ? resolve(scenario.receiptPath)
   : resolve(workspace, scenario.receiptPath || ".fake-verify-receipt.json");
+const receiptWorkspace = resolve(scenario.receiptWorkspace || workspace);
+const receiptRelative = relative(receiptWorkspace, receipt);
+if (!receiptRelative || receiptRelative.startsWith("..") || isAbsolute(receiptRelative)) {
+  throw new Error("verification receipt escapes the workspace");
+}
 await mkdir(dirname(receipt), { recursive: true });
 await writeFile(receipt, `${JSON.stringify({ ran: true, exitCode: 0 })}\n`, "utf8");

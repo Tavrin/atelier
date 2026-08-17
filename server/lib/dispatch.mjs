@@ -4507,12 +4507,15 @@ export function createDispatcher({
     commit,
     worktree,
     mismatchLabel,
+    cleanupAfterAddFailure = false,
     afterAdded,
     onRemoved,
     onCleanupFailure,
   }, useCheckout) {
     let worktreeAdded = false;
+    let worktreeAddAttempted = false;
     try {
+      worktreeAddAttempted = true;
       await commandRunner("git", [
         "-C",
         project.path,
@@ -4534,7 +4537,7 @@ export function createDispatcher({
       }
       return await useCheckout({ worktree, head });
     } finally {
-      if (worktreeAdded) {
+      if (worktreeAdded || (cleanupAfterAddFailure && worktreeAddAttempted)) {
         try {
           await commandRunner("git", [
             "-C",
@@ -4588,7 +4591,7 @@ export function createDispatcher({
     if (post.tree !== result.tree) {
       changes.push(`tree changed from ${result.tree} to ${post.tree || "no tree"}`);
     }
-    return `EATELIER_VERIFICATION_MUTATED_WORKTREE: ${changes.join("; ")}`;
+    return redactText(`EATELIER_VERIFICATION_MUTATED_WORKTREE: ${changes.join("; ")}`);
   }
 
   async function runVerifyCommands(entry, commands, stageDeadline, { attempt, cwd }) {
@@ -4642,7 +4645,7 @@ export function createDispatcher({
       ? { ...entry.record.result }
       : null;
     let outcome;
-    if (!attestedResult?.commit) {
+    if (!attestedResult?.commit || !attestedResult?.tree) {
       const context = await verificationContext(entry, project);
       if (entry.record.state !== "verifying") return;
       Object.assign(entry.record.verify, context);
@@ -4661,6 +4664,7 @@ export function createDispatcher({
           commit: attestedResult.commit,
           worktree,
           mismatchLabel: "verification worktree",
+          cleanupAfterAddFailure: true,
           onCleanupFailure(error) {
             const warning = `verification worktree cleanup failed: ${error.message}`;
             if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
@@ -4694,7 +4698,20 @@ export function createDispatcher({
             { attempt, cwd: worktree },
           );
           if (commandsOutcome.interrupted) return commandsOutcome;
-          const post = await verificationSnapshot(worktree);
+          let post;
+          try {
+            post = await verificationSnapshot(worktree);
+          } catch (error) {
+            if (commandsOutcome.state === "passed") {
+              return {
+                state: "failed",
+                detail: redactText(
+                  `EATELIER_VERIFICATION_MUTATED_WORKTREE: post-command checkout probe failed: ${String(error?.message ?? error)}`,
+                ),
+              };
+            }
+            throw error;
+          }
           if (
             post.status ||
             post.head !== attestedResult.commit ||
@@ -7865,13 +7882,24 @@ ${diff}`;
           applyRecordFencing(reservedEntry, await resolveRecordFencing(reservedEntry.record));
           persist(reservedEntry);
         }
-        if (verifierWasFenced && reservedEntry.verifyRun) {
+        if (reservedEntry.verifyRun) {
+          let graceTimer;
           try {
-            await reservedEntry.verifyRun;
-          } catch (error) {
-            logPersistenceWarning(
-              `Atelier verification cleanup failed during stop for ${reservedEntry.record.id}: ${error.message}`,
-            );
+            await Promise.race([
+              reservedEntry.verifyRun.catch((error) => {
+                logPersistenceWarning(
+                  `Atelier verification cleanup failed during stop for ${reservedEntry.record.id}: ${error.message}`,
+                );
+              }),
+              new Promise((resolvePromise) => {
+                graceTimer = setTimeout(
+                  resolvePromise,
+                  Math.max(0, postMergeShutdownGraceMs),
+                );
+              }),
+            ]);
+          } finally {
+            if (graceTimer) clearTimeout(graceTimer);
           }
         }
         if (rerunInFlight) {
@@ -8062,6 +8090,7 @@ ${diff}`;
   function orphanWorktreeDirectories() {
     return [
       ...nestedWorktreeDirectories(join(stateDir, "worktrees")),
+      ...nestedWorktreeDirectories(join(stateDir, "verify-worktrees")),
       ...nestedWorktreeDirectories(join(stateDir, "post-merge-worktrees")),
       ...flatWorktreeDirectories(join(stateDir, "merge-worktrees")),
     ];
@@ -8460,6 +8489,7 @@ ${diff}`;
       const owningProject = registry.projects.find(
         (project) => [
           join(stateDir, "worktrees", project.name),
+          join(stateDir, "verify-worktrees", project.name),
           join(stateDir, "post-merge-worktrees", project.name),
         ].some((root) => resolve(root) === resolve(dirname(path))),
       );
@@ -9950,11 +9980,7 @@ ${diff}`;
         entry.finished = true;
         if (entry.pollTimer) clearTimeout(entry.pollTimer);
         entry.pollTimer = undefined;
-        if (
-          entry.record.state === "verifying" &&
-          entry.verifyRun &&
-          hasFencingPid(entry.record)
-        ) {
+        if (entry.record.state === "verifying" && entry.verifyRun) {
           verificationRuns.push(entry.verifyRun.catch((error) => {
             logPersistenceWarning(
               `Atelier verification cleanup failed during shutdown for ${entry.record.id}: ${error.message}`,

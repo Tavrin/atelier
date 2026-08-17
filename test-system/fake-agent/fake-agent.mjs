@@ -174,6 +174,7 @@ async function main() {
           // Verification runs in a disposable checkout. Keep the proof receipt
           // in the originating dispatch worktree so cleanup cannot erase it.
           receiptPath,
+          receiptWorkspace: workspace,
         })}\n`, "utf8");
         log({ type: "fake.verify-armed", path: relative(workspace, target) });
         break;
