@@ -843,10 +843,13 @@ export function createServer({
       const postBody = ["POST", "PATCH"].includes(request.method)
         ? await readJsonBody(request)
         : undefined;
-      if (
-        authContext.actor === "mcp" &&
-        (postBody?.force === true || postBody?.acceptExecutionProfile === true)
-      ) {
+      if (authContext.actor === "mcp" && postBody?.force === true) {
+        throw new HttpError(
+          409,
+          "MCP operator overrides are forbidden; use the human break-glass policy",
+        );
+      }
+      if (authContext.actor === "mcp" && postBody?.acceptExecutionProfile === true) {
         throw new HttpError(
           409,
           "MCP operator overrides are forbidden; use atelier reply --accept-execution-profile or the web UI accept checkbox",

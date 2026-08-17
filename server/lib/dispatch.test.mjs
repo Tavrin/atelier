@@ -10719,7 +10719,8 @@ test("boot reattach tolerates changed ambient daemon variables and persists a na
   assert.equal(reattached.executionProfileRefusal, null);
   assert.ok(reattached.warnings.some((warning) =>
     warning.startsWith("execution profile ambient environment diverged") &&
-    warning.includes("INVOCATION_ID")));
+    warning.includes("(keys:") &&
+    (warning.includes("INVOCATION_ID") || /\(\+\d+ more\)/.test(warning))));
 });
 
 test("boot refuses codex reattach when companion resolution changed", async (t) => {
@@ -10748,6 +10749,8 @@ test("boot refuses codex reattach when companion resolution changed", async (t) 
     command: "node",
     companionPath: oldCompanion,
     env: profileEnv,
+    controlledKeys: ["ATELIER_PRIMARY_CHECKOUT", "ATELIER_TRACKER_PATH"],
+    hooksSupported: true,
   });
   const record = {
     id: "boot-codex-profile-mismatch",
@@ -10815,6 +10818,92 @@ test("boot refuses codex reattach when companion resolution changed", async (t) 
   assert.equal(resumed.executionProfileRefusal, null);
   assert.equal(launches.length, 1);
   assert.equal(launches[0].args[0], newCompanion);
+});
+
+test("restoring the recorded Codex companion clears a boot refusal before reply", async (t) => {
+  const setup = await fixture(t, { tracker: "none" });
+  const dispatchDir = join(setup.state, "dispatches");
+  await mkdir(dispatchDir, { recursive: true });
+  const worktreePath = join(setup.state, "worktrees", "fixture", "profile-restored");
+  const oldCompanion = join(setup.root, "codex-companion-restored.mjs");
+  const newCompanion = join(setup.root, "codex-companion-updated.mjs");
+  await writeFile(newCompanion, "// updated fixture companion\n");
+  await mkdir(worktreePath, { recursive: true });
+  const rawEnv = envHygiene({
+    ...envHygiene(process.env),
+    ATELIER_PRIMARY_CHECKOUT: setup.primary,
+    ATELIER_TRACKER_PATH: setup.primary,
+  });
+  const profileEnv = sanitizeChildEnv({
+    ...rawEnv,
+    CLAUDE_PLUGIN_DATA: join(stateDir(), "codex-companion"),
+  }, {
+    class: "provider",
+    allowDenied: ["CLAUDE_PLUGIN_DATA"],
+  });
+  const executionProfile = createExecutionProfile({
+    agentLane: "codex",
+    command: "node",
+    companionPath: oldCompanion,
+    env: profileEnv,
+    controlledKeys: ["ATELIER_PRIMARY_CHECKOUT", "ATELIER_TRACKER_PATH"],
+    hooksSupported: true,
+  });
+  const record = {
+    id: "boot-codex-profile-restored",
+    project: "fixture",
+    ticketId: null,
+    model: "codex-default",
+    effort: null,
+    lane: "codex",
+    state: "running",
+    branch: "atelier/codex-profile-restored",
+    worktreePath,
+    codexJobId: "codex-job-restored",
+    codexWorkspace: worktreePath,
+    startedAt: "2026-08-17T08:00:00.000Z",
+    endedAt: null,
+    turns: 0,
+    costUSD: 0,
+    sessionId: "codex-thread-restored",
+    exitSummary: "",
+    strandedBrWrites: false,
+    verify: null,
+    merged: null,
+    dismissed: null,
+    executionProfile,
+    warnings: [],
+  };
+  await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
+  _setCompanionResolver(() => newCompanion);
+  _setRunFile(async (file, args) => {
+    if (isCommand(file, "node") && args[1] === "status") return "";
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  await waitForCondition(
+    () => dispatcher.get(record.id)?.state === "failed",
+    "profile-mismatched codex boot did not fail",
+  );
+  assert.ok(dispatcher.get(record.id).executionProfileRefusal);
+
+  await writeFile(oldCompanion, "// restored fixture companion\n");
+  _setCompanionResolver(() => oldCompanion);
+  const launches = [];
+  _setSpawner((command, args, options) => {
+    launches.push({ command, args, options });
+    return codexLaunchChild("codex-job-after-profile-restore");
+  });
+  const resumed = await dispatcher.reply(record.id, {
+    text: "resume with the restored companion",
+    actor: "human",
+  });
+  assert.equal(resumed.state, "resuming");
+  assert.equal(resumed.executionProfileRefusal, null);
+  assert.equal(rawRecord(setup, record.id).executionProfileRefusal, null);
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].args[0], oldCompanion);
 });
 
 test("boot recovery honors a codex job that completed during downtime through the normal finish pipeline", async (t) => {

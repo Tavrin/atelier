@@ -3810,7 +3810,12 @@ export function createDispatcher({
         );
         reattachProfileMismatch = reattachProfile.mismatch;
         if (reattachProfileMismatch) {
-          executionProfileRefusal(entry, reattachProfileMismatch, "codex boot reattach");
+          executionProfileRefusal(
+            entry,
+            reattachProfileMismatch,
+            "codex boot reattach",
+            { companionPath: true },
+          );
         }
       }
       if (
@@ -5821,7 +5826,7 @@ export function createDispatcher({
     });
     const recorded = entry.record.executionProfile;
     if (!recorded) {
-      return { current, mismatch: null, stamp: "legacy", requirements };
+      return { current, mismatch: null, stamp: "legacy", requirements, comparison: compare };
     }
     const ambientWarning = executionProfileAmbientWarning(recorded, current);
     if (ambientWarning) {
@@ -5830,10 +5835,20 @@ export function createDispatcher({
     }
     const mismatch = executionProfileMismatch(recorded, current, compare);
     const recordedRefusal = acceptRecordedRefusal
-      ? entry.record.executionProfileRefusal?.detail
+      ? entry.record.executionProfileRefusal
       : null;
-    const effectiveMismatch = mismatch || (!accept ? recordedRefusal : null);
-    const acceptsRecordedRefusal = accept && acceptRecordedRefusal && Boolean(recordedRefusal);
+    const recordedRefusalComparison = recordedRefusal
+      ? refusalComparison(recordedRefusal, compare)
+      : null;
+    const recordedRefusalMismatch = recordedRefusal
+      ? executionProfileMismatch(recorded, current, recordedRefusalComparison)
+      : null;
+    if (recordedRefusal && !recordedRefusalMismatch) {
+      entry.record.executionProfileRefusal = null;
+      persist(entry);
+    }
+    const effectiveMismatch = mismatch || (!accept ? recordedRefusalMismatch : null);
+    const acceptsRecordedRefusal = accept && acceptRecordedRefusal && Boolean(recordedRefusalMismatch);
     const acceptedCurrent = (mismatch && accept) || acceptsRecordedRefusal
       ? {
           ...current,
@@ -5850,6 +5865,7 @@ export function createDispatcher({
       mismatch: accept ? null : effectiveMismatch,
       stamp: (effectiveMismatch && accept) || acceptsRecordedRefusal ? "accepted" : null,
       requirements,
+      comparison: mismatch ? compare : recordedRefusalComparison || compare,
     };
   }
 
@@ -5877,7 +5893,21 @@ export function createDispatcher({
     persist(entry);
   }
 
-  function executionProfileRefusal(entry, mismatch, operation) {
+  function refusalComparison(refusal, fallback) {
+    if (refusal?.compare && typeof refusal.compare === "object") {
+      return {
+        executable: refusal.compare.executable === true,
+        companionPath: refusal.compare.companionPath === true,
+      };
+    }
+    if (refusal?.operation === "codex boot reattach") return { companionPath: true };
+    if (["reply resume", "plan continuation"].includes(refusal?.operation)) {
+      return { executable: true };
+    }
+    return fallback;
+  }
+
+  function executionProfileRefusal(entry, mismatch, operation, compare = {}) {
     const detail = mismatch.includes("operator can accept the new profile")
       ? mismatch
       : `${mismatch}; an operator can accept the new profile with ` +
@@ -5885,6 +5915,10 @@ export function createDispatcher({
     entry.record.executionProfileRefusal = {
       operation,
       detail,
+      compare: {
+        executable: compare.executable === true,
+        companionPath: compare.companionPath === true,
+      },
       at: new Date().toISOString(),
     };
     addWarningOnce(entry.record, detail);
@@ -7665,7 +7699,12 @@ ${diff}`;
         accept: acceptExecutionProfile === true,
       });
       if (profile.mismatch) {
-        throw executionProfileRefusal(entry, profile.mismatch, "verification re-run");
+        throw executionProfileRefusal(
+          entry,
+          profile.mismatch,
+          "verification re-run",
+          profile.comparison,
+        );
       }
       // A persisted terminal record becomes live for the duration, so background
       // history refreshes cannot replace the object under the running attempt.
@@ -7929,7 +7968,12 @@ ${diff}`;
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);
         if (resumeProfile.mismatch.startsWith(EXECUTION_PROFILE_MISMATCH)) {
-          throw executionProfileRefusal(entry, resumeProfile.mismatch, "reply resume");
+          throw executionProfileRefusal(
+            entry,
+            resumeProfile.mismatch,
+            "reply resume",
+            resumeProfile.comparison,
+          );
         }
         throw dispatcherError(409, resumeProfile.mismatch);
       }
@@ -8104,7 +8148,12 @@ ${diff}`;
       });
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);
-        throw executionProfileRefusal(entry, resumeProfile.mismatch, "plan continuation");
+        throw executionProfileRefusal(
+          entry,
+          resumeProfile.mismatch,
+          "plan continuation",
+          resumeProfile.comparison,
+        );
       }
       const resumeText = action === "approve"
         ? `Execute the approved plan exactly:\n${entry.record.plan?.text || ""}`

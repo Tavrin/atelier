@@ -110,6 +110,14 @@ function changedEnvironmentKeys(recorded, current) {
   return ["(unavailable from legacy digest)"];
 }
 
+const MAX_AMBIENT_WARNING_KEYS = 10;
+
+function ambientWarningKeys(keys) {
+  const sorted = [...keys].sort();
+  if (sorted.length <= MAX_AMBIENT_WARNING_KEYS) return sorted.join(", ") || "none";
+  return `${sorted.slice(0, MAX_AMBIENT_WARNING_KEYS).join(", ")} (+${sorted.length - MAX_AMBIENT_WARNING_KEYS} more)`;
+}
+
 function printable(value) {
   return JSON.stringify(value ?? null);
 }
@@ -142,11 +150,16 @@ export function executionProfileAmbientWarning(recorded, current) {
   if (!recorded?.ambientEnvDigest || recorded.ambientEnvDigest === current.ambientEnvDigest) {
     return null;
   }
-  const keys = new Set([
-    ...(recorded.ambientEnvKeys || []),
-    ...(current.ambientEnvKeys || []),
-  ]);
-  return `execution profile ambient environment diverged (keys: ${[...keys].sort().join(", ") || "none"})`;
+  const recordedKeys = new Set(recorded.ambientEnvKeys || []);
+  const currentKeys = new Set(current.ambientEnvKeys || []);
+  const added = [...currentKeys].filter((key) => !recordedKeys.has(key));
+  const removed = [...recordedKeys].filter((key) => !currentKeys.has(key));
+  if (added.length > 0 || removed.length > 0) {
+    return "execution profile ambient environment diverged " +
+      `(added keys: ${ambientWarningKeys(added)}; removed keys: ${ambientWarningKeys(removed)})`;
+  }
+  const keys = new Set([...recordedKeys, ...currentKeys]);
+  return `execution profile ambient environment diverged (keys: ${ambientWarningKeys(keys)})`;
 }
 
 export function supersedeExecutionProfile(previous, current, { reason, actor, at }) {

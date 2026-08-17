@@ -610,6 +610,23 @@ test("MCP bearer cannot exercise server-side force authority", async (t) => {
   });
 
   assert.equal(response.status, 409);
+  assert.match(JSON.parse(response.text).error, /human break-glass policy/);
+  assert.doesNotMatch(JSON.parse(response.text).error, /accept-execution-profile/);
+  assert.deepEqual(dispatcher._merges, []);
+});
+
+test("MCP bearer cannot exercise execution-profile acceptance", async (t) => {
+  const { port, dispatcher } = await serverFixture(t);
+  const response = await send(port, {
+    method: "POST",
+    path: "/api/dispatch/dispatch-1/merge",
+    body: JSON.stringify({ acceptExecutionProfile: true }),
+    contentType: "application/json",
+    credential: "mcp",
+    actor: "human",
+  });
+
+  assert.equal(response.status, 409);
   assert.match(JSON.parse(response.text).error, /atelier reply --accept-execution-profile/);
   assert.match(JSON.parse(response.text).error, /web UI accept checkbox/);
   assert.deepEqual(dispatcher._merges, []);
