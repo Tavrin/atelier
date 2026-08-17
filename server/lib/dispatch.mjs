@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   appendFileSync,
@@ -107,6 +107,7 @@ function actionActor(value) {
 
 export function invalidateResult(entry, reason) {
   const detail = String(reason || "result invalidated by new work");
+  delete entry.record.attestation;
   if (entry.record.result) {
     const version = Number.isInteger(entry.record.result.version)
       ? entry.record.result.version
@@ -488,6 +489,7 @@ function publicRecord(record) {
     // cleared this" is auditable rather than inferred from an absence.
     outcome: record.outcome ?? null,
     result: record.result ?? null,
+    attestation: record.attestation ?? null,
     verify: record.verify ?? null,
     postMerge: record.postMerge ?? null,
     review: reviewState(record),
@@ -4304,25 +4306,25 @@ export function createDispatcher({
     return UNFINISHED_OUTCOME_STATES.has(outcome.kind) ? outcome.kind : null;
   }
 
-  async function verificationContext(entry, project) {
-    if (!project.mainBranch || !entry.record.worktreePath) return {};
+  async function verificationContext(entry, project, {
+    worktreePath = entry.record.worktreePath,
+    testedCommit,
+  } = {}) {
+    if (!project.mainBranch || !worktreePath) return {};
     try {
       const [testedTree, mainTip] = await Promise.all([
-        commandRunner("git", [
-          "-C",
-          entry.record.worktreePath,
-          "rev-parse",
-          "HEAD",
-        ]),
+        testedCommit
+          ? Promise.resolve(testedCommit)
+          : commandRunner("git", ["-C", worktreePath, "rev-parse", "HEAD"]),
         commandRunner("git", ["-C", project.path, "rev-parse", project.mainBranch]),
       ]);
       if (!testedTree.trim() || !mainTip.trim()) return {};
       const commitsBehind = await commandRunner("git", [
         "-C",
-        entry.record.worktreePath,
+        worktreePath,
         "rev-list",
         "--count",
-        `HEAD..${mainTip.trim()}`,
+        `${testedTree.trim()}..${mainTip.trim()}`,
       ]);
       const behind = Number.parseInt(commitsBehind.trim(), 10);
       if (!Number.isSafeInteger(behind)) return {};
@@ -4374,6 +4376,7 @@ export function createDispatcher({
     const attempts = verifyAttemptHistory(previous);
     const attempt = attempts.length + 1;
     const previousState = previous?.state ?? null;
+    delete entry.record.attestation;
     entry.record.verify = {
       state: "running",
       steps: [],
@@ -4483,14 +4486,138 @@ export function createDispatcher({
 
   // Persist the attempt, then emit, then transition. Reached from both the pass
   // and the fail branch so the ordering cannot drift between them.
-  function finishVerification(entry, state, { rerun, attempt, previousState, exitSummary }) {
-    settleVerifyAttempt(entry, state);
+  function finishVerification(entry, state, {
+    rerun,
+    attempt,
+    previousState,
+    exitSummary,
+    detail,
+  }) {
+    settleVerifyAttempt(entry, state, { detail });
     if (rerun) {
       emitVerifyRerunEnd(entry, { attempt, previousState, verdict: state });
       delete entry.record.verify.rerun;
       releaseRerunLifecycle(entry);
     }
     transition(entry, "completed", { exitSummary });
+  }
+
+  async function withDetachedCheckout({
+    project,
+    commit,
+    worktree,
+    mismatchLabel,
+    cleanupAfterAddFailure = false,
+    afterAdded,
+    onRemoved,
+    onCleanupFailure,
+  }, useCheckout) {
+    let worktreeAdded = false;
+    let worktreeAddAttempted = false;
+    try {
+      worktreeAddAttempted = true;
+      await commandRunner("git", [
+        "-C",
+        project.path,
+        "worktree",
+        "add",
+        "--detach",
+        worktree,
+        commit,
+      ], { timeout: LONG_GIT_TIMEOUT_MS });
+      worktreeAdded = true;
+      await afterAdded?.({ worktree });
+      const head = (
+        await commandRunner("git", ["-C", worktree, "rev-parse", "HEAD"])
+      ).trim();
+      if (head !== commit) {
+        throw new Error(
+          `${mismatchLabel} resolved ${head || "no commit"}, expected ${commit}`,
+        );
+      }
+      return await useCheckout({ worktree, head });
+    } finally {
+      const cleanupNeeded = worktreeAdded || (
+        cleanupAfterAddFailure && worktreeAddAttempted && existsSync(worktree)
+      );
+      if (cleanupNeeded) {
+        try {
+          await commandRunner("git", [
+            "-C",
+            project.path,
+            "worktree",
+            "remove",
+            worktree,
+            "--force",
+          ], { timeout: LONG_GIT_TIMEOUT_MS });
+          await onRemoved?.();
+        } catch (error) {
+          // A failed add may never have registered the path with git. Its
+          // accurate failure is the add error, not a second cleanup warning.
+          if (worktreeAdded) await onCleanupFailure?.(error);
+        }
+      } else if (cleanupAfterAddFailure && worktreeAddAttempted) {
+        await onRemoved?.();
+      }
+    }
+  }
+
+  async function verificationSnapshot(worktree) {
+    const head = (
+      await commandRunner("git", ["-C", worktree, "rev-parse", "HEAD"])
+    ).trim();
+    const tree = (
+      await commandRunner("git", ["-C", worktree, "rev-parse", "HEAD^{tree}"])
+    ).trim();
+    const status = String(await commandRunner("git", [
+      "-C",
+      worktree,
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--ignored=matching",
+      "-z",
+    ]));
+    return { head, tree, status };
+  }
+
+  function verificationStatusSummary(status) {
+    const paths = String(status || "")
+      .split("\0")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    return paths.length > 0 ? paths.slice(0, 8).join(", ") : "status changed";
+  }
+
+  function verificationMutationDetail(post, result) {
+    const changes = [];
+    if (post.status) changes.push(`status: ${verificationStatusSummary(post.status)}`);
+    if (post.head !== result.commit) {
+      changes.push(`HEAD moved from ${result.commit} to ${post.head || "no commit"}`);
+    }
+    if (post.tree !== result.tree) {
+      changes.push(`tree changed from ${result.tree} to ${post.tree || "no tree"}`);
+    }
+    return redactText(`EATELIER_VERIFICATION_MUTATED_WORKTREE: ${changes.join("; ")}`);
+  }
+
+  async function runVerifyCommands(entry, commands, stageDeadline, { attempt, cwd }) {
+    for (let index = 0; index < commands.length; index += 1) {
+      if (entry.record.state !== "verifying") return { interrupted: true };
+      const result = await runVerifyStep(entry, commands[index], index, stageDeadline, {
+        cwd,
+        eventFields: { attempt },
+        // BOTH verify spawn paths are this one line: a first run reaches here
+        // from finish(), an explicit re-run from rerunVerification(), and the
+        // two are the same runner with the same single-slot fence.
+        fence: VERIFY_FENCE,
+      });
+      if (entry.record.state !== "verifying") return { interrupted: true };
+      entry.record.verify.steps.push(result);
+      persist(entry);
+      if (result.exitCode !== 0) return { state: "failed" };
+    }
+    return { state: "passed" };
   }
 
   async function runVerification(entry, project, exitSummary, { rerun = false } = {}) {
@@ -4520,31 +4647,134 @@ export function createDispatcher({
     // before: this is the first await on the path, and the re-run's capacity
     // check was taken synchronously against ACTIVE_STATES, so yielding any
     // earlier would let a second re-run pass the same slot's check.
-    const context = await verificationContext(entry, project);
-    if (entry.record.state !== "verifying") return;
-    Object.assign(entry.record.verify, context);
-    persist(entry);
     const stageDeadline = Date.now() + VERIFY_STAGE_TIMEOUT_MS;
-    for (let index = 0; index < commands.length; index += 1) {
+    const attestedResult = entry.record.result
+      ? { ...entry.record.result }
+      : null;
+    let outcome;
+    if (!attestedResult?.commit || !attestedResult?.tree) {
+      const context = await verificationContext(entry, project);
       if (entry.record.state !== "verifying") return;
-      const result = await runVerifyStep(entry, commands[index], index, stageDeadline, {
-        eventFields: { attempt },
-        // BOTH verify spawn paths are this one line: a first run reaches here
-        // from finish(), an explicit re-run from rerunVerification(), and the
-        // two are the same runner with the same single-slot fence (a record can
-        // only have one verification attempt in flight - the lifecycle
-        // reservation and the state gates guarantee it).
-        fence: VERIFY_FENCE,
-      });
-      if (entry.record.state !== "verifying") return;
-      entry.record.verify.steps.push(result);
+      Object.assign(entry.record.verify, context);
       persist(entry);
-      if (result.exitCode !== 0) {
-        finishVerification(entry, "failed", { rerun, attempt, previousState, exitSummary });
-        return;
+      outcome = await runVerifyCommands(entry, commands, stageDeadline, {
+        attempt,
+        cwd: entry.record.worktreePath,
+      });
+    } else {
+      const verifyRoot = join(stateDir, "verify-worktrees", project.name);
+      const worktree = join(verifyRoot, randomBytes(8).toString("hex"));
+      try {
+        mkdirSync(verifyRoot, { recursive: true });
+        entry.record.verify.worktreePath = worktree;
+        persist(entry);
+        outcome = await withDetachedCheckout({
+          project,
+          commit: attestedResult.commit,
+          worktree,
+          mismatchLabel: "verification worktree",
+          cleanupAfterAddFailure: true,
+          onRemoved() {
+            delete entry.record.verify.worktreePath;
+            try {
+              persist(entry);
+            } catch (persistError) {
+              logPersistenceWarning(
+                `Atelier could not persist cleaned verification worktree for ${entry.record.id}: ${persistError.message}`,
+              );
+            }
+          },
+          onCleanupFailure(error) {
+            const warning = `verification worktree cleanup failed: ${error.message}`;
+            if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
+            try {
+              persist(entry);
+            } catch (persistError) {
+              logPersistenceWarning(
+                `Atelier could not persist verification cleanup warning for ${entry.record.id}: ${persistError.message}`,
+              );
+            }
+          },
+        }, async () => {
+          const pre = await verificationSnapshot(worktree);
+          if (pre.status) {
+            return {
+              state: "failed",
+              detail: `verification checkout was not clean before commands: ${verificationStatusSummary(pre.status)}`,
+            };
+          }
+          const context = await verificationContext(entry, project, {
+            worktreePath: worktree,
+            testedCommit: attestedResult.commit,
+          });
+          if (entry.record.state !== "verifying") return { interrupted: true };
+          Object.assign(entry.record.verify, context);
+          persist(entry);
+          const commandsOutcome = await runVerifyCommands(
+            entry,
+            commands,
+            stageDeadline,
+            { attempt, cwd: worktree },
+          );
+          if (commandsOutcome.interrupted) return commandsOutcome;
+          let post;
+          try {
+            post = await verificationSnapshot(worktree);
+          } catch (error) {
+            if (commandsOutcome.state === "passed") {
+              return {
+                state: "failed",
+                detail: redactText(
+                  `EATELIER_VERIFICATION_MUTATED_WORKTREE: post-command checkout probe failed: ${String(error?.message ?? error)}`,
+                ),
+              };
+            }
+            throw error;
+          }
+          if (
+            post.status ||
+            post.head !== attestedResult.commit ||
+            post.tree !== attestedResult.tree
+          ) {
+            return {
+              state: "failed",
+              detail: verificationMutationDetail(post, attestedResult),
+            };
+          }
+          if (commandsOutcome.state !== "passed") return commandsOutcome;
+          return {
+            state: "passed",
+            attestation: {
+              resultCommit: attestedResult.commit,
+              resultTree: attestedResult.tree,
+              resultVersion: attestedResult.version,
+              suite: "project-verify",
+              commandsDigest: createHash("sha256")
+                .update(JSON.stringify(commands))
+                .digest("hex"),
+              pre: { head: pre.head, tree: pre.tree, statusClean: true },
+              post: { head: post.head, tree: post.tree, statusClean: true },
+              attestedAt: new Date().toISOString(),
+              attempt,
+            },
+          };
+        });
+      } catch (error) {
+        outcome = {
+          state: "failed",
+          detail: `verification checkout failed: ${redactText(String(error?.message ?? error))}`,
+        };
       }
     }
-    finishVerification(entry, "passed", { rerun, attempt, previousState, exitSummary });
+    if (entry.record.state !== "verifying" || outcome?.interrupted) return;
+    if (outcome.attestation) entry.record.attestation = outcome.attestation;
+    finishVerification(entry, outcome.state, {
+      rerun,
+      attempt,
+      previousState,
+      exitSummary,
+      detail: outcome.detail,
+    });
   }
 
   function postMergeEvidence(value) {
@@ -4692,48 +4922,59 @@ export function createDispatcher({
     const verifyRoot = join(stateDir, "post-merge-worktrees", project.name);
     const worktree = join(verifyRoot, randomBytes(8).toString("hex"));
     const stageDeadline = Date.now() + VERIFY_STAGE_TIMEOUT_MS;
-    let worktreeAdded = false;
-
-    try {
-      if (shuttingDown) {
-        throw new Error("server shutdown interrupted queued post-merge verification");
-      }
-      ensureEntryEnv(entry, project);
-      postMergeFileOps.mkdirSync(verifyRoot, { recursive: true });
-      entry.record.postMerge = {
-        ...entry.record.postMerge,
-        state: "running",
-        startedAt: new Date().toISOString(),
-        worktreePath: worktree,
-      };
-      persist(entry);
-      emit(entry, {
-        type: "post-merge",
-        phase: "start",
-        state: "running",
+    if (shuttingDown) {
+      throw new Error("server shutdown interrupted queued post-merge verification");
+    }
+    ensureEntryEnv(entry, project);
+    postMergeFileOps.mkdirSync(verifyRoot, { recursive: true });
+    entry.record.postMerge = {
+      ...entry.record.postMerge,
+      state: "running",
+      startedAt: new Date().toISOString(),
+      worktreePath: worktree,
+    };
+    persist(entry);
+    emit(entry, {
+      type: "post-merge",
+      phase: "start",
+      state: "running",
+      commit,
+      mergeCommit,
+      startedAt: entry.record.postMerge.startedAt,
+    });
+    await withDetachedCheckout({
+      project,
+      commit,
+      worktree,
+      mismatchLabel: "post-merge verification worktree",
+      afterAdded: () => postMergeHooks.afterWorktreeAdded?.({
+        entry,
+        project,
         commit,
-        mergeCommit,
-        startedAt: entry.record.postMerge.startedAt,
-      });
-      await commandRunner("git", [
-        "-C",
-        project.path,
-        "worktree",
-        "add",
-        "--detach",
         worktree,
-        commit,
-      ], { timeout: LONG_GIT_TIMEOUT_MS });
-      worktreeAdded = true;
-      await postMergeHooks.afterWorktreeAdded?.({ entry, project, commit, worktree });
-      const testedTree = (
-        await commandRunner("git", ["-C", worktree, "rev-parse", "HEAD"])
-      ).trim();
-      if (testedTree !== commit) {
-        throw new Error(
-          `post-merge verification worktree resolved ${testedTree || "no commit"}, expected ${commit}`,
-        );
-      }
+      }),
+      onRemoved() {
+        delete entry.record.postMerge.worktreePath;
+        try {
+          persist(entry);
+        } catch (persistError) {
+          logPersistenceWarning(
+            `Atelier could not persist cleaned post-merge worktree for ${entry.record.id}: ${persistError.message}`,
+          );
+        }
+      },
+      onCleanupFailure(error) {
+        const warning = `post-merge verification worktree cleanup failed: ${error.message}`;
+        if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
+        try {
+          persist(entry);
+        } catch (persistError) {
+          logPersistenceWarning(
+            `Atelier could not persist cleanup warning for ${entry.record.id}: ${persistError.message}`,
+          );
+        }
+      },
+    }, async ({ head: testedTree }) => {
       entry.record.postMerge.testedTree = testedTree;
       persist(entry);
       for (let index = 0; index < commands.length; index += 1) {
@@ -4792,38 +5033,7 @@ export function createDispatcher({
           testedTree: entry.record.postMerge.testedTree,
         });
       }
-    } finally {
-      if (worktreeAdded) {
-        try {
-          await commandRunner("git", [
-            "-C",
-            project.path,
-            "worktree",
-            "remove",
-            worktree,
-            "--force",
-          ], { timeout: LONG_GIT_TIMEOUT_MS });
-          delete entry.record.postMerge.worktreePath;
-          try {
-            persist(entry);
-          } catch (persistError) {
-            logPersistenceWarning(
-              `Atelier could not persist cleaned post-merge worktree for ${entry.record.id}: ${persistError.message}`,
-            );
-          }
-        } catch (error) {
-          const warning = `post-merge verification worktree cleanup failed: ${error.message}`;
-          if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
-          try {
-            persist(entry);
-          } catch (persistError) {
-            logPersistenceWarning(
-              `Atelier could not persist cleanup warning for ${entry.record.id}: ${persistError.message}`,
-            );
-          }
-        }
-      }
-    }
+    });
   }
 
   function resolvePostMergeFailures(passingEntry, project, passingCommit, resolvedAt) {
@@ -5165,7 +5375,13 @@ export function createDispatcher({
       await releaseClaim(entry, project);
       return;
     }
-    await runVerification(entry, project, exitSummary);
+    const verificationRun = runVerification(entry, project, exitSummary);
+    entry.verifyRun = verificationRun;
+    try {
+      await verificationRun;
+    } finally {
+      if (entry.verifyRun === verificationRun) entry.verifyRun = undefined;
+    }
     if (await settleQueueOutcome(entry, project)) await releaseClaim(entry, project);
   }
 
@@ -7098,8 +7314,9 @@ ${diff}`;
   }
 
   // atelier-9dt. One flaky verification must not permanently strand a completed
-  // dispatch or its claim: re-running the SAME commands in the retained
-  // worktree is an explicit operator action with its own attempt history. It
+  // dispatch or its claim: re-running the SAME commands against the finalized
+  // result is an explicit operator action with its own attempt history. Legacy
+  // records without a finalized result retain their historical in-place path. It
   // occupies a verification slot exactly like a live verify, is gated by the
   // drain lease and the lifecycle reservation, and touches NO tracker state - a
   // re-run neither re-claims a released ticket nor un-parks a queue attempt.
@@ -7213,6 +7430,7 @@ ${diff}`;
       entry.inert = false;
       entry.releaseVerifyRerun = releaseLifecycle;
       const settled = runVerification(entry, project, record.exitSummary, { rerun: true });
+      entry.verifyRun = settled;
       admitted = true;
       void settled
         .catch((error) => {
@@ -7224,6 +7442,7 @@ ${diff}`;
           );
         })
         .finally(() => {
+          if (entry.verifyRun === settled) entry.verifyRun = undefined;
           // Net for the paths that end without a verdict (the attempt was
           // hijacked mid-step). Idempotent: the reservation's own release
           // closure ignores a second call.
@@ -7677,9 +7896,30 @@ ${diff}`;
         // The runner is reaped by the same cancellable, identity-guarded
         // escalation boot uses. In particular, no fire-and-forget kill may leave
         // a delayed SIGKILL behind after stop returns.
-        if (hasFencingPid(reservedEntry.record)) {
+        const verifierWasFenced = hasFencingPid(reservedEntry.record);
+        if (verifierWasFenced) {
           applyRecordFencing(reservedEntry, await resolveRecordFencing(reservedEntry.record));
           persist(reservedEntry);
+        }
+        if (reservedEntry.verifyRun) {
+          let graceTimer;
+          try {
+            await Promise.race([
+              reservedEntry.verifyRun.catch((error) => {
+                logPersistenceWarning(
+                  `Atelier verification cleanup failed during stop for ${reservedEntry.record.id}: ${error.message}`,
+                );
+              }),
+              new Promise((resolvePromise) => {
+                graceTimer = setTimeout(
+                  resolvePromise,
+                  Math.max(0, postMergeShutdownGraceMs),
+                );
+              }),
+            ]);
+          } finally {
+            if (graceTimer) clearTimeout(graceTimer);
+          }
         }
         if (rerunInFlight) {
           // Explicit re-runs hold no tracker claim and stop PREEMPTS them. Record
@@ -7869,6 +8109,7 @@ ${diff}`;
   function orphanWorktreeDirectories() {
     return [
       ...nestedWorktreeDirectories(join(stateDir, "worktrees")),
+      ...nestedWorktreeDirectories(join(stateDir, "verify-worktrees")),
       ...nestedWorktreeDirectories(join(stateDir, "post-merge-worktrees")),
       ...flatWorktreeDirectories(join(stateDir, "merge-worktrees")),
     ];
@@ -8187,10 +8428,17 @@ ${diff}`;
         ) {
           protectedPaths.add(resolve(entry.record.postMerge.worktreePath));
         }
+        if (
+          entry.record.verify?.worktreePath &&
+          (entry.record.verify.state === "running" || fenced)
+        ) {
+          protectedPaths.add(resolve(entry.record.verify.worktreePath));
+        }
         if (!fenced) continue;
         const retainedPaths = new Set([
           entry.record.worktreePath,
           entry.record.postMerge?.worktreePath,
+          entry.record.verify?.worktreePath,
         ].filter(Boolean));
         for (const path of retainedPaths) {
           const key = `${entry.record.id}\0${resolve(path)}`;
@@ -8267,6 +8515,7 @@ ${diff}`;
       const owningProject = registry.projects.find(
         (project) => [
           join(stateDir, "worktrees", project.name),
+          join(stateDir, "verify-worktrees", project.name),
           join(stateDir, "post-merge-worktrees", project.name),
         ].some((root) => resolve(root) === resolve(dirname(path))),
       );
@@ -8487,6 +8736,20 @@ ${diff}`;
     if (record.branchHead !== branchHead) {
       record.branchHead = branchHead;
       persist(entry);
+    }
+    if (record.attestation && !force) {
+      if (record.attestation.resultCommit !== branchHead) {
+        throw dispatcherError(
+          409,
+          `EATELIER_VERIFICATION_HEAD_MISMATCH: attested commit ${record.attestation.resultCommit || "missing"} does not match branch HEAD ${branchHead || "missing"}`,
+        );
+      }
+      if (record.attestation.resultVersion !== record.result?.version) {
+        throw dispatcherError(
+          409,
+          `EATELIER_VERIFICATION_HEAD_MISMATCH: attested result version ${record.attestation.resultVersion ?? "missing"} does not match current result version ${record.result?.version ?? "missing"}`,
+        );
+      }
     }
     if (
       project.requireReview &&
@@ -9717,6 +9980,7 @@ ${diff}`;
       // failure boot recovery already produces, with the claude lane's
       // sessionId surfaced as a resume-ready record.
       const dispatchReleases = [];
+      const verificationRuns = [];
       for (const entry of entries.values()) {
         if (entry.inert || !ACTIVE_STATES.has(entry.record.state)) continue;
         const project = registry.projects.find(
@@ -9742,6 +10006,13 @@ ${diff}`;
         entry.finished = true;
         if (entry.pollTimer) clearTimeout(entry.pollTimer);
         entry.pollTimer = undefined;
+        if (entry.record.state === "verifying" && entry.verifyRun) {
+          verificationRuns.push(entry.verifyRun.catch((error) => {
+            logPersistenceWarning(
+              `Atelier verification cleanup failed during shutdown for ${entry.record.id}: ${error.message}`,
+            );
+          }));
+        }
         // atelier-9dt: a verification RE-RUN caught by the sweep goes back to the
         // terminal state it re-verified from, with its attempt recorded as
         // interrupted - the same restoration boot performs, for the same reason
@@ -9806,13 +10077,14 @@ ${diff}`;
             : release());
         }
       }
-      if (dispatchReleases.length > 0) {
+      const shutdownTasks = [...dispatchReleases, ...verificationRuns];
+      if (shutdownTasks.length > 0) {
         // Best-effort within the shutdown grace budget: a release that does
         // not land before the process exits leaves the ticket claimed, which
         // reclaimRestartResumeTicket (or a human) can still recover from on
         // resume - never data loss, just a slower reclaim.
         await Promise.race([
-          Promise.all(dispatchReleases),
+          Promise.all(shutdownTasks),
           new Promise((resolvePromise) => setTimeout(resolvePromise, Math.max(0, graceMs))),
         ]);
       }
