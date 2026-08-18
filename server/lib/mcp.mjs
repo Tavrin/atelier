@@ -30,6 +30,7 @@ export const MUTABLE_SETTINGS = [
   "budgetUSDPerDay",
   "queueFailureLimit",
   "unpricedDispatchCapPerDay",
+  "legacyCodexCompanion",
 ];
 
 const stringProperty = (description) => ({ type: "string", minLength: 1, description });
@@ -115,6 +116,9 @@ const settingsFieldsSchema = {
       minimum: 1,
       description: "Daily dispatch-count ceiling for lanes without reported cost, or null to remove.",
     },
+    legacyCodexCompanion: booleanProperty(
+      "Use the deprecated Codex companion adapter instead of the supported app-server adapter.",
+    ),
   }),
   minProperties: 1,
   description: `Mutable fields: ${MUTABLE_SETTINGS.join(", ")}.`,

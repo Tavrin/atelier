@@ -178,6 +178,10 @@ function project(path, overrides = {}) {
     containerized: false,
     verifyMode: "worktree",
     verifyCommands: [],
+    // The pre-ATT-009 Codex lifecycle tests below intentionally exercise the
+    // deprecated companion strategy. Individual ATT-009 tests opt back into
+    // the production default explicitly.
+    legacyCodexCompanion: true,
     dispatchProfile: {
       model: "haiku",
       maxTurns: 7,
@@ -193,6 +197,8 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
   const primary = join(root, "primary");
   const state = join(root, "state");
   await mkdir(primary);
+  const companionPath = join(root, "codex-companion.mjs");
+  await writeFile(companionPath, "// pinned legacy companion fixture\n");
   const configuredProject = project(primary, projectOverrides);
   const registry = {
     defaults: { concurrentDispatchCap: 3, ...defaults },
@@ -230,7 +236,7 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
     _setGitConfigCountProbe();
     await rm(root, { recursive: true, force: true });
   });
-  return { root, primary, state, project: configuredProject, registry };
+  return { root, primary, state, companionPath, project: configuredProject, registry };
 }
 
 function claudeResultChild({
@@ -630,7 +636,7 @@ function stubBakeoffRuntime(
   const calls = [];
   _setBrResolver(() => "/fixture/br");
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner((file) => {
     if (isCommand(file, "claude")) return claudeFails ? failedChild() : successfulChild();
@@ -3489,7 +3495,7 @@ test("project defaultAgent beats the defaults lane and Codex tolerates a read-on
   setup.project = normalizeProject(setup.project, setup.registry.defaults);
   setup.registry.projects[0] = setup.project;
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({
     writeFileSync() {
       throw new Error("read-only git dir");
@@ -3541,10 +3547,102 @@ test("project defaultAgent beats the defaults lane and Codex tolerates a read-on
   );
 });
 
+test("new Codex records default to app-server and accept a content-digest re-pin", async (t) => {
+  const setup = await fixture(t, { legacyCodexCompanion: false });
+  const bin = join(setup.root, "bin");
+  const codex = join(bin, "codex");
+  await mkdir(bin);
+  await writeFile(codex, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.147.0'\n");
+  await chmod(codex, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = bin;
+  t.after(() => { process.env.PATH = previousPath; });
+  _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
+  _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
+  const launches = [];
+  _setSpawner((command, args, options) => {
+    launches.push({ command, args, options });
+    return codexLaunchChild(`app-server-job-${launches.length}`);
+  });
+  _setRunFile(async (file, args) => {
+    if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
+    if (file === "git" && args[2] === "worktree") {
+      await mkdir(args[6], { recursive: true });
+      return "";
+    }
+    if (file === "git" && args[2] === "rev-parse") {
+      return args[3] === "--git-dir" ? ".atelier-git\n" : `${FIXTURE_BASE_COMMIT}\n`;
+    }
+    if (file === "git" && ["status", "log"].includes(args[2])) return "";
+    if (isCommand(file, "node") && args[1] === "status") {
+      return JSON.stringify({
+        status: "completed",
+        pid: null,
+        threadId: "app-server-thread",
+      });
+    }
+    if (isCommand(file, "node") && args[1] === "result") {
+      return JSON.stringify({
+        status: "completed",
+        pid: null,
+        threadId: "app-server-thread",
+        rawOutput: "implemented through app-server",
+        summary: "implemented through app-server",
+      });
+    }
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  });
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({
+    project: "fixture",
+    prompt: "use the supported adapter",
+    lane: "codex",
+    verify: false,
+  });
+  await waitForCondition(
+    () => dispatcher.get(id).state === "completed",
+    "app-server-backed Codex dispatch did not complete",
+  );
+  const first = rawRecord(setup, id);
+  assert.equal(first.codexAdapter, "app-server");
+  assert.equal(first.executionProfile.executable.command, "codex");
+  assert.equal(first.executionProfile.executable.resolvedPath, codex);
+  assert.equal(first.executionProfile.executable.version, "codex-cli 0.147.0");
+  assert.match(first.executionProfile.executable.digest, /^[a-f0-9]{64}$/);
+  assert.ok(launches[0].args[0].endsWith("codex-app-server-runner.mjs"));
+  assert.equal(launches[0].args[launches[0].args.indexOf("--codex") + 1], codex);
+  assert.equal(first.warnings.some((warning) => warning.includes("deprecated")), false);
+
+  await writeFile(codex, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.147.0'\n# digest changed\n");
+  await assert.rejects(
+    dispatcher.reply(id, { text: "continue" }),
+    (error) => error.status === 409 && /executable\.digest/.test(error.message),
+  );
+  await dispatcher.reply(id, {
+    text: "continue with accepted binary",
+    acceptExecutionProfile: true,
+    actor: "human",
+  });
+  await waitForCondition(
+    () => dispatcher.get(id).state === "completed" && launches.length === 2,
+    "accepted digest did not resume through app-server",
+  );
+  const accepted = rawRecord(setup, id).executionProfile;
+  assert.equal(accepted.superseded.length, 1);
+  assert.notEqual(accepted.executable.digest, accepted.superseded[0].executable.digest);
+
+  await rm(codex);
+  await assert.rejects(
+    dispatcher.reply(id, { text: "the pinned binary vanished" }),
+    (error) => error.status === 409 && /executable\.resolvedPath/.test(error.message),
+  );
+});
+
 test("a refused running Codex reply preserves the adapter-owned durable environment", async (t) => {
   const setup = await fixture(t);
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setCodexPollIntervalMs(60_000);
   const launches = [];
@@ -3613,7 +3711,7 @@ test("Codex stop keeps its fence when the pinned cancel executable cannot spawn"
   const worker = spawnAliveProcess(t);
   await worker.ready;
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setCodexPollIntervalMs(60_000);
   _setSpawner(() => codexLaunchChild("codex-cancel-enoent"));
@@ -3660,7 +3758,7 @@ test("Codex stop keeps its fence when the pinned cancel executable cannot spawn"
 test("Codex status ENOENT exhausts its retry budget and persists a profile failure", async (t) => {
   const setup = await fixture(t);
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setCodexPollIntervalMs(1);
   _setSpawner(() => codexLaunchChild("codex-status-enoent"));
@@ -3774,7 +3872,7 @@ test("Codex provider identity stays profiled while verification uses workload en
 test("completed Codex reply resumes its captured companion thread with user text", async (t) => {
   const setup = await fixture(t);
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const launches = [];
   const deliveredPrompts = [];
@@ -3849,16 +3947,16 @@ test("completed Codex reply resumes its captured companion thread with user text
   assert.equal(completed.exitSummary, "resumed done");
   assert.deepEqual(launches.map(({ command, args }) => [command, ...args.slice(0, -1)]), [
     [
-      initial.executionProfile.executable.resolvedPath,
-      "/fixture/codex-companion.mjs",
+      process.execPath,
+      setup.companionPath,
       "task",
       "--write",
       "--background",
       "--json",
     ],
     [
-      initial.executionProfile.executable.resolvedPath,
-      "/fixture/codex-companion.mjs",
+      process.execPath,
+      setup.companionPath,
       "task",
       "--write",
       "--resume",
@@ -3989,7 +4087,7 @@ process.stdout.write(JSON.stringify({ jobId: "oversized-review-job" }) + "\\n");
 test("failed Codex jobs surface companion errorMessage and stderr", async (t) => {
   const setup = await fixture(t);
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner(() => {
     const child = codexLaunchChild("codex-failed");
@@ -4056,7 +4154,7 @@ test("codex lane stays warning-free when its resolved git dir is writable", asyn
     { dispatchProfile: { dispatchEnv: { DEFAULT_ENV: "inherited" } } },
   );
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   const calls = [];
   let launch;
   let gitDir;
@@ -4105,7 +4203,8 @@ test("codex lane stays warning-free when its resolved git dir is writable", asyn
         args.join("\0") === ["-C", record.worktreePath, "rev-parse", "--git-dir"].join("\0"),
     ),
   );
-  assert.equal(launch.command, record.executionProfile.executable.resolvedPath);
+  assert.equal(launch.command, process.execPath);
+  assert.equal(record.executionProfile.executable.command, "codex");
   assert.equal(launch.options.env.DEFAULT_ENV, "inherited");
   assert.equal(launch.options.env.CODEX_ENV, undefined);
   assert.equal(launch.options.env.ANTHROPIC_API_KEY, undefined);
@@ -4117,13 +4216,13 @@ test("Atelier commits completed Codex changes before worktree verification", asy
   const setup = await fixture(t, { verifyCommands: ["node --test"] });
   _setResultFinalizer();
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const order = [];
   const gitCalls = [];
   let finalizerStatusCalls = 0;
   _setSpawner((file, args) => {
-    if (isCommand(file, "node") && args[0] === "/fixture/codex-companion.mjs") {
+    if (isCommand(file, "node") && args[0] === setup.companionPath) {
       order.push("agent");
       return codexLaunchChild();
     }
@@ -4244,11 +4343,11 @@ test("a failed Atelier-owned commit fails the dispatch before verification", asy
   const setup = await fixture(t, { verifyCommands: ["node --test"] });
   _setResultFinalizer();
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   let verifyRuns = 0;
   _setSpawner((file, args) => {
-    if (isCommand(file, "node") && args[0] === "/fixture/codex-companion.mjs") {
+    if (isCommand(file, "node") && args[0] === setup.companionPath) {
       return codexLaunchChild();
     }
     verifyRuns += 1;
@@ -11685,7 +11784,7 @@ test("boot recovery reattaches a still-running codex job instead of failing it (
     codexWorkerPidIdentity: processStartIdentity(process.pid),
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   const statusCalls = [];
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
@@ -11998,7 +12097,7 @@ test("boot recovery honors a codex job that completed during downtime through th
     warnings: [],
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
     if (isCommand(file, "node") && args[1] === "status") {
@@ -12050,7 +12149,7 @@ test("boot reattach fails closed and releases the claim when the reported codex 
     warnings: [],
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setBrResolver(() => "/fixture/br");
   const calls = [];
   _setRunFile(async (file, args) => {
@@ -12123,7 +12222,7 @@ test("boot reattach fails closed on a PID the OS has reused for an unrelated pro
     warnings: [],
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setRunFile(async (file, args) => {
     if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "running", job: { status: "running", pid: process.pid } });
@@ -12357,7 +12456,7 @@ test("resuming a codex dispatch clears the old codexJobId atomically with the re
       warnings: [],
     })}\n`,
   );
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   let releaseNewLaunch;
   const newLaunchStarted = new Promise((resolvePromise) => {
     releaseNewLaunch = resolvePromise;
@@ -12776,7 +12875,7 @@ test("boot reattach on a live pid it cannot corroborate goes UNRESOLVED, keeping
     warnings: [],
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setBrResolver(() => "/fixture/br");
   const calls = [];
   _setRunFile(async (file, args) => {
@@ -12848,7 +12947,7 @@ test("a verify:false codex job that completes during downtime runs no verificati
     warnings: [],
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   let spawnedVerify = false;
   _setSpawner(() => {
     spawnedVerify = true;
@@ -12906,7 +13005,7 @@ test("a verify:true codex job that completes during downtime still runs verifica
     warnings: [],
   };
   await writeFile(join(dispatchDir, "index.jsonl"), `${JSON.stringify(record)}\n`);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   let verifyRan = false;
   _setSpawner(() => {
     verifyRan = true;
@@ -12981,7 +13080,7 @@ test("an unrecognized companion status fails closed, but only releases the claim
       codexRecord("boot-codex-bad-status-gone", "fixture-bad-status-gone"),
     ].map((record) => JSON.stringify(record)).join("\n")}\n`,
   );
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setBrResolver(() => "/fixture/br");
   const calls = [];
   _setRunFile(async (file, args) => {
@@ -13193,7 +13292,7 @@ test("boot recovery and shutdown() both SET restartResumeReady through the real 
 
 test("shutdown() is lane-asymmetric through the real dispatch lifecycle: codex is detached, claude is terminated and resume-ready (finding 7d)", async (t) => {
   const setup = await fixture(t, { tracker: "none" }, { concurrentDispatchCap: 4 });
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   const claudeChild = heldChild();
@@ -13738,7 +13837,7 @@ test("acquireDrainLease refuses while a bake-off's shared claim is in flight (I5
   const setup = await fixture(t, { tracker: "committed" }, { concurrentDispatchCap: 4 });
   _setBrResolver(() => "/fixture/br");
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   let claudeChild;
   _setSpawner((file) => {
@@ -14248,7 +14347,7 @@ test("integration: Atelier commits real Codex work without committing .beads", a
   execFileSync("git", ["add", "README.md"], { cwd: setup.primary });
   execFileSync("git", ["commit", "-q", "-m", "fixture"], { cwd: setup.primary });
   _setProbe();
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setRunFile(async (file, args, options = {}) => {
     if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({ status: "completed", summary: "real implementation" });
@@ -17889,7 +17988,7 @@ test("Codex review dispatches preserve companion rawOutput and omit --write", as
   });
   await mkdir(seeded.worktreePath, { recursive: true });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const finalMessage = [
     "Review notes before the required fields.",
@@ -17966,7 +18065,7 @@ test("a completed review with an unreadable full result is malformed under every
   });
   await mkdir(seeded.worktreePath, { recursive: true });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner(() => codexLaunchChild("codex-review-missing-result"));
   _setRunFile(async (file, args) => {
@@ -18023,7 +18122,7 @@ test("a completed Codex review with only a bounded PASS summary is malformed", a
   });
   await mkdir(seeded.worktreePath, { recursive: true });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner(() => codexLaunchChild("codex-review-summary-only"));
   const boundedPass = "VERDICT: PASS\nSUMMARY: The bounded result summary says approved.";
@@ -18195,7 +18294,7 @@ test("a transient status failure during reattach keeps the claim when the fence 
       codexWorkerPidIdentity: processStartIdentity(worker.child.pid),
     }),
   ]);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setBrResolver(() => "/fixture/br");
   const calls = [];
   _setRunFile(async (file, args) => {
@@ -18238,7 +18337,7 @@ test("stop() reaps its worker and keeps the claim when cancellation throws and t
   const setup = await fixture(t, { tracker: "committed" });
   const worker = spawnAliveProcess(t, { trapSigterm: true });
   await worker.ready;
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   _setBrResolver(() => "/fixture/br");
@@ -18300,7 +18399,7 @@ test("stop() whose cancellation threw still reaps the worker, and the claim goes
   const setup = await fixture(t, { tracker: "committed" });
   const worker = spawnAliveProcess(t);
   await worker.ready;
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
   _setBrResolver(() => "/fixture/br");
@@ -18716,7 +18815,7 @@ test("a terminal snapshot whose worker Atelier never captured is fenced, not com
       // mergeable - while the worker was still writing.
     }),
   ]);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setBrResolver(() => "/fixture/br");
   const calls = [];
   _setRunFile(async (file, args) => {
@@ -18784,7 +18883,7 @@ test("a terminal snapshot whose reported worker is gone completes normally (roun
       codexWorkspace: worktreePath,
     }),
   ]);
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setBrResolver(() => "/fixture/br");
   _setRunFile(async (file, args) => {
     if (isOutcomeDiffProbe(args)) return PROBE_CHANGED_FILE;
@@ -19172,7 +19271,7 @@ test("codex: an unreadable companion result classifies conservatively instead of
   ]) {
     const setup = await fixture(t, { tracker: "none" });
     _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-    _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+    _setCompanionResolver(() => setup.companionPath);
     _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
     _setSpawner(() => codexLaunchChild(`codex-${label.replace(/\s+/g, "-")}`));
     _setRunFile(async (file, args) => {
@@ -19220,7 +19319,7 @@ test("codex: an unreadable companion result classifies conservatively instead of
 test("codex: a companion result with no final message is a retrieval failure, not an empty answer", async (t) => {
   const setup = await fixture(t, { tracker: "none" });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner(() => codexLaunchChild("codex-no-final"));
   _setRunFile(async (file, args) => {
@@ -21327,7 +21426,7 @@ test("a terminal companion job with no resume path has its whole process tree re
   // does not protect its app-server.
   await seedCodexRecord(setup, { sessionId: null, codexProcessTree: tree.persistedTree });
 
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   // The job stays "running" until this test says otherwise, so the boot sweep
   // provably runs and finishes FIRST. After it has, the terminal transition is
   // the only thing left that can reap - which is what makes this test fail if
@@ -21513,7 +21612,7 @@ test("the boot sweep reaps a crash-window tree whose worktree is gone", async (t
     codexProcessTree: tree.persistedTree,
   });
   await rm(worktreePath, { recursive: true, force: true });
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setRunFile(async (file, args) => {
     if (isCommand(file, "node") && (args[1] === "status" || args[1] === "result")) {
       return JSON.stringify({ status: "failed", job: { status: "failed", pid: null } });
@@ -21654,7 +21753,7 @@ test("a live companion poll captures the worker's process tree and keeps a membe
       }],
     },
   });
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setRunFile(async (file, args) => {
     if (isCommand(file, "node") && args[1] === "status") {
       return JSON.stringify({
@@ -21807,7 +21906,7 @@ async function reapedThenResumable(t, { onResume }) {
     verify: { state: "passed", steps: [] },
   });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const spawns = [];
   _setSpawner((file, args) => {
@@ -21857,6 +21956,7 @@ test("a terminal record whose process tree was reaped still resumes - the reap c
   assert.equal(record.exitSummary, "");
   assert.deepEqual(record.warnings, [
     "execution profile is legacy_profile_unproven: the initial spawn environment was not captured",
+    "deprecated Codex companion adapter selected; migrate this project to the supported Codex app-server adapter",
   ]);
   const persisted = rawRecord(setup, "codex-leak");
   assert.equal(persisted.codexJobId, "codex-job-resumed");
@@ -21983,7 +22083,7 @@ test("a reported pid that does not match the fence is neither adopted nor captur
     codexWorkerPidIdentity: processStartIdentity(owned.rootPid),
     codexProcessTree: null,
   });
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   // Only the second poll onwards runs the ordinary branch.
   _setCodexPollIntervalMs(5);
   let polls = 0;
@@ -22084,7 +22184,7 @@ test("a resume clears the previous turn's tree before it cold-starts, never mid-
     verify: { state: "passed", steps: [] },
   });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const spawns = [];
   _setSpawner((file, args) => {
@@ -22318,7 +22418,7 @@ test("a shutdown that completes during the pre-resume reap refuses the resume", 
     verify: { state: "passed", steps: [] },
   });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const spawns = [];
   _setSpawner((file, args) => {
@@ -22364,7 +22464,7 @@ test("a resume refuses when the previous turn's tree could not be signalled", as
     verify: { state: "passed", steps: [] },
   });
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  _setCompanionResolver(() => "/fixture/codex-companion.mjs");
+  _setCompanionResolver(() => setup.companionPath);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   const spawns = [];
   _setSpawner((file, args) => {

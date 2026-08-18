@@ -3258,6 +3258,11 @@ function renderProjectSettings(project, agentList, initialQueue) {
     Boolean(project.requireReview),
     { hint: "Adds a read-only spec-audit gate after verification." },
   );
+  const legacyCodexCompanion = checkboxSetting(
+    "Use deprecated Codex companion adapter",
+    Boolean(project.legacyCodexCompanion),
+    { hint: "Compatibility only. New Codex dispatches use the supported app-server adapter." },
+  );
   const reviewPolicy = document.createElement("select");
   reviewPolicy.name = "reviewPolicy";
   const selectedReviewPolicy = project.reviewPolicy || "strict";
@@ -3318,6 +3323,7 @@ function renderProjectSettings(project, agentList, initialQueue) {
       "field",
       "Caps new dispatches on lanes that do not report trustworthy cost data.",
     ),
+    legacyCodexCompanion.wrapper,
     automation,
     footer,
   );
@@ -3357,6 +3363,7 @@ function renderProjectSettings(project, agentList, initialQueue) {
         : null,
       requireReview: requireReview.control.checked,
       reviewPolicy: reviewPolicy.value,
+      legacyCodexCompanion: legacyCodexCompanion.control.checked,
     };
     if (maxFixRoundsEdited) body.maxFixRounds = Number(maxFixRounds.value);
     if (automationAvailable) {

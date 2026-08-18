@@ -10,6 +10,11 @@ import { probeProject, probeProjectPath, trackerMode } from "../server/lib/capab
 import { createBoardEvents } from "../server/lib/board-events.mjs";
 import { CommandClientError, createCommandClient } from "../server/lib/command-client.mjs";
 import { createDispatcher } from "../server/lib/dispatch.mjs";
+import {
+  inspectCodexBinary,
+  probeCodexAppServer,
+  SUPPORTED_CODEX_VERSION,
+} from "../server/lib/agents/codex-app-server.mjs";
 import { createEventLog } from "../server/lib/event-log.mjs";
 import { resolveBrExecutable, runFile } from "../server/lib/exec.mjs";
 import { acquireInstanceLock } from "../server/lib/instance-lock.mjs";
@@ -18,6 +23,7 @@ import { configDir, stateDir } from "../server/lib/paths.mjs";
 import {
   loadRegistry,
   RegistryError,
+  resolveProjectDefaultAgent,
   STARTER_REGISTRY,
 } from "../server/lib/registry.mjs";
 import { installService, restartServiceSafely } from "../server/lib/service.mjs";
@@ -650,6 +656,38 @@ async function doctor(args) {
     console.log(`${check.name}: ${check.ok ? "ok" : "missing"} (${check.detail})`);
   }
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
+
+  const codexConfigured = registry.projects.some((project) =>
+    resolveProjectDefaultAgent(project, registry.defaults) === "codex"
+  );
+  if (!codexConfigured) {
+    console.log("codex: not configured");
+    return;
+  }
+  const binary = inspectCodexBinary(process.env);
+  if (!binary.resolvedPath) {
+    console.error("codex: missing (configure an absolute PATH entry containing codex)");
+    process.exitCode = 1;
+    return;
+  }
+  if (!binary.version || !binary.digest) {
+    console.error(`codex: failed (${binary.resolvedPath} could not be versioned and digested)`);
+    process.exitCode = 1;
+    return;
+  }
+  if (binary.version !== SUPPORTED_CODEX_VERSION) {
+    console.error(`codex: failed (unsupported ${binary.version}; expected ${SUPPORTED_CODEX_VERSION})`);
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    await probeCodexAppServer(binary.resolvedPath, process.env);
+    console.log(`codex binary: ${binary.resolvedPath} (sha256 ${binary.digest.slice(0, 12)})`);
+    console.log(`codex: ok (${binary.version}, app-server ok)`);
+  } catch (error) {
+    console.error(`codex: failed (app-server initialize handshake failed: ${error.message})`);
+    process.exitCode = 1;
+  }
 }
 
 async function main() {

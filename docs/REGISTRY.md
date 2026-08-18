@@ -88,6 +88,11 @@ problems at once.
     backstop parks the thread and creates a bounded ticket re-spec with its
     branch/HEAD salvage pointer. An explicit force merge can override a missing
     or failed review, but does not reopen a parked fix thread.
+  - `legacyCodexCompanion` - optional boolean, defaults to `false`. New Codex
+    dispatches use Atelier's supported, version-and-digest-pinned app-server
+    adapter. Setting this to `true` selects the deprecated plugin-cache
+    companion for compatibility; each affected record receives a deprecation
+    warning and pins both the Codex binary and companion script digests.
   - `reviewPolicy` - optional; `strict` (the default) gates on every open
     finding, `tiered` gates on BLOCKER/MAJOR while filing each remaining
     MINOR/NIT as its own follow-up ticket with a linking comment during merge,

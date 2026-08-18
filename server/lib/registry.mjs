@@ -213,6 +213,12 @@ export function validateProject(project, index = 0) {
   if (project.requireReview !== undefined && typeof project.requireReview !== "boolean") {
     problems.push(`${prefix}.requireReview must be a boolean`);
   }
+  if (
+    project.legacyCodexCompanion !== undefined &&
+    typeof project.legacyCodexCompanion !== "boolean"
+  ) {
+    problems.push(`${prefix}.legacyCodexCompanion must be a boolean`);
+  }
   if (project.reviewPolicy !== undefined && !REVIEW_POLICIES.has(project.reviewPolicy)) {
     problems.push(`${prefix}.reviewPolicy must be strict, tiered, or advisory`);
   }
@@ -488,6 +494,7 @@ export function normalizeProject(project, defaults = {}) {
     autoCommitTracker: project.autoCommitTracker ?? false,
     autoCloseOnMerge: project.autoCloseOnMerge ?? false,
     requireReview: project.requireReview ?? false,
+    legacyCodexCompanion: project.legacyCodexCompanion ?? false,
     reviewPolicy: project.reviewPolicy ?? "strict",
     maxFixRounds: projectMaxFixRounds ?? defaults.maxFixRounds ?? DEFAULTS.maxFixRounds,
     ...(hasDispatchEnv ? { dispatchEnv } : {}),

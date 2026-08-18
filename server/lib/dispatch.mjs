@@ -509,6 +509,7 @@ function publicRecord(record) {
     // reaches the public API/MCP surface (atelier-tzw review finding 7f).
     codexJobId: record.codexJobId ?? null,
     codexWorkspace: record.codexWorkspace ?? null,
+    codexAdapter: record.codexAdapter ?? null,
     codexWorkerPid: record.codexWorkerPid ?? null,
     codexWorkerPidIdentity: record.codexWorkerPidIdentity ?? null,
     // The companion job's whole process tree (app-server + MCP children), each
@@ -2886,6 +2887,7 @@ export function createDispatcher({
     const exposed = publicRecord(record);
     delete exposed.codexJobId;
     delete exposed.codexWorkspace;
+    delete exposed.codexAdapter;
     delete exposed.codexWorkerPid;
     delete exposed.codexWorkerPidIdentity;
     delete exposed.codexProcessTree;
@@ -4349,10 +4351,7 @@ export function createDispatcher({
           entry,
           codexAgentForReattach,
           reattachEnvironments,
-          {
-            compare: { companionPath: true },
-            requirements: { companionPath: true },
-          },
+          codexProfilePolicy(loaded),
         );
         reattachProfileMismatch = reattachProfile.mismatch;
         if (reattachProfileMismatch) {
@@ -4360,7 +4359,7 @@ export function createDispatcher({
             entry,
             reattachProfileMismatch,
             "codex boot reattach",
-            { companionPath: true },
+            reattachProfile.comparison,
           );
         }
       }
@@ -6262,10 +6261,9 @@ export function createDispatcher({
         controlledKeys: spawnEnvironments.controlledKeys,
         hooksSupported: spawnEnvironments.hooksSupported,
       });
-      requireResolvedExecutionProfile(executionProfile, {
-        executable: true,
-        companionPath: entry.record.lane === "codex",
-      });
+      requireResolvedExecutionProfile(executionProfile, entry.record.lane === "codex"
+        ? codexProfilePolicy(entry.record).requirements
+        : { executable: true });
       if (entry.record.executionProfile) {
         throw new Error("Execution profile already exists before first spawn");
       }
@@ -6334,7 +6332,7 @@ export function createDispatcher({
       ...controlledEnv,
     });
     if (agent.id === "codex") delete workloadEnv.CLAUDE_PLUGIN_DATA;
-    const providerEnv = agent.executionEnv(workloadEnv);
+    const providerEnv = agent.executionEnv(workloadEnv, { project });
     return {
       providerEnv,
       workloadEnv,
@@ -6351,7 +6349,10 @@ export function createDispatcher({
 
   function requireResolvedExecutionProfile(profile, {
     executable = false,
+    executableVersion = false,
+    executableDigest = false,
     companionPath = false,
+    companionDigest = false,
   } = {}) {
     if (executable && !profile.executable?.resolvedPath) {
       throw new Error(`Provider executable could not be resolved: ${profile.executable?.command}`);
@@ -6359,6 +6360,42 @@ export function createDispatcher({
     if (companionPath && !profile.companionPath) {
       throw new Error("Codex lane unavailable: codex-companion.mjs was not found");
     }
+    if (executableVersion && !profile.executable?.version) {
+      throw new Error(`Provider executable version could not be read: ${profile.executable?.resolvedPath}`);
+    }
+    if (executableDigest && !profile.executable?.digest) {
+      throw new Error(`Provider executable digest could not be read: ${profile.executable?.resolvedPath}`);
+    }
+    if (companionDigest && !profile.companionDigest) {
+      throw new Error(`Codex companion digest could not be read: ${profile.companionPath}`);
+    }
+  }
+
+  function codexProfilePolicy(record) {
+    if (record.lane !== "codex") return { compare: {}, requirements: {} };
+    if (record.codexAdapter === "app-server") {
+      const pinned = {
+        executable: true,
+        executableVersion: true,
+        executableDigest: true,
+      };
+      return { compare: pinned, requirements: pinned };
+    }
+    if (record.codexAdapter === "legacy-companion") {
+      const pinned = {
+        executable: true,
+        executableVersion: true,
+        executableDigest: true,
+        companionPath: true,
+        companionDigest: true,
+      };
+      return { compare: pinned, requirements: pinned };
+    }
+    // Pre-ATT-009 records retain the comparison contract they were born with.
+    return {
+      compare: { companionPath: true },
+      requirements: { companionPath: true },
+    };
   }
 
   function recordGitPostureWarning(entry, profile) {
@@ -6414,7 +6451,7 @@ export function createDispatcher({
       ? entry.record.executionProfileRefusal
       : null;
     const recordedRefusalComparison = recordedRefusal
-      ? refusalComparison(recordedRefusal, compare)
+      ? refusalComparison(entry, recordedRefusal, compare)
       : null;
     const recordedRefusalMismatch = recordedRefusal
       ? executionProfileMismatch(recorded, current, recordedRefusalComparison)
@@ -6434,6 +6471,9 @@ export function createDispatcher({
           companionPath: compare.companionPath || acceptsRecordedRefusal
             ? current.companionPath
             : recorded.companionPath,
+          companionDigest: compare.companionDigest || acceptsRecordedRefusal
+            ? current.companionDigest
+            : recorded.companionDigest,
         }
       : current;
     return {
@@ -6484,14 +6524,17 @@ export function createDispatcher({
     }
   }
 
-  function refusalComparison(refusal, fallback) {
+  function refusalComparison(entry, refusal, fallback) {
     if (refusal?.compare && typeof refusal.compare === "object") {
       return {
         executable: refusal.compare.executable === true,
+        executableVersion: refusal.compare.executableVersion === true,
+        executableDigest: refusal.compare.executableDigest === true,
         companionPath: refusal.compare.companionPath === true,
+        companionDigest: refusal.compare.companionDigest === true,
       };
     }
-    if (refusal?.operation === "codex boot reattach") return { companionPath: true };
+    if (refusal?.operation === "codex boot reattach") return codexProfilePolicy(entry.record).compare;
     if (["reply resume", "plan continuation"].includes(refusal?.operation)) {
       return { executable: true };
     }
@@ -6508,7 +6551,10 @@ export function createDispatcher({
       detail,
       compare: {
         executable: compare.executable === true,
+        executableVersion: compare.executableVersion === true,
+        executableDigest: compare.executableDigest === true,
         companionPath: compare.companionPath === true,
+        companionDigest: compare.companionDigest === true,
       },
       at: new Date().toISOString(),
     };
@@ -7444,6 +7490,9 @@ export function createDispatcher({
       sessionId: null,
       codexJobId: null,
       codexWorkspace: null,
+      codexAdapter: lane === "codex"
+        ? (project.legacyCodexCompanion ? "legacy-companion" : "app-server")
+        : null,
       codexWorkerPid: null,
       codexWorkerPidIdentity: null,
       codexProcessTree: null,
@@ -8581,11 +8630,9 @@ ${diff}`;
       const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnvironments, {
         accept: acceptExecutionProfile === true,
         acceptRecordedRefusal: true,
-        compare: { executable: true },
-        requirements: {
-          executable: true,
-          companionPath: entry.record.lane === "codex",
-        },
+        ...(entry.record.lane === "codex"
+          ? codexProfilePolicy(entry.record)
+          : { compare: { executable: true }, requirements: { executable: true } }),
       });
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);
@@ -8770,8 +8817,9 @@ ${diff}`;
       const resumeEnvironments = resolvedEntryEnvironments(project, agent);
       const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnvironments, {
         accept: acceptExecutionProfile === true,
-        compare: { executable: true },
-        requirements: { executable: true },
+        ...(entry.record.lane === "codex"
+          ? codexProfilePolicy(entry.record)
+          : { compare: { executable: true }, requirements: { executable: true } }),
       });
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, resolve } from "node:path";
 
 export const EXECUTION_PROFILE_MISMATCH = "EATELIER_EXECUTION_PROFILE_MISMATCH: ";
@@ -12,6 +12,15 @@ export const GIT_POSTURE = Object.freeze({
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function executableDigest(path) {
+  if (!path) return null;
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 function sortedEnvironment(env) {
@@ -57,6 +66,9 @@ export function createExecutionProfile({
   agentLane,
   command,
   companionPath = null,
+  companionDigest = null,
+  executableVersion = null,
+  executableContentDigest = null,
   env,
   controlledKeys = [],
   hooksSupported = true,
@@ -82,8 +94,11 @@ export function createExecutionProfile({
     executable: {
       command,
       resolvedPath: resolveExecutable(command, sortedEnv),
+      version: executableVersion ?? null,
+      digest: executableContentDigest ?? null,
     },
     companionPath: companionPath ?? null,
+    companionDigest: companionDigest ?? null,
     // Only operator/project-controlled keys bind process admission. Ambient
     // daemon state is evidence and may warn, but must not kill restart recovery.
     envDigest: sha256(JSON.stringify(controlledEnv)),
@@ -124,7 +139,10 @@ function printable(value) {
 
 export function executionProfileMismatch(recorded, current, {
   executable = false,
+  executableVersion = false,
+  executableDigest = false,
   companionPath = false,
+  companionDigest = false,
 } = {}) {
   const differences = [];
   if (recorded.envDigest !== current.envDigest) {
@@ -136,8 +154,17 @@ export function executionProfileMismatch(recorded, current, {
     ...(executable
       ? [["executable.resolvedPath", recorded.executable?.resolvedPath, current.executable?.resolvedPath]]
       : []),
+    ...(executableVersion && recorded.executable?.version !== undefined
+      ? [["executable.version", recorded.executable?.version, current.executable?.version]]
+      : []),
+    ...(executableDigest && recorded.executable?.digest !== undefined
+      ? [["executable.digest", recorded.executable?.digest, current.executable?.digest]]
+      : []),
     ...(companionPath
       ? [["companionPath", recorded.companionPath, current.companionPath]]
+      : []),
+    ...(companionDigest && recorded.companionDigest !== undefined
+      ? [["companionDigest", recorded.companionDigest, current.companionDigest]]
       : []),
   ];
   for (const [name, before, after] of fields) {

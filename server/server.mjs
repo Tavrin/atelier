@@ -1068,6 +1068,7 @@ export function createServer({
           "budgetUSDPerDay",
           "queueFailureLimit",
           "unpricedDispatchCapPerDay",
+          "legacyCodexCompanion",
         ]);
         const rejected = Object.keys(postBody).filter((key) => !mutableFields.has(key));
         if (rejected.length > 0) {

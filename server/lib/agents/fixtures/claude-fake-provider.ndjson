@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","model":"fake","session_id":"fake-captured-session"}
+{"type":"result","subtype":"success","is_error":false,"result":"fake-agent scenario completed","num_turns":1,"total_cost_usd":0}
