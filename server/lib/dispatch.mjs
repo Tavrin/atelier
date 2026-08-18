@@ -9985,11 +9985,11 @@ ${diff}`;
         terminalAt = override.expiresAt;
         if (!dryRun) {
           try {
-            persistBreakGlassOverride({
-              ...override,
-              status: "expired",
+            expireBreakGlassOverride(override, {
+              actor,
               expiredAt: new Date(nowMs).toISOString(),
-            }, "expired break-glass authorization could not be tombstoned by doctor GC");
+              detail: "expired break-glass authorization could not be tombstoned by doctor GC",
+            });
           } catch (error) {
             result.errors.push(`break-glass ${override.tokenId}: ${error.message}`);
             continue;
@@ -10059,7 +10059,9 @@ ${diff}`;
     } catch (error) {
       throw dispatcherError(
         503,
-        `${detail}: ${error?.message ?? error}`,
+        `${detail}: ${error?.message ?? error}; Atelier cannot mint or consume while ` +
+          "break-glass persistence is degraded. The operator's remaining escape is manual git, " +
+          "outside Atelier's authority claims",
       );
     }
   }
@@ -10070,9 +10072,26 @@ ${diff}`;
     } catch (error) {
       throw dispatcherError(
         503,
-        `break-glass audit event could not be persisted: ${error?.message ?? error}`,
+        `break-glass audit event could not be persisted: ${error?.message ?? error}; ` +
+          "Atelier cannot mint or consume while break-glass persistence is degraded. " +
+          "The operator's remaining escape is manual git, outside Atelier's authority claims",
       );
     }
+  }
+
+  function expireBreakGlassOverride(override, { actor, expiredAt, detail }) {
+    const expired = {
+      ...override,
+      status: "expired",
+      expiredAt,
+    };
+    persistBreakGlassOverride(expired, detail);
+    durableBreakGlassEvent({
+      actor: actionActor(actor),
+      phase: "expired",
+      ...expired,
+    });
+    return expired;
   }
 
   function evidenceSnapshot(record) {
@@ -10103,11 +10122,11 @@ ${diff}`;
       ) continue;
       const expiresAtMs = Date.parse(override.expiresAt);
       if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
-        persistBreakGlassOverride({
-          ...override,
-          status: "expired",
+        expireBreakGlassOverride(override, {
+          actor,
           expiredAt: supersededAt,
-        }, "expired break-glass authorization could not be tombstoned");
+          detail: "expired break-glass authorization could not be tombstoned",
+        });
         continue;
       }
       const superseded = {
@@ -10133,16 +10152,34 @@ ${diff}`;
     for (const { override } of breakGlassOverrides()) {
       if (!override.consumedAt || override.consumedEventAt) continue;
       recoveries.push(Promise.resolve().then(() => {
-        durableBreakGlassEvent({
-          actor: actionActor(override.consumedBy),
-          phase: "consumed",
-          recovered: true,
-          ...override,
-        });
-        persistBreakGlassOverride({
-          ...override,
-          consumedEventAt: new Date(breakGlassNow()).toISOString(),
-        }, "recovered break-glass audit marker could not be persisted");
+        const recordedEvents = securityEventLog().read?.({
+          kind: "dispatch.break-glass",
+          dispatchId: override.dispatchId,
+          limit: 1_000,
+        }) ?? [];
+        const alreadyRecorded = recordedEvents.some((event) =>
+          event.phase === "consumed" && event.tokenId === override.tokenId
+        );
+        if (!alreadyRecorded) {
+          durableBreakGlassEvent({
+            actor: actionActor(override.consumedBy),
+            phase: "consumed",
+            recovered: true,
+            ...override,
+          });
+        }
+        try {
+          persistBreakGlassOverride({
+            ...override,
+            consumedEventAt: new Date(breakGlassNow()).toISOString(),
+          }, "recovered break-glass audit marker could not be persisted");
+        } catch (error) {
+          // The durable event itself is the audit fact. A marker-only failure
+          // remains retryable debt and the next boot dedupes against that fact.
+          logPersistenceWarning(
+            `Atelier break-glass consumed-event marker recovery remains pending for ${override.tokenId}: ${error?.message ?? error}`,
+          );
+        }
       }).catch((error) => {
         // Audit recovery is debt collection, not a reason to poison boot. The
         // missing marker remains durable, so a later boot retries it.
@@ -10154,7 +10191,7 @@ ${diff}`;
     return recoveries;
   }
 
-  function assertForceMergeEligible(entry, project, { allowMerged = false } = {}) {
+  function assertForceMergeEligible(entry, project) {
     const { record } = entry;
     if (movingTrackers.has(project.name)) {
       throw dispatcherError(409, `Project ${project.name} tracker is moving`);
@@ -10166,7 +10203,7 @@ ${diff}`;
     if (record.state !== "completed") {
       throw dispatcherError(409, "state gate failed: dispatch must be completed");
     }
-    if (record.merged && !allowMerged) {
+    if (record.merged) {
       throw dispatcherError(409, "merge gate failed: dispatch is already merged");
     }
     if (project.archetype === "tracker-only") {
@@ -10236,10 +10273,12 @@ ${diff}`;
     dispositionRef,
     actor,
   } = {}) {
+    // Surface discipline today: ATT-008 makes this enforceable by withholding
+    // /api/session and /api/break-glass from sandboxed agents' brokered access.
     if (actor !== "human-ui") {
       throw dispatcherError(
         409,
-        "Break-glass authorization requires a fresh human web session action; bearer actors cannot mint it",
+        "Break-glass authorization requires a human web-session action; bearer actors cannot mint it",
       );
     }
     if (dispatchLifecycleReservations.has(id)) {
@@ -10319,7 +10358,7 @@ ${diff}`;
     return dispatcherError(409, `EATELIER_BREAK_GLASS_INVALID: ${cause}`);
   }
 
-  async function consumeBreakGlass(entry, project, token, actor) {
+  function loadBreakGlassOverride(entry, token) {
     const tokenId = tokenAuthority().verify(token);
     if (!tokenId) throw invalidBreakGlass("signature is invalid");
     let override;
@@ -10338,6 +10377,10 @@ ${diff}`;
     if (override.action !== "merge") {
       throw invalidBreakGlass("authorization is bound to a different action");
     }
+    return override;
+  }
+
+  function assertBreakGlassPending(override) {
     if (override.supersededAt || override.status === "superseded") {
       throw invalidBreakGlass("authorization was superseded");
     }
@@ -10347,13 +10390,22 @@ ${diff}`;
     if (override.consumedAt !== null || override.status === "consumed") {
       throw invalidBreakGlass("authorization was already consumed");
     }
+  }
+
+  function assertBreakGlassReplayNotConsumed(entry, token) {
+    assertBreakGlassPending(loadBreakGlassOverride(entry, token));
+  }
+
+  async function consumeBreakGlass(entry, project, token, actor) {
+    const override = loadBreakGlassOverride(entry, token);
+    assertBreakGlassPending(override);
     const expiresAtMs = Date.parse(override.expiresAt);
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= breakGlassNow()) {
-      persistBreakGlassOverride({
-        ...override,
-        status: "expired",
+      expireBreakGlassOverride(override, {
+        actor,
         expiredAt: new Date(breakGlassNow()).toISOString(),
-      }, "expired break-glass authorization could not be tombstoned");
+        detail: "expired break-glass authorization could not be tombstoned",
+      });
       throw invalidBreakGlass("authorization expired");
     }
     const currentEvidence = evidenceSnapshot(entry.record);
@@ -10385,10 +10437,18 @@ ${diff}`;
       phase: "consumed",
       ...consumed,
     });
-    persistBreakGlassOverride({
-      ...consumed,
-      consumedEventAt: new Date(breakGlassNow()).toISOString(),
-    }, "break-glass consumed-event marker could not be persisted");
+    try {
+      persistBreakGlassOverride({
+        ...consumed,
+        consumedEventAt: new Date(breakGlassNow()).toISOString(),
+      }, "break-glass consumed-event marker could not be persisted");
+    } catch (error) {
+      // The consumed tombstone and event are already durable. The optional
+      // marker is recovery debt and must not retroactively fail this merge.
+      logPersistenceWarning(
+        `Atelier break-glass consumed-event marker remains pending for ${consumed.tokenId}: ${error?.message ?? error}`,
+      );
+    }
     return {
       forcedBy: consumed.forcedBy,
       reason: consumed.reason,
@@ -10445,21 +10505,6 @@ ${diff}`;
       if (reservedEntry.record.state !== "completed") {
         throw dispatcherError(409, "state gate failed: dispatch must be completed");
       }
-      let forceAudit;
-      if (force) {
-        // Let token validation see an already-consumed authorization before the
-        // ordinary duplicate-merge gate. This keeps replay refusal explicit.
-        assertForceMergeEligible(reservedEntry, project, { allowMerged: true });
-        forceAudit = await consumeBreakGlass(
-          reservedEntry,
-          project,
-          breakGlassToken,
-          reservedEntry.actionActor,
-        );
-        if (reservedEntry.record.merged) {
-          throw invalidBreakGlass("dispatch is already merged");
-        }
-      }
       // A persisted terminal record becomes live as soon as merge owns its
       // lifecycle. Background history refreshes must not replace the object
       // while the protected merge awaits git commands.
@@ -10469,7 +10514,7 @@ ${diff}`;
       const run = previous.then(() => mergeUnlocked(id, {
         force,
         actor: reservedEntry.actionActor,
-        forceAudit,
+        breakGlassToken,
       }));
       const tail = run.then(
         () => undefined,
@@ -10486,7 +10531,7 @@ ${diff}`;
     }
   }
 
-  async function mergeUnlocked(id, { force = false, actor, forceAudit } = {}) {
+  async function mergeUnlocked(id, { force = false, actor, breakGlassToken } = {}) {
     if (typeof force !== "boolean") {
       throw dispatcherError(400, "force must be a boolean");
     }
@@ -10524,6 +10569,7 @@ ${diff}`;
       throw dispatcherError(409, `state gate failed: dispatch must be completed`);
     }
     if (record.merged) {
+      if (force) assertBreakGlassReplayNotConsumed(entry, breakGlassToken);
       await drainMergeFollowUpDebt(entry, project);
       return exposedRecord(record);
     }
@@ -10534,40 +10580,48 @@ ${diff}`;
         await drainMergeFollowUpDebt(entry, project);
         return exposedRecord(record);
       }
-      if (record.mergeIntent) {
-        if (!force) {
-          throw dispatcherError(
-            409,
-            "merge intent is pending recovery; reconciliation could not resolve it",
-          );
-        }
-        const abandonedMergeIntent = { ...record.mergeIntent };
-        const warningsBeforeAbandon = [...record.warnings];
-        const abandonedAt = new Date().toISOString();
-        const warning =
-          `merge intent from ${abandonedMergeIntent.startedAt || "an unknown time"} ` +
-          `was abandoned by audited force merge at ${abandonedAt}`;
-        if (!record.warnings.includes(warning)) record.warnings.push(warning);
-        try {
-          persistenceLogger.warn(`Atelier merge ${record.id}: ${warning}`);
-        } catch {
-          // Logging failures must not invalidate the audited escape hatch.
-        }
-        delete record.mergeIntent;
-        forceAudit = {
-          ...forceAudit,
-          abandonedMergeIntent,
-          abandonedMergeIntentAt: abandonedAt,
-        };
-        if (!persist(entry)) {
-          record.mergeIntent = abandonedMergeIntent;
-          record.warnings = warningsBeforeAbandon;
-          addPersistenceWarning(record);
-          throw dispatcherError(
-            409,
-            `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
-          );
-        }
+    }
+    let forceAudit;
+    if (force) {
+      // Reconciliation above may have completed a merge initiated by a prior
+      // request. Only consume after proving this request still has a merge to
+      // perform; a recovered prior outcome leaves its token pending.
+      assertForceMergeEligible(entry, project);
+      forceAudit = await consumeBreakGlass(entry, project, breakGlassToken, actor);
+    }
+    if (record.mergeIntent) {
+      if (!force) {
+        throw dispatcherError(
+          409,
+          "merge intent is pending recovery; reconciliation could not resolve it",
+        );
+      }
+      const abandonedMergeIntent = { ...record.mergeIntent };
+      const warningsBeforeAbandon = [...record.warnings];
+      const abandonedAt = new Date().toISOString();
+      const warning =
+        `merge intent from ${abandonedMergeIntent.startedAt || "an unknown time"} ` +
+        `was abandoned by audited force merge at ${abandonedAt}`;
+      if (!record.warnings.includes(warning)) record.warnings.push(warning);
+      try {
+        persistenceLogger.warn(`Atelier merge ${record.id}: ${warning}`);
+      } catch {
+        // Logging failures must not invalidate the audited escape hatch.
+      }
+      delete record.mergeIntent;
+      forceAudit = {
+        ...forceAudit,
+        abandonedMergeIntent,
+        abandonedMergeIntentAt: abandonedAt,
+      };
+      if (!persist(entry)) {
+        record.mergeIntent = abandonedMergeIntent;
+        record.warnings = warningsBeforeAbandon;
+        addPersistenceWarning(record);
+        throw dispatcherError(
+          409,
+          `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
+        );
       }
     }
     // Persistence is an authority gate, not an ordinary merge policy: force
@@ -11326,12 +11380,17 @@ ${diff}`;
 
   function appendMergeEventWithDebt(entry, mergeEvent = entry.record.mergeEventDebt?.event) {
     if (!mergeEvent) return true;
+    // Ordinary merge logging remains observational when no service writer is
+    // configured. Debt only represents a transient failure of a real log.
+    if (typeof eventLog?.appendDurable !== "function") return true;
     const previous = entry.record.mergeEventDebt;
     const attemptedAt = new Date().toISOString();
     try {
       securityEventLog().appendDurable("dispatch.merge", mergeEvent);
       if (previous) {
         delete entry.record.mergeEventDebt;
+        entry.record.warnings = entry.record.warnings.filter((warning) =>
+          !warning.startsWith("merge audit event pending:"));
         persist(entry);
       }
       return true;

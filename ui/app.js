@@ -5512,16 +5512,23 @@ async function renderDispatch(route, token) {
     try {
       let breakGlassToken;
       if (force) {
-        const authorization = await api("/api/break-glass", {
-          method: "POST",
-          body: {
-            dispatchId: record.id,
-            action: "merge",
-            targetSha: forceAudit.targetSha ?? record.branchHead ?? record.result?.commit,
-            ...forceAudit,
-          },
-        });
-        breakGlassToken = authorization.token;
+        try {
+          const authorization = await api("/api/break-glass", {
+            method: "POST",
+            body: {
+              dispatchId: record.id,
+              action: "merge",
+              targetSha: forceAudit.targetSha ?? record.branchHead ?? record.result?.commit,
+              ...forceAudit,
+            },
+          });
+          breakGlassToken = authorization.token;
+        } catch (error) {
+          // A stale target refusal means the dialog's captured record is stale.
+          // Refresh before the caller reopens it so the current SHA is shown.
+          await refreshRecord();
+          throw error;
+        }
       }
       record = await api(`/api/dispatch/${encoded(route.id)}/merge`, {
         method: "POST",

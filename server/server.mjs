@@ -177,12 +177,10 @@ const PATCH_LIMIT = 1024 * 1024;
 const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 1_500;
 const EVENT_STREAM_GLOBAL_LIMIT = 64;
 const EVENT_STREAM_PER_CREDENTIAL_LIMIT = 8;
-const MCP_RESTRICTED_SETTINGS = new Set([
+const MCP_GATE_CRITICAL_SETTINGS = new Set([
   "verifyCommands",
   "requireReview",
   "reviewPolicy",
-  "budgetUSDPerDay",
-  "unpricedDispatchCapPerDay",
 ]);
 const serverResources = new WeakMap();
 
@@ -907,7 +905,7 @@ export function createServer({
         if (authContext.actor !== "human-ui" || authContext.credential !== "session") {
           throw new HttpError(
             409,
-            "Break-glass authorization requires a fresh human web session action; API, CLI, and MCP bearers cannot mint it",
+            "Break-glass authorization requires a human web-session action; API, CLI, and MCP bearers cannot mint it",
           );
         }
         try {
@@ -1016,7 +1014,7 @@ export function createServer({
         try {
           const registration = { ...postBody };
           const restricted = Object.keys(registration).filter((key) =>
-            MCP_RESTRICTED_SETTINGS.has(key)
+            MCP_GATE_CRITICAL_SETTINGS.has(key)
           );
           if (requestActor(request) === "mcp" && restricted.length > 0) {
             throw new HttpError(
@@ -1122,7 +1120,7 @@ export function createServer({
           throw new HttpError(400, "At least one mutable project field is required");
         }
         const restricted = Object.keys(postBody).filter((key) =>
-          MCP_RESTRICTED_SETTINGS.has(key)
+          MCP_GATE_CRITICAL_SETTINGS.has(key)
         );
         if (requestActor(request) === "mcp" && restricted.length > 0) {
           throw new HttpError(

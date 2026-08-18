@@ -573,15 +573,18 @@ export function createEventLog({
       boundedPayload && typeof boundedPayload === "object" && !Array.isArray(boundedPayload)
         ? redactValue(boundedPayload)
         : {};
-    // The break-glass token id is an audit correlation handle, not the signed
-    // bearer token. Preserve that exact non-authorizing handle even though the
+    // Break-glass token ids are audit correlation handles, not signed bearer
+    // tokens. Preserve those exact non-authorizing handles even though the
     // general redactor conservatively treats every token-shaped key as secret.
-    if (
-      ["dispatch.break-glass", "dispatch.merge"].includes(kind) &&
-      typeof boundedPayload?.tokenId === "string" &&
-      /^[A-Za-z0-9_-]{43}$/.test(boundedPayload.tokenId)
-    ) {
-      safePayload.tokenId = boundedPayload.tokenId;
+    if (["dispatch.break-glass", "dispatch.merge"].includes(kind)) {
+      for (const field of ["tokenId", "supersededByTokenId"]) {
+        if (
+          typeof boundedPayload?.[field] === "string" &&
+          /^[A-Za-z0-9_-]{43}$/.test(boundedPayload[field])
+        ) {
+          safePayload[field] = boundedPayload[field];
+        }
+      }
     }
     for (const field of RESERVED_FIELDS) delete safePayload[field];
     const serialized = serialize({

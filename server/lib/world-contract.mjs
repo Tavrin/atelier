@@ -326,12 +326,14 @@ export function chronicleFor(records, project, {
     .sort((left, right) =>
       String(left.merged.mergedAt).localeCompare(String(right.merged.mergedAt)) ||
       String(left.id).localeCompare(String(right.id)));
+  const forcedMerged = merged.filter((record) => typeof record.merged?.forcedBy === "string");
+  const regularMerged = merged.filter((record) => typeof record.merged?.forcedBy !== "string");
   const bounded = merged.slice(-Math.max(1, limit));
   /* Git-backfilled merges deliberately carry no review history. They are real
      merges, but they are not evidence about review efficiency. Keep both the
      rate and its basis on the merged records whose review rounds Atelier
      actually observed, so history discovery cannot dilute the score. */
-  const reviewedMerges = merged.filter((record) => reviewRoundsFor(record).length > 0);
+  const reviewedMerges = regularMerged.filter((record) => reviewRoundsFor(record).length > 0);
   const firstPassReviews = reviewedMerges.filter((record) =>
     reviewRoundsFor(record).length === 1 &&
     ["passed", "passed-with-dispositions"].includes(reviewGate(record))).length;
@@ -360,7 +362,9 @@ export function chronicleFor(records, project, {
       }
     }
   }
-  const totalSpend = projectRecords.reduce((total, record) => total + numericCost(record), 0);
+  const regularScorecardSpend = projectRecords
+    .filter((record) => typeof record.merged?.forcedBy !== "string")
+    .reduce((total, record) => total + numericCost(record), 0);
   const unlandedSpendUSD = projectRecords
     .filter((record) => !record.merged)
     .reduce((total, record) => total + numericCost(record), 0);
@@ -389,14 +393,16 @@ export function chronicleFor(records, project, {
         : {}),
     })),
     summary: {
-      merges: merged.length,
+      merges: regularMerged.length,
+      forcedMerges: forcedMerged.length,
       firstPassReviews,
       reviewedMerges: reviewedMerges.length,
       reviewPassRate:
         reviewedMerges.length > 0 ? firstPassReviews / reviewedMerges.length : null,
       finalRoundSeverityDistribution,
       finalRoundSeverityDistributionByOutcome,
-      costPerMergeUSD: merged.length > 0 ? totalSpend / merged.length : null,
+      costPerMergeUSD:
+        regularMerged.length > 0 ? regularScorecardSpend / regularMerged.length : null,
       unlandedSpendUSD,
     },
     truncated: merged.length > bounded.length,

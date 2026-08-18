@@ -236,6 +236,8 @@ test("atelier_project_add refuses gate-critical onboarding fields and forwards s
     tracker: "none",
     containerized: false,
     verifyMode: "worktree",
+    budgetUSDPerDay: 12,
+    unpricedDispatchCapPerDay: 4,
   };
   const responses = await exchange(handshake(
     toolCall(2, "atelier_project_add", {

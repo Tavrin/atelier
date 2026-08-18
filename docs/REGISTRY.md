@@ -22,6 +22,11 @@ brokered API access that excludes both `/api/session` and `/api/break-glass`.
 The existing actor gate remains valuable for every labeled surface and for
 those future sandboxed agents.
 
+Break-glass deliberately fails closed when daemon persistence is degraded:
+Atelier cannot mint or consume an override without durable authorization and
+audit evidence. The remaining emergency escape is manual git performed by the
+operator, outside Atelier's authority claims and audit guarantees.
+
 ## Schema (version 1)
 
 - `defaults.concurrentDispatchCap` - running+preparing dispatches across all

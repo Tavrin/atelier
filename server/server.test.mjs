@@ -647,7 +647,7 @@ test("break-glass mint requires a browser session plus CSRF and rejects every be
       credential,
     });
     assert.equal(rejected.status, 409, credential);
-    assert.match(JSON.parse(rejected.text).error, /fresh human web session action/);
+    assert.match(JSON.parse(rejected.text).error, /human web-session action/);
   }
 
   const session = await browserSession(port);
@@ -1048,6 +1048,7 @@ test("project chronicle is bounded API data cached from the boot record snapshot
     }],
     summary: {
       merges: 1,
+      forcedMerges: 0,
       firstPassReviews: 1,
       reviewedMerges: 1,
       reviewPassRate: 1,
@@ -1402,6 +1403,7 @@ test("a project registered after boot gets an empty frozen chronicle snapshot", 
     records: [],
     summary: {
       merges: 0,
+      forcedMerges: 0,
       firstPassReviews: 0,
       reviewedMerges: 0,
       reviewPassRate: null,
@@ -2086,8 +2088,6 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
     ["verifyCommands", ["node --test"]],
     ["requireReview", true],
     ["reviewPolicy", "tiered"],
-    ["budgetUSDPerDay", 10],
-    ["unpricedDispatchCapPerDay", 3],
   ];
 
   for (const [field, value] of gateFields) {
@@ -2109,18 +2109,29 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
   const benign = await send(port, {
     method: "PATCH",
     path: "/api/projects/tracked",
-    body: JSON.stringify({ notes: "Updated through MCP" }),
+    body: JSON.stringify({
+      notes: "Updated through MCP",
+      budgetUSDPerDay: 10,
+      unpricedDispatchCapPerDay: 3,
+    }),
     contentType: "application/json",
     credential: "mcp",
   });
   assert.equal(benign.status, 200);
   assert.equal(registry.projects[0].notes, "Updated through MCP");
+  assert.equal(registry.projects[0].budgetUSDPerDay, 10);
+  assert.equal(registry.projects[0].unpricedDispatchCapPerDay, 3);
 });
 
 test("MCP onboarding cannot set gate policy and accepted onboarding receives safe defaults", async (t) => {
   const { port, root, registry } = await serverFixture(t);
   const candidate = await gitProject(root, "mcp-safe-onboarding", "none");
-  const registration = { ...candidate, archetype: "git-only" };
+  const registration = {
+    ...candidate,
+    archetype: "git-only",
+    budgetUSDPerDay: 12,
+    unpricedDispatchCapPerDay: 4,
+  };
   delete registration.verifyCommands;
 
   for (const [field, value] of [
@@ -2152,6 +2163,8 @@ test("MCP onboarding cannot set gate policy and accepted onboarding receives saf
   assert.deepEqual(project.verifyCommands, []);
   assert.equal(project.requireReview, false);
   assert.equal(project.reviewPolicy, "strict");
+  assert.equal(project.budgetUSDPerDay, 12);
+  assert.equal(project.unpricedDispatchCapPerDay, 4);
 });
 
 test("queueFailureLimit parking changes immediately reach board SSE without a tracker write", async (t) => {
@@ -3870,6 +3883,7 @@ test("dispatch UI gates normal merges and confirms force merges in-app", async (
   assert.match(app.text, /openForceMergeConfirmation/);
   assert.match(app.text, /modalFrame\("Override merge gates"/);
   assert.match(app.text, /api\("\/api\/break-glass"/);
+  assert.match(app.text, /catch \(error\) \{[\s\S]*await refreshRecord\(\);[\s\S]*throw error;/);
   assert.match(app.text, /targetSha: forceAudit\.targetSha/);
   assert.match(app.text, /body: \{ force, \.\.\.\(breakGlassToken/);
   assert.match(app.text, /forcedBy: forcedBy\.value\.trim\(\)/);

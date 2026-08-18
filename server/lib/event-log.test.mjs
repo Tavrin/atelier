@@ -71,16 +71,21 @@ test("security-critical append is inline, fsyncs, and retains the non-authorizin
     },
   });
   const tokenId = "a".repeat(43);
+  const successorTokenId = "b".repeat(43);
   const event = log.appendDurable("dispatch.break-glass", {
     dispatchId: "dispatch-1",
-    phase: "minted",
+    phase: "superseded",
     tokenId,
+    supersededByTokenId: successorTokenId,
   });
 
   assert.equal(event.tokenId, tokenId);
+  assert.equal(event.supersededByTokenId, successorTokenId);
   assert.equal(descriptorAppends, 1);
   assert.ok(fsyncs >= 1);
-  assert.equal(JSON.parse(await readFile(log.path, "utf8")).tokenId, tokenId);
+  const stored = JSON.parse(await readFile(log.path, "utf8"));
+  assert.equal(stored.tokenId, tokenId);
+  assert.equal(stored.supersededByTokenId, successorTokenId);
 });
 
 test("durable rotation best-effort fsyncs the log directory after renames", async (t) => {

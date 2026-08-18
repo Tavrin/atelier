@@ -307,7 +307,7 @@ why an issue is blocked, but must not invent readiness from field absence.
     diff: { files, insertions, deletions } | null
   }],
   summary: {
-    merges, firstPassReviews, reviewedMerges, reviewPassRate,
+    merges, forcedMerges, firstPassReviews, reviewedMerges, reviewPassRate,
     costPerMergeUSD, unlandedSpendUSD
   },
   truncated
@@ -317,6 +317,9 @@ why an issue is blocked, but must not invent readiness from field absence.
 `firstPassReviews` counts a one-round merge only when its final review gate is
 `passed` or `passed-with-dispositions`; tiered/advisory merges of a one-round
 `FAIL` remain reviewed merges but are not first-pass successes.
+`merges`, `reviewedMerges`, and `costPerMergeUSD` describe ordinary merges;
+`forcedMerges` counts audited break-glass outcomes separately. Forced records
+remain present in `records` with their authorization fields.
 
 `GET /api/chronicle` returns every project present at boot, merged in
 chronological order under the same 500-entry bound:
