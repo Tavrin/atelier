@@ -5,11 +5,14 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   unlinkSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 import {
   appendDurable,
@@ -103,6 +106,14 @@ function readLease(path) {
   return JSON.parse(readFileNoFollowSync(path, "utf8"));
 }
 
+function releaseLease(path) {
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
 function leaseValue(values) {
   const dispatcherPid = Number(values["dispatcher-pid"]);
   if (!values["dispatcher-id"] || !Number.isInteger(dispatcherPid) || dispatcherPid <= 0) {
@@ -187,6 +198,32 @@ function printableJob(job) {
     pid: alive ? job.pid : null,
     ...(liveness.warning ? { warning: liveness.warning } : {}),
   };
+}
+
+function pathInside(root, candidate) {
+  let rootPath;
+  let candidatePath;
+  try {
+    rootPath = realpathSync(root);
+    candidatePath = realpathSync(candidate);
+  } catch {
+    return false;
+  }
+  return candidatePath === rootPath || candidatePath.startsWith(`${rootPath}${process.platform === "win32" ? "\\" : "/"}`);
+}
+
+function guardedStubAllowed(job) {
+  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER !== "1") return true;
+  return job.testStub === true &&
+    pathInside(tmpdir(), job.workspace) &&
+    pathInside(job.workspace, job.codexPath);
+}
+
+function assertRealProviderGuard(job) {
+  if (guardedStubAllowed(job)) return;
+  throw new Error(
+    "EATELIER_REAL_PROVIDER_DISABLED: Codex app-server launch is disabled by ATELIER_TEST_NO_REAL_PROVIDER=1",
+  );
 }
 
 function appendStream(job, message) {
@@ -352,6 +389,13 @@ function assertBinaryFiles(files) {
 async function runJob(path) {
   // The detached child, not the launcher, establishes its own fence as its
   // first state mutation. The launcher performs no post-spawn job writes.
+  const initial = readJob(path);
+  const startDelayMs = initial.testStub
+    ? testTunable("ATELIER_TEST_CODEX_RUNNER_START_DELAY_MS", 0)
+    : 0;
+  if (startDelayMs > 0) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, startDelayMs));
+  }
   let job = updateJob(path, (current) => ({
     ...current,
     status: "running",
@@ -359,6 +403,34 @@ async function runJob(path) {
     pidStartIdentity: processStartIdentity(process.pid),
     startedAt: new Date().toISOString(),
   }));
+  try {
+    assertBinaryFiles(job.binaryFiles);
+  } catch (error) {
+    const safeError = redactText(error.message);
+    updateJob(path, (current) => ({
+      ...current,
+      status: "failed",
+      errorMessage: safeError,
+      summary: safeError,
+      endedAt: new Date().toISOString(),
+    }));
+    releaseLease(leasePath(dirname(path), initial.jobId));
+    return;
+  }
+  try {
+    assertRealProviderGuard(job);
+  } catch (error) {
+    const safeError = redactText(error.message);
+    updateJob(path, (current) => ({
+      ...current,
+      status: "failed",
+      errorMessage: safeError,
+      summary: safeError,
+      endedAt: new Date().toISOString(),
+    }));
+    releaseLease(leasePath(dirname(path), initial.jobId));
+    throw error;
+  }
   let finalMessage = "";
   let terminalResolve;
   let terminalReject;
@@ -376,19 +448,7 @@ async function runJob(path) {
       rejectPromise(error);
     };
   });
-  try {
-    assertBinaryFiles(job.binaryFiles);
-  } catch (error) {
-    const safeError = redactText(error.message);
-    updateJob(path, (current) => ({
-      ...current,
-      status: "failed",
-      errorMessage: safeError,
-      summary: safeError,
-      endedAt: new Date().toISOString(),
-    }));
-    return;
-  }
+  let terminalOutcome;
   const proc = spawn(job.codexPath, ["app-server", "--stdio"], {
     cwd: job.workspace,
     env: process.env,
@@ -415,13 +475,16 @@ async function runJob(path) {
       const success = params.turn?.status === "completed";
       const errorMessage = params.turn?.error?.message ??
         (success ? null : `Codex turn ended with status ${params.turn?.status ?? "unknown"}`);
-      job = updateJob(path, (current) => ({
-        ...current,
+      terminalOutcome = {
         status: success ? "completed" : "failed",
         rawOutput: redactText(finalMessage),
         summary: redactText(errorMessage ?? finalMessage),
         errorMessage: errorMessage ? redactText(errorMessage) : null,
-        endedAt: new Date().toISOString(),
+      };
+      job = updateJob(path, (current) => ({
+        ...current,
+        ...terminalOutcome,
+        status: "finishing",
       }));
       terminalResolve();
     }
@@ -437,11 +500,15 @@ async function runJob(path) {
     } catch {
       // The process-group owner below remains the authoritative cancellation boundary.
     }
-    job = updateJob(path, (current) => TERMINAL.has(current.status) ? current : ({
-      ...current,
+    terminalOutcome = {
       status: "cancelled",
       summary: "stopped by user",
-      endedAt: new Date().toISOString(),
+      errorMessage: null,
+    };
+    job = updateJob(path, (current) => TERMINAL.has(current.status) ? current : ({
+      ...current,
+      ...terminalOutcome,
+      status: "finishing",
     }));
     proc.kill("SIGTERM");
     terminalResolve();
@@ -492,16 +559,30 @@ async function runJob(path) {
     await terminal;
   } catch (error) {
     const safeError = redactText(error.message);
+    terminalOutcome = {
+      status: terminalOutcome?.status === "cancelled" ? "cancelled" : "failed",
+      errorMessage: safeError,
+      summary: redactText(job.summary || safeError),
+      rawOutput: redactText(job.rawOutput ?? finalMessage),
+    };
     job = updateJob(path, (current) => ({
       ...current,
-      status: current.status === "cancelled" ? "cancelled" : "failed",
-      errorMessage: safeError,
-      summary: redactText(current.summary || safeError),
-      rawOutput: redactText(current.rawOutput ?? finalMessage),
-      endedAt: new Date().toISOString(),
+      ...terminalOutcome,
+      status: "finishing",
     }));
   } finally {
     await terminateAppServer(proc);
+    const outcome = terminalOutcome ?? {
+      status: "failed",
+      errorMessage: "Codex app-server runner ended without a terminal outcome",
+      summary: "Codex app-server runner ended without a terminal outcome",
+    };
+    job = updateJob(path, (current) => ({
+      ...current,
+      ...outcome,
+      endedAt: new Date().toISOString(),
+    }));
+    releaseLease(leasePath(dirname(path), job.jobId));
   }
 }
 
@@ -550,7 +631,17 @@ async function task(values) {
     summary: "",
     rawOutput: "",
     errorMessage: null,
+    testStub: values["test-stub"] === true,
   };
+  let binaryPinsMatch = true;
+  try {
+    assertBinaryFiles(binaryFiles);
+  } catch {
+    binaryPinsMatch = false;
+  }
+  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER === "1" && binaryPinsMatch) {
+    assertRealProviderGuard(job);
+  }
   writeJob(path, job);
   const attachment = takeLease(leasePath(values["state-dir"], id), values);
   const child = spawn(process.execPath, [resolve(process.argv[1]), "run", "--job", path], {
@@ -562,7 +653,7 @@ async function task(values) {
   });
   child.unref();
   let owned = readJob(path);
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + testTunable("ATELIER_TEST_CODEX_LAUNCH_TIMEOUT_MS", 2_000);
   while (owned.pid !== child.pid && Date.now() < deadline) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
     owned = readJob(path);
@@ -580,6 +671,7 @@ async function task(values) {
 async function cancel(path) {
   let job = readJob(path);
   if (TERMINAL.has(job.status) && !liveWorker(job)) {
+    releaseLease(leasePath(dirname(path), job.jobId));
     return { finish: true, status: job.status };
   }
   if (!liveWorker(job)) {
@@ -643,14 +735,22 @@ async function main() {
     console.log(JSON.stringify(await cancel(path)));
     return;
   }
-  const job = {
-    ...printableJob(readJob(path)),
-    attachLease: readLease(leasePath(values["state-dir"], id)),
-  };
+  const job = printableJob(readJob(path));
+  try {
+    job.attachLease = readLease(leasePath(values["state-dir"], id));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    if (!TERMINAL.has(job.status)) {
+      job.warning = [job.warning, "Codex job attachment lease is missing; a dispatcher may adopt it with attach"]
+        .filter(Boolean)
+        .join("; ");
+      job.adoptableViaAttach = true;
+    }
+  }
   console.log(JSON.stringify(command === "result" ? { ...job, result: job } : job));
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;

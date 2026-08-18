@@ -14,7 +14,9 @@ import {
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
+import { killTracked } from "../exec.mjs";
 import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
 import {
   EXECUTION_PROFILE_MISMATCH,
@@ -25,11 +27,18 @@ import {
 import { stateDir } from "../paths.mjs";
 import { retrievedFinalOutput } from "../stream.mjs";
 
-const RUNNER_PATH = new URL("./codex-app-server-runner.mjs", import.meta.url).pathname;
+const RUNNER_PATH = fileURLToPath(new URL("./codex-app-server-runner.mjs", import.meta.url));
 const POLL_INTERVAL_MS = 2_000;
 const STATUS_FAILURE_RETRY_LIMIT = 3;
 const STREAM_READ_CHUNK_BYTES = 64 * 1024;
-const KNOWN_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
+const KNOWN_STATUSES = new Set([
+  "queued",
+  "running",
+  "finishing",
+  "completed",
+  "failed",
+  "cancelled",
+]);
 const EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh", "max"]);
 const CODEX_GIT_WARNING =
   "Atelier cannot write the worktree gitdir - automatic Codex commit may fail";
@@ -508,12 +517,13 @@ async function poll(entry, project, commandRunner, callbacks, { failOnFirstError
       return;
     }
     entry.codexStatusFailures = 0;
-    if (["queued", "running"].includes(status)) {
+    if (["queued", "running", "finishing"].includes(status)) {
       if (failOnFirstError) {
         const verdict = callbacks.classifyReportedWorker?.(
           entry,
           workerPid,
           snapshot.pidStartIdentity,
+          { runnerSnapshot: true },
         ) ?? "alive";
         if (verdict !== "alive") {
           const gone = callbacks.resolveSnapshotWorker?.(entry, workerPid) ?? true;
@@ -522,6 +532,7 @@ async function poll(entry, project, commandRunner, callbacks, { failOnFirstError
             : `worker could not be confirmed alive or dead after restart (pid ${workerPid})`);
           return;
         }
+        callbacks.confirmCodexReattach?.(entry);
       }
       const owned = callbacks.captureWorkerPid?.(entry, workerPid) ?? false;
       if (owned) callbacks.captureCodexProcessTree?.(entry, workerPid);
@@ -541,6 +552,7 @@ async function poll(entry, project, commandRunner, callbacks, { failOnFirstError
         await failTurn(entry, project, callbacks, `job reported ${status} but its worker could not be confirmed dead (pid ${workerPid})`);
         return;
       }
+      if (failOnFirstError) callbacks.confirmCodexReattach?.(entry);
       if (!entry.codexTurnCounted) {
         entry.codexTurnCounted = true;
         entry.record.turns = (Number(entry.record.turns) || 0) + 1;
@@ -644,14 +656,21 @@ function launchRunner(options, { resume = false } = {}) {
   child.once("error", (error) => { processError = error; });
   child.once("close", (code) => {
     if (entry.record.state === "stopping") {
-      void callbacks.finish(entry, project, code, null, processError);
+      // stop() owns the cancellation proof. The launcher exiting only proves
+      // that this short-lived child is gone; the detached runner may still be
+      // writing, so its close event must never finish or clean the dispatch.
+      entry.child = undefined;
       return;
     }
     let launch;
     try { launch = JSON.parse(output); } catch { launch = {}; }
     if (processError || code !== 0 || launch.jobId !== jobId) {
       entry.result = { success: false, summary: "Codex app-server runner launch failed" };
-      void callbacks.finish(entry, project, code, null, processError);
+      entry.child = undefined;
+      callbacks.retainCodexReattachFailure?.(
+        entry,
+        `Codex runner launcher failed after job ${jobId} was persisted; restart reattach will resolve the detached runner`,
+      );
       return;
     }
     entry.child = undefined;
@@ -719,12 +738,22 @@ function detach({ entry }) {
 }
 
 async function stop({ entry, commandRunner }) {
-  if (!entry.codexJobId) return { finish: entry.child ? false : true };
+  if (entry.pollTimer) clearTimeout(entry.pollTimer);
+  entry.pollTimer = undefined;
+  const launcher = entry.child;
+  if (launcher) killTracked(launcher);
+  const jobId = entry.codexJobId ?? entry.record.codexJobId;
+  if (!jobId) {
+    if (!launcher) return { finish: true };
+    const warning = "Codex launcher was stopped before a runner job could be identified; runner death is unproven";
+    addWarningOnce(entry, warning);
+    return { finish: false, warning };
+  }
   try {
     const raw = await commandRunner(process.execPath, [
       RUNNER_PATH,
       "cancel",
-      entry.codexJobId,
+      jobId,
       "--state-dir",
       runnerStateDir(),
     ], { cwd: entry.record.codexWorkspace ?? entry.record.worktreePath, env: entry.env });

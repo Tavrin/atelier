@@ -22,7 +22,6 @@ import { configDir, stateDir } from "../server/lib/paths.mjs";
 import {
   loadRegistry,
   RegistryError,
-  resolveProjectDefaultAgent,
   STARTER_REGISTRY,
 } from "../server/lib/registry.mjs";
 import { installService, restartServiceSafely } from "../server/lib/service.mjs";
@@ -594,6 +593,8 @@ async function doctor(args) {
     const processVerb = result.dryRun ? "would reap codex process" : "reaped codex process";
     for (const id of result.dismissed) console.log(`${verb}: ${id}`);
     for (const path of result.orphans) console.log(`${orphanVerb}: ${path}`);
+    const codexJobVerb = result.dryRun ? "would remove codex job" : "removed codex job";
+    for (const jobId of result.codexJobs ?? []) console.log(`${codexJobVerb}: ${jobId}`);
     const codexProcesses = result.codexProcesses ??
       { supported: false, reaped: [], reported: [], errors: [] };
     for (const reaped of codexProcesses.reaped) {
@@ -656,16 +657,26 @@ async function doctor(args) {
   }
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
 
-  const codexConfigured = registry.projects.some((project) =>
-    resolveProjectDefaultAgent(project, registry.defaults) === "codex"
-  );
-  if (!codexConfigured) {
-    console.log("codex: not configured");
-    return;
-  }
   const binary = inspectCodexBinary(process.env);
   if (!binary.resolvedPath) {
-    console.error("codex: missing (configure an absolute PATH entry containing codex)");
+    console.log("codex: not installed");
+    return;
+  }
+  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER === "1") {
+    if (!binary.version || !binary.digest) {
+      console.error(`codex: failed (${binary.resolvedPath} could not be versioned and digested)`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(
+      `codex: guarded (${binary.version}; app-server probe disabled by ATELIER_TEST_NO_REAL_PROVIDER=1)`,
+    );
+    return;
+  }
+  try {
+    await probeCodexAppServer(binary.resolvedPath, process.env);
+  } catch (error) {
+    console.error(`codex: failed (app-server initialize handshake failed: ${error.message})`);
     process.exitCode = 1;
     return;
   }
@@ -674,20 +685,8 @@ async function doctor(args) {
     process.exitCode = 1;
     return;
   }
-  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER === "1") {
-    console.log(
-      `codex: guarded (${binary.version}; app-server probe disabled by ATELIER_TEST_NO_REAL_PROVIDER=1)`,
-    );
-    return;
-  }
-  try {
-    await probeCodexAppServer(binary.resolvedPath, process.env);
-    console.log(`codex binary: ${binary.resolvedPath} (sha256 ${binary.digest.slice(0, 12)})`);
-    console.log(`codex: ok (${binary.version}, app-server ok)`);
-  } catch (error) {
-    console.error(`codex: failed (app-server initialize handshake failed: ${error.message})`);
-    process.exitCode = 1;
-  }
+  console.log(`codex binary: ${binary.resolvedPath} (sha256 ${binary.digest.slice(0, 12)})`);
+  console.log(`codex: ok (${binary.version}, app-server ok)`);
 }
 
 async function main() {

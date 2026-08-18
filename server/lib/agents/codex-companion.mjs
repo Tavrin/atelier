@@ -5,6 +5,7 @@ import {
   read,
   readFileSync,
   readdirSync,
+  realpathSync,
   stat,
   statSync,
   unlinkSync,
@@ -522,10 +523,21 @@ function executionProfile({
   const companionPath = explicitLegacy
     ? (resolveCurrent ? companionResolver() ?? null : entry.companionPath ?? companionResolver() ?? null)
     : entry.companionPath ?? recordedPath;
+  let interpreterPath = process.execPath;
+  const recordedInterpreter = entry.record.executionProfile?.executable?.resolvedPath;
+  if (recordedInterpreter) {
+    try {
+      if (realpathSync(recordedInterpreter) === realpathSync(process.execPath)) {
+        interpreterPath = recordedInterpreter;
+      }
+    } catch {
+      // A vanished or different legacy interpreter follows the normal mismatch path.
+    }
+  }
   return createExecutionProfile({
     agentLane: entry.record.lane,
     command: process.execPath,
-    executableResolvedPath: process.execPath,
+    executableResolvedPath: interpreterPath,
     companionPath,
     companionDigest: executableDigest(companionPath),
     binaryPinned: false,

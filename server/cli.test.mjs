@@ -72,14 +72,18 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
     [resolve("bin", "atelier.mjs"), "doctor"],
     {
       cwd: resolve("."),
-      env: { ...process.env, ATELIER_CONFIG_DIR: root },
+      env: {
+        ...process.env,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+      },
     },
   );
   assert.match(stdout, /registry: ok \(1 projects\)/);
   assert.match(stdout, /git: ok/);
   assert.match(stdout, /br: ok/);
   assert.match(stdout, /claude: ok/);
-  assert.match(stdout, /codex: not configured/);
+  assert.match(stdout, /codex: (?:guarded|not installed)/);
 
   const atelierState = join(root, "state");
   await mkdir(join(atelierState, "dispatches"), { recursive: true });
@@ -390,6 +394,28 @@ lines.on("line", (line) => {
   );
   assert.match(guarded.stdout, /codex: guarded \(codex-cli 9\.9\.9; app-server probe disabled/);
   assert.equal((await readFile(protocolLog, "utf8")).trim().split("\n").length, 2);
+
+  const reachableRegistryPath = join(root, "projects.json");
+  const reachableRegistry = JSON.parse(await readFile(reachableRegistryPath, "utf8"));
+  reachableRegistry.defaults.dispatchProfile.lane = "claude";
+  await writeFile(reachableRegistryPath, JSON.stringify(reachableRegistry));
+  const reachableWithoutDefault = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor"],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+        FAKE_CODEX_LOG: protocolLog,
+        PATH: `${binPath}:${process.env.PATH}`,
+      },
+    },
+  );
+  assert.match(reachableWithoutDefault.stdout, /codex: guarded \(codex-cli 9\.9\.9/);
+  reachableRegistry.defaults.dispatchProfile.lane = "codex";
+  await writeFile(reachableRegistryPath, JSON.stringify(reachableRegistry));
 
   await assert.rejects(
     execFileAsync(

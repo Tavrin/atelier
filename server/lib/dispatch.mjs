@@ -3021,6 +3021,29 @@ export function createDispatcher({
     };
   }
 
+  function retainCodexReattachFailure(entry, detail) {
+    const reason = redactText(String(detail || "Codex runner attachment could not be established"));
+    entry.record.orphanUnresolved = true;
+    entry.record.restartResumeReady = false;
+    entry.record.warnings = (entry.record.warnings || []).filter(
+      (warning) => !String(warning).startsWith(UNRESOLVED_ORPHAN_WARNING_PREFIX),
+    );
+    entry.record.warnings.push(
+      `${UNRESOLVED_ORPHAN_WARNING_PREFIX} ${reason} - the tracker claim is retained and this ticket stays blocked until restart reattach proves the runner state or the dispatch is dismissed`,
+    );
+    persist(entry);
+    emit(entry, { type: "status", state: entry.record.state, detail: reason });
+  }
+
+  function confirmCodexReattach(entry) {
+    if (entry.record.orphanUnresolved !== true) return;
+    entry.record.orphanUnresolved = false;
+    entry.record.warnings = (entry.record.warnings || []).filter(
+      (warning) => !String(warning).startsWith(UNRESOLVED_ORPHAN_WARNING_PREFIX),
+    );
+    persist(entry);
+  }
+
   // Minting an identity for a reported pid is how the codex lane acquires its
   // fence at all (atelier-tzw finding 4: only ORDINARY live polling, with Atelier's
   // own poller watching the job it launched, may establish one).
@@ -3111,15 +3134,16 @@ export function createDispatcher({
   // "provably gone" and "cannot tell" into one answer and only the first may
   // release a claim (round 4, item 1a).
   //
-  // Bare /proc existence is never sufficient evidence on its own (atelier-tzw
-  // review finding 4): identity is only ever legitimately established by
-  // captureWorkerPid during ORDINARY live polling, i.e. while Atelier's own
-  // dispatcher was continuously watching the job run. A boot-time reattach can
-  // extend that trust across the restart, but it can never mint it fresh - so an
-  // uncorroborated live pid is unresolved, not alive and not dead.
-  function classifyReportedWorker(entry, pid, reportedIdentity) {
+  // A legacy/companion snapshot may only extend an identity Atelier captured
+  // while it was continuously watching that worker. Owner-accepted ATT-009 B2
+  // is the narrow exception: the Atelier-owned runner's durable job file may
+  // mint its reported pid+start identity during boot reattach, closing the
+  // record-persist-before-spawn crash window. Non-Linux signal-0 degradation is
+  // scoped to that runner snapshot too; it never softens the shared fence
+  // classifier or legacy companion liveness.
+  function classifyReportedWorker(entry, pid, reportedIdentity, { runnerSnapshot = false } = {}) {
     if (Number.isInteger(pid) && pid > 0) {
-      if (process.platform !== "linux" && processExists(pid)) {
+      if (runnerSnapshot && process.platform !== "linux" && processExists(pid)) {
         addWarningOnce(
           entry.record,
           "Codex runner liveness uses weaker signal-0 corroboration on this platform",
@@ -3128,6 +3152,7 @@ export function createDispatcher({
         return "alive";
       }
       if (
+        runnerSnapshot &&
         typeof reportedIdentity === "string" &&
         reportedIdentity &&
         processStartIdentity(pid) === reportedIdentity &&
@@ -4428,20 +4453,22 @@ export function createDispatcher({
                 confirmChildExit,
                 resolveSnapshotWorker,
                 dispatcherLease,
+                confirmCodexReattach,
                 emit,
                 finish,
                 normalizeLine,
                 restoreClearedOutcome,
                 streamLines,
                 transition,
+                retainCodexReattachFailure,
               },
             }))
-            .catch(async (error) => {
+            .catch((error) => {
               entry.inert = false;
               entry.finished = false;
               entry.result = { success: false, summary: "codex reattach failed" };
               entry.stderrLines.push(`codex reattach failed: ${error.message}`);
-              await finish(entry, project, null, null);
+              retainCodexReattachFailure(entry, `codex reattach failed: ${error.message}`);
             }),
         );
         continue;
@@ -6332,12 +6359,14 @@ export function createDispatcher({
           confirmChildExit,
           resolveSnapshotWorker,
           dispatcherLease,
+          confirmCodexReattach,
           emit,
           finish,
           normalizeLine,
           restoreClearedOutcome,
           streamLines,
           transition,
+          retainCodexReattachFailure,
         },
       });
     } catch (error) {
@@ -8768,12 +8797,14 @@ ${diff}`;
             confirmChildExit,
             resolveSnapshotWorker,
             dispatcherLease,
+            confirmCodexReattach,
             emit,
             finish,
             normalizeLine,
             restoreClearedOutcome,
             streamLines,
             transition,
+            retainCodexReattachFailure,
           },
         });
       } catch (error) {
@@ -8944,12 +8975,14 @@ ${diff}`;
             confirmChildExit,
             resolveSnapshotWorker,
             dispatcherLease,
+            confirmCodexReattach,
             emit,
             finish,
             normalizeLine,
             restoreClearedOutcome,
             streamLines,
             transition,
+            retainCodexReattachFailure,
           },
         });
       } catch (error) {
@@ -9054,7 +9087,7 @@ ${diff}`;
         }
         await finish(reservedEntry, project, 0);
       }
-      if (activeState === "preparing") {
+      if (activeState === "preparing" && stopResult.finish) {
         await cleanupDispatchArtifacts(reservedEntry, project, { bestEffort: true });
       }
       return exposedRecord(reservedEntry.record);
@@ -9578,6 +9611,7 @@ ${diff}`;
       olderThanDays,
       dismissed: [],
       orphans: [],
+      codexJobs: [],
       errors: [],
       warnings: [],
       persistenceFailureTargets: persistenceFailureTargets(),
@@ -9657,6 +9691,79 @@ ${diff}`;
         }
       } catch (error) {
         result.errors.push(`dispatch ${entry.record.id}: ${error.message}`);
+      }
+    }
+
+    // Runner state has the same retention horizon as the dispatch index. A
+    // terminal job is published only after its app-server is gone, but retain
+    // older/pre-fix files too whenever their recorded pid is still live or
+    // uncorroborated. Auxiliary artifacts are removed before the job JSON so a
+    // crash never leaves an apparently collected job with live attachments.
+    const codexJobsRoot = join(stateDir, "codex-app-server", "jobs");
+    let jobEntries = [];
+    try {
+      jobEntries = readdirSync(codexJobsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code !== "ENOENT") result.errors.push(`codex jobs: ${error.message}`);
+    }
+    for (const dirent of jobEntries) {
+      const match = /^([a-f0-9]{24})\.json$/.exec(dirent.name);
+      if (!match || !dirent.isFile() || dirent.isSymbolicLink()) continue;
+      const jobId = match[1];
+      const path = join(codexJobsRoot, dirent.name);
+      try {
+        const details = lstatSync(path);
+        if (!details.isFile() || details.isSymbolicLink()) continue;
+        const job = JSON.parse(readFileNoFollowSync(path, "utf8"));
+        const endedAt = new Date(job.endedAt).getTime();
+        if (job.jobId !== jobId || !["completed", "failed", "cancelled"].includes(job.status) ||
+            !Number.isFinite(endedAt) || endedAt >= cutoff) continue;
+        const worker = classifyFencedPid(
+          job.pid,
+          job.pidStartIdentity,
+          "this Codex runner job's worker",
+        );
+        if (!["dead", "absent"].includes(worker.outcome)) {
+          result.warnings.push(`codex job ${jobId} retained: worker death is unproven`);
+          continue;
+        }
+        const artifacts = [
+          join(codexJobsRoot, `${jobId}.stream.jsonl`),
+          join(codexJobsRoot, `${jobId}.attach.json`),
+        ];
+        if (typeof job.promptPath === "string" && job.promptPath) {
+          const promptPath = resolve(job.promptPath);
+          const segment = relative(resolve(stateDir), promptPath);
+          if (segment && !segment.startsWith("..") && !isAbsolute(segment) &&
+              basename(promptPath).endsWith(".codex-prompt.md")) {
+            artifacts.push(promptPath);
+          }
+        }
+        if (!dryRun) {
+          const removalArtifacts = [...artifacts, path];
+          let unsafeArtifact;
+          for (const artifact of removalArtifacts) {
+            try {
+              const artifactDetails = lstatSync(artifact);
+              if (!artifactDetails.isFile() || artifactDetails.isSymbolicLink()) {
+                unsafeArtifact = artifact;
+                break;
+              }
+            } catch (error) {
+              if (error?.code !== "ENOENT") throw error;
+            }
+          }
+          if (unsafeArtifact) {
+            result.warnings.push(
+              `codex job ${jobId} retained: artifact is not a regular file (${unsafeArtifact})`,
+            );
+            continue;
+          }
+          for (const artifact of removalArtifacts) rmSync(artifact, { force: true });
+        }
+        result.codexJobs.push(jobId);
+      } catch (error) {
+        result.errors.push(`codex job ${jobId}: ${error.message}`);
       }
     }
 

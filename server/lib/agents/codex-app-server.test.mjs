@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -116,6 +116,15 @@ test("captured app-server stream tripwire keeps the real notification set", () =
     assert.equal(methods.includes(wrong), false);
   }
   assert.match(messages[0].result.userAgent, /0\.147\.0/);
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const turnId = "22222222-2222-4222-8222-222222222222";
+  const threaded = messages.filter((message) => message.params?.threadId);
+  assert.ok(threaded.length > 0);
+  assert.ok(threaded.every((message) => message.params.threadId === threadId));
+  assert.ok(threaded.filter((message) => message.params.turnId)
+    .every((message) => message.params.turnId === turnId));
+  assert.equal(messages.find((message) => message.id === 2).result.thread.id, threadId);
+  assert.equal(messages.find((message) => message.id === 3).result.turn.id, turnId);
 });
 
 test("captured fake-provider Claude NDJSON tripwire uses the existing normalizer shape", () => {
@@ -346,6 +355,50 @@ test("pre-ATT routing uses only recorded companion evidence and record-owned env
   );
 });
 
+test("legacy interpreter aliases compare by realpath but a different binary still mismatches", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const fixture = await fixtureExecutable(t);
+  const alias = join(fixture.root, "node-alias");
+  const companion = join(fixture.root, "recorded-companion.mjs");
+  await symlink(process.execPath, alias);
+  await writeFile(companion, "// legacy companion\n");
+  const entry = {
+    record: {
+      lane: "codex",
+      codexAdapter: "legacy-companion",
+      executionProfile: {
+        executable: { resolvedPath: alias },
+        companionPath: companion,
+      },
+    },
+  };
+  const current = codexAgent.executionProfile({
+    entry,
+    env: fixture.env,
+    controlledKeys: [],
+    hooksSupported: true,
+  });
+  const recorded = structuredClone(current);
+  assert.equal(current.executable.resolvedPath, alias);
+  assert.equal(executionProfileMismatch(recorded, current, {
+    executable: true,
+  }), null);
+  entry.record.executionProfile = { ...recorded, executable: {
+    ...recorded.executable,
+    resolvedPath: fixture.path,
+  } };
+  const changed = codexAgent.executionProfile({
+    entry,
+    env: fixture.env,
+    controlledKeys: [],
+    hooksSupported: true,
+  });
+  assert.match(executionProfileMismatch(entry.record.executionProfile, changed, {
+    executable: true,
+  }), /executable\.resolvedPath/);
+});
+
 function launchChild(payload) {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
@@ -358,6 +411,57 @@ function launchChild(payload) {
   });
   return child;
 }
+
+test("launcher failure after job persistence stays reattachable instead of finishing", async (t) => {
+  const fixture = await fixtureExecutable(t);
+  const entry = {
+    record: {
+      id: "launcher-failure",
+      lane: "codex",
+      codexAdapter: "app-server",
+      state: "preparing",
+      readOnly: false,
+      warnings: [],
+      executionProfile: { executable: { resolvedPath: fixture.path } },
+    },
+    codexBinary: { files: [] },
+    stderrLines: [],
+  };
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.pid = 4242;
+  const retained = new Promise((resolvePromise) => {
+    codexAppServerAgent.launch({
+      entry,
+      project: {},
+      prompt: "persist before failure",
+      worktreePath: fixture.root,
+      dispatchDir: fixture.root,
+      env: fixture.env,
+      spawner: () => child,
+      commandRunner: async () => assert.fail("launcher failure must not poll"),
+      callbacks: {
+        captureCodexJob(_entry, { jobId, workspace }) {
+          entry.record.codexJobId = jobId;
+          entry.record.codexWorkspace = workspace;
+        },
+        streamLines(streamValue, handler) {
+          streamValue.setEncoding("utf8");
+          streamValue.on("data", handler);
+        },
+        retainCodexReattachFailure(_entry, detail) { resolvePromise(detail); },
+        finish() { assert.fail("an unresolved persisted job must not finish"); },
+      },
+    });
+  });
+  child.stderr.end("launcher timed out\n");
+  child.stdout.end();
+  child.emit("close", 1, null);
+  assert.match(await retained, /restart reattach will resolve/);
+  assert.match(entry.record.codexJobId, /^[a-f0-9]{24}$/);
+  assert.equal(entry.record.state, "preparing");
+});
 
 test("launch polls the detached runner, captures thread/output, and maps terminal success", async (t) => {
   const fixture = await fixtureExecutable(t);
@@ -784,6 +888,125 @@ test("app-server stop retains the fence when runner exit is unproven", async () 
   assert.deepEqual(entry.record.warnings, ["worker exit is unproven"]);
 });
 
+test("stop during launch uses the persisted job id, kills the launcher, and warns while unproven", async (t) => {
+  const launcher = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: process.platform !== "win32",
+    stdio: "ignore",
+  });
+  t.after(() => {
+    try {
+      if (process.platform === "win32") launcher.kill("SIGKILL");
+      else process.kill(-launcher.pid, "SIGKILL");
+    } catch {
+      // The tested stop should already have reaped it.
+    }
+  });
+  await once(launcher, "spawn");
+  const entry = {
+    child: launcher,
+    env: {},
+    stderrLines: [],
+    record: {
+      codexJobId: "persisted-launch-window-job",
+      codexWorkspace: resolve("."),
+      warnings: [],
+    },
+  };
+  const stopped = await codexAppServerAgent.stop({
+    entry,
+    commandRunner: async (_file, args) => {
+      assert.equal(args[2], "persisted-launch-window-job");
+      return JSON.stringify({ finish: false, warning: "runner death remains unproven" });
+    },
+  });
+  assert.deepEqual(stopped, { finish: false, warning: "runner death remains unproven" });
+  assert.deepEqual(entry.record.warnings, ["runner death remains unproven"]);
+  if (launcher.exitCode === null && launcher.signalCode === null) await once(launcher, "exit");
+});
+
+test("status remains readable without a lease and advertises live-job adoption", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-codex-missing-lease-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const jobId = "d".repeat(24);
+  const jobPath = join(root, `${jobId}.json`);
+  const live = {
+    version: 1,
+    jobId,
+    status: "running",
+    pid: process.pid,
+    pidStartIdentity: _runnerTest.processStartIdentity(process.pid),
+  };
+  await writeFile(jobPath, JSON.stringify(live));
+  const status = JSON.parse((await execFileAsync(process.execPath, [
+    _appServerRunnerPath, "status", jobId, "--state-dir", root,
+  ])).stdout);
+  assert.equal(status.status, "running");
+  assert.equal(status.adoptableViaAttach, true);
+  assert.match(status.warning, /attachment lease is missing/);
+
+  await writeFile(jobPath, JSON.stringify({
+    ...live,
+    status: "completed",
+    pid: null,
+    pidStartIdentity: null,
+    endedAt: new Date().toISOString(),
+  }));
+  const completed = JSON.parse((await execFileAsync(process.execPath, [
+    _appServerRunnerPath, "status", jobId, "--state-dir", root,
+  ])).stdout);
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.warning, undefined);
+});
+
+test("test-stub cannot bypass task or run guards outside its invoking tmp workspace", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-codex-guard-scope-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const statePath = join(root, "state");
+  const codexPath = join(root, "outside-workspace-codex.mjs");
+  const promptPath = join(workspace, "prompt.txt");
+  const receipt = join(root, "provider-spawned");
+  await mkdir(workspace);
+  await mkdir(statePath);
+  await writeFile(promptPath, "guard fixture\n");
+  await writeFile(codexPath, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(receipt)}, "spawned");\n`);
+  await chmod(codexPath, 0o755);
+  const details = lstatSync(codexPath);
+  const files = [{ path: codexPath, dev: String(details.dev), ino: String(details.ino) }];
+  const env = { ...process.env, ATELIER_TEST_NO_REAL_PROVIDER: "1" };
+  await assert.rejects(execFileAsync(process.execPath, [
+    _appServerRunnerPath, "task", "--test-stub",
+    "--job-id", "e".repeat(24),
+    "--codex", codexPath,
+    "--binary-files-json", JSON.stringify(files),
+    "--dispatcher-id", "guard-task",
+    "--dispatcher-pid", String(process.pid),
+    "--state-dir", statePath,
+    "--workspace", workspace,
+    "--prompt-file", promptPath,
+  ], { env }), /EATELIER_REAL_PROVIDER_DISABLED/);
+
+  const directId = "f".repeat(24);
+  const directJob = join(statePath, `${directId}.json`);
+  await writeFile(directJob, JSON.stringify({
+    version: 1,
+    jobId: directId,
+    status: "queued",
+    pid: null,
+    pidStartIdentity: null,
+    codexPath,
+    binaryFiles: files,
+    workspace,
+    promptPath,
+    streamFile: join(statePath, `${directId}.stream.jsonl`),
+    testStub: true,
+  }));
+  await assert.rejects(execFileAsync(process.execPath, [
+    _appServerRunnerPath, "run", "--job", directJob,
+  ], { env }), /EATELIER_REAL_PROVIDER_DISABLED/);
+  assert.equal(existsSync(receipt), false);
+});
+
 test("runner refuses every real-provider launch under the golden guard", async () => {
   await assert.rejects(
     execFileAsync(process.execPath, [_appServerRunnerPath, "task"], {
@@ -791,4 +1014,147 @@ test("runner refuses every real-provider launch under the golden guard", async (
     }),
     /EATELIER_REAL_PROVIDER_DISABLED/,
   );
+});
+
+test("runner publishes finishing until the app-server is gone, then releases its lease", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier codex-finishing-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const statePath = join(root, "state");
+  const codexPath = join(root, "codex stub.mjs");
+  const promptPath = join(root, "prompt.txt");
+  await mkdir(statePath);
+  await writeFile(promptPath, "finish cleanly\n");
+  await writeFile(codexPath, `#!/usr/bin/env node
+import { createInterface } from "node:readline";
+process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") console.log(JSON.stringify({ id: message.id, result: {
+    userAgent: "stub/1.0", platformFamily: "unix", platformOs: "linux"
+  } }));
+  if (message.method === "thread/start") console.log(JSON.stringify({
+    id: message.id, result: { thread: { id: "finishing-thread" } }
+  }));
+  if (message.method === "turn/start") {
+    console.log(JSON.stringify({ id: message.id, result: { turn: { id: "finishing-turn" } } }));
+    console.log(JSON.stringify({ method: "turn/completed", params: {
+      threadId: "finishing-thread", turn: { id: "finishing-turn", status: "completed" }
+    } }));
+  }
+});
+`);
+  await chmod(codexPath, 0o755);
+  const details = lstatSync(codexPath);
+  const jobId = "9".repeat(24);
+  const env = { ...process.env, ATELIER_TEST_NO_REAL_PROVIDER: "1" };
+  await execFileAsync(process.execPath, [
+    _appServerRunnerPath, "task", "--test-stub",
+    "--job-id", jobId,
+    "--codex", codexPath,
+    "--binary-files-json", JSON.stringify([{
+      path: codexPath, dev: String(details.dev), ino: String(details.ino),
+    }]),
+    "--dispatcher-id", "finishing-test",
+    "--dispatcher-pid", String(process.pid),
+    "--state-dir", statePath,
+    "--workspace", root,
+    "--prompt-file", promptPath,
+  ], { env });
+  const readStatus = async () => JSON.parse((await execFileAsync(process.execPath, [
+    _appServerRunnerPath, "status", jobId, "--state-dir", statePath,
+  ], { env })).stdout);
+  let finishing;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const snapshot = await readStatus();
+    if (snapshot.status === "finishing") { finishing = snapshot; break; }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  assert.equal(finishing?.status, "finishing");
+  assert.ok(Number.isInteger(finishing.pid), "finishing must still expose the live runner");
+  let completed;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    completed = await readStatus();
+    if (completed.status === "completed") break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.pid, null);
+  assert.equal(existsSync(join(statePath, `${jobId}.attach.json`)), false);
+});
+
+test("launcher timeout leaves a persisted job that boot attach can adopt after the runner announces", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-codex-late-runner-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const statePath = join(root, "state");
+  const codexPath = join(root, "codex-stub.mjs");
+  const promptPath = join(root, "prompt.txt");
+  await mkdir(statePath);
+  await writeFile(promptPath, "late runner\n");
+  await writeFile(codexPath, `#!/usr/bin/env node
+import { createInterface } from "node:readline";
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") console.log(JSON.stringify({ id: message.id, result: {
+    userAgent: "stub/1.0", platformFamily: "unix", platformOs: "linux"
+  } }));
+  if (message.method === "thread/start") console.log(JSON.stringify({
+    id: message.id, result: { thread: { id: "late-thread" } }
+  }));
+  if (message.method === "turn/start") console.log(JSON.stringify({
+    id: message.id, result: { turn: { id: "late-turn" } }
+  }));
+});
+`);
+  await chmod(codexPath, 0o755);
+  const details = lstatSync(codexPath);
+  const departed = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const departedPid = departed.pid;
+  await once(departed, "exit");
+  const jobId = "8".repeat(24);
+  const env = {
+    ...process.env,
+    ATELIER_TEST_NO_REAL_PROVIDER: "1",
+    ATELIER_TEST_CODEX_LAUNCH_TIMEOUT_MS: "25",
+    ATELIER_TEST_CODEX_RUNNER_START_DELAY_MS: "100",
+  };
+  await assert.rejects(execFileAsync(process.execPath, [
+    _appServerRunnerPath, "task", "--test-stub",
+    "--job-id", jobId,
+    "--codex", codexPath,
+    "--binary-files-json", JSON.stringify([{
+      path: codexPath, dev: String(details.dev), ino: String(details.ino),
+    }]),
+    "--dispatcher-id", "departed-dispatcher",
+    "--dispatcher-pid", String(departedPid),
+    "--state-dir", statePath,
+    "--workspace", root,
+    "--prompt-file", promptPath,
+  ], { env }), /did not establish its pid identity/);
+  assert.equal(existsSync(join(statePath, `${jobId}.json`)), true);
+
+  let running;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    running = JSON.parse((await execFileAsync(process.execPath, [
+      _appServerRunnerPath, "status", jobId, "--state-dir", statePath,
+    ], { env })).stdout);
+    if (running.status === "running" && Number.isInteger(running.pid)) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  assert.equal(running.status, "running");
+  const attached = JSON.parse((await execFileAsync(process.execPath, [
+    _appServerRunnerPath, "attach", jobId,
+    "--state-dir", statePath,
+    "--dispatcher-id", "boot-dispatcher",
+    "--dispatcher-pid", String(process.pid),
+    "--dispatcher-pid-identity", _runnerTest.processStartIdentity(process.pid),
+    "--break-dead",
+  ], { env })).stdout);
+  assert.equal(attached.attached, true);
+  await execFileAsync(process.execPath, [
+    _appServerRunnerPath, "cancel", jobId, "--state-dir", statePath,
+  ], { env });
 });

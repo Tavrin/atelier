@@ -92,7 +92,9 @@ problems at once.
     dispatches use Atelier's supported, version-and-digest-pinned app-server
     adapter. Setting this to `true` selects the deprecated plugin-cache
     companion for compatibility; each affected record receives a deprecation
-    warning and pins both the Codex binary and companion script digests.
+    warning and pins the companion script plus the Node interpreter that runs
+    it. The companion PATH-searches `codex` internally, so the Codex binary is
+    not pinned; that unenforceable binary identity is a reason to migrate.
   - `reviewPolicy` - optional; `strict` (the default) gates on every open
     finding, `tiered` gates on BLOCKER/MAJOR while filing each remaining
     MINOR/NIT as its own follow-up ticket with a linking comment during merge,

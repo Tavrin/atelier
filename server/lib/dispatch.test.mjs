@@ -652,7 +652,7 @@ function stubBakeoffRuntime(
   const calls = [];
   _setBrResolver(() => "/fixture/br");
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  useLegacyCompanion(setup);
+    useLegacyCompanion(setup);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner((file) => {
     if (isCommand(file, "claude")) return claudeFails ? failedChild() : successfulChild();
@@ -3687,6 +3687,7 @@ test("app-server records retain their fence across dispatcher reattach and unpro
   _setSpawner((_command, args) => codexLaunchChild(args[args.indexOf("--job-id") + 1]));
   let attachCalls = 0;
   let cancelCalls = 0;
+  let refuseAttach = false;
   _setRunFile(async (file, args) => {
     if (file === "git" && args[2] === "worktree") {
       await mkdir(args[6], { recursive: true });
@@ -3697,6 +3698,7 @@ test("app-server records retain their fence across dispatcher reattach and unpro
     }
     if (isCommand(file, "node") && args[1] === "attach") {
       attachCalls += 1;
+      if (refuseAttach) throw new Error("fixture attachment lease refused");
       return JSON.stringify({ attached: true, attachLease: { dispatcherInstanceId: "fixture" } });
     }
     if (isCommand(file, "node") && args[1] === "status") {
@@ -3733,13 +3735,31 @@ test("app-server records retain their fence across dispatcher reattach and unpro
   assert.equal(rawRecord(setup, id).codexAdapter, "app-server");
   await first.shutdown({ graceMs: 0 });
 
+  refuseAttach = true;
+  const refused = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sweepCodexProcessesAtBoot: false,
+  });
+  await waitForConditionOverTime(
+    () => refused.get(id)?.orphanUnresolved === true,
+    "a refused attachment did not retain the unresolved runner fence",
+  );
+  assert.equal(refused.get(id).state, "running");
+  assert.equal(rawRecord(setup, id).codexWorkerPid, worker.child.pid);
+  assert.ok(refused.get(id).warnings.some((warning) =>
+    warning.includes("fixture attachment lease refused") && warning.includes("claim is retained")));
+  await refused.shutdown({ graceMs: 0 });
+
+  refuseAttach = false;
   const restarted = createDispatcher({
     registry: setup.registry,
     stateDir: setup.state,
     sweepCodexProcessesAtBoot: false,
   });
   await waitForConditionOverTime(
-    () => attachCalls === 1 && restarted.get(id)?.state === "running",
+    () => attachCalls === 2 && restarted.get(id)?.state === "running" &&
+      restarted.get(id)?.orphanUnresolved === false,
     "a restarted dispatcher did not take the app-server attachment",
   );
   assert.equal(restarted.get(id).sessionId, "app-server-restart-thread");
@@ -8548,6 +8568,67 @@ test("stop during preparing attempts best-effort artifact cleanup", async (t) =>
   assert.equal(dispatcher.get(id).state, "stopped");
 });
 
+test("stop during the Codex launch window retains the worktree until runner death is proven", async (t) => {
+  const setup = await fixture(t, { legacyCodexCompanion: false });
+  const bin = join(setup.root, "bin");
+  const codex = join(bin, "codex");
+  await mkdir(bin);
+  await writeFile(codex, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 9.9.9'\n");
+  await chmod(codex, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = bin;
+  t.after(() => { process.env.PATH = previousPath; });
+  _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
+  _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
+  const launcher = new EventEmitter();
+  launcher.stdout = new PassThrough();
+  launcher.stderr = new PassThrough();
+  launcher.pid = undefined;
+  _setSpawner(() => launcher);
+  const removals = [];
+  _setRunFile(async (file, args) => {
+    if (file === "git" && args[2] === "worktree" && args[3] === "add") {
+      await mkdir(args[6], { recursive: true });
+      return "";
+    }
+    if (file === "git" && args[2] === "worktree" && args[3] === "remove") {
+      removals.push(args[4]);
+      return "";
+    }
+    if (file === "git" && args[2] === "rev-parse") {
+      return args[3] === "--git-dir" ? ".git\n" : `${FIXTURE_BASE_COMMIT}\n`;
+    }
+    if (isCommand(file, "node") && args[1] === "cancel") {
+      return JSON.stringify({ finish: false, warning: "launch-window runner death is unproven" });
+    }
+    return "";
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sweepCodexProcessesAtBoot: false,
+  });
+  const { id } = await dispatcher.dispatch({
+    project: "fixture",
+    prompt: "stop inside launch",
+    lane: "codex",
+    verify: false,
+  });
+  await waitForConditionOverTime(
+    () => typeof rawRecord(setup, id).codexJobId === "string",
+    "the launch path did not persist its job id",
+  );
+  const launchWindowRecord = rawRecord(setup, id);
+  const worktreePath = launchWindowRecord.worktreePath;
+  const jobId = launchWindowRecord.codexJobId;
+  const stopped = await dispatcher.stop(id);
+  assert.equal(stopped.state, "stopping");
+  assert.ok(stopped.warnings.includes("launch-window runner death is unproven"));
+  assert.equal(existsSync(worktreePath), true);
+  assert.deepEqual(removals, []);
+  assert.equal(rawRecord(setup, id).codexJobId, jobId);
+});
+
 test("gc selects only old terminal non-merged non-dismissed records", async (t) => {
   const setup = await fixture(t);
   const dispatchDir = join(setup.state, "dispatches");
@@ -8597,6 +8678,73 @@ test("gc selects only old terminal non-merged non-dismissed records", async (t) 
   assert.deepEqual(result.dismissed, ["old"]);
   assert.deepEqual(result.orphans, []);
   assert.deepEqual(result.errors, []);
+});
+
+test("gc reclaims only retained-age terminal Codex runner artifacts", async (t) => {
+  const setup = await fixture(t);
+  const jobs = join(setup.state, "codex-app-server", "jobs");
+  const dispatches = join(setup.state, "dispatches");
+  await mkdir(jobs, { recursive: true });
+  await mkdir(dispatches, { recursive: true });
+  const oldId = "a".repeat(24);
+  const liveId = "b".repeat(24);
+  const recentId = "c".repeat(24);
+  const promptPath = join(dispatches, "old.codex-prompt.md");
+  const oldJob = {
+    version: 1,
+    jobId: oldId,
+    status: "completed",
+    pid: null,
+    pidStartIdentity: null,
+    endedAt: "2026-07-01T00:00:00.000Z",
+    promptPath,
+  };
+  await writeFile(join(jobs, `${oldId}.json`), JSON.stringify(oldJob));
+  await writeFile(join(jobs, `${oldId}.stream.jsonl`), "{}\n");
+  await writeFile(join(jobs, `${oldId}.attach.json`), "{}\n");
+  await writeFile(promptPath, "old prompt\n");
+  await writeFile(join(jobs, `${liveId}.json`), JSON.stringify({
+    ...oldJob,
+    jobId: liveId,
+    status: "running",
+    pid: process.pid,
+    pidStartIdentity: process.platform === "linux" ? processStartIdentity(process.pid) : null,
+    endedAt: null,
+  }));
+  await writeFile(join(jobs, `${recentId}.json`), JSON.stringify({
+    ...oldJob,
+    jobId: recentId,
+    status: "failed",
+    endedAt: "2026-07-20T00:00:00.000Z",
+  }));
+  _setRunFile(async () => "");
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sweepCodexProcessesAtBoot: false,
+  });
+  const preview = await dispatcher.gc({
+    olderThanDays: 7,
+    dryRun: true,
+    now: new Date("2026-07-21T12:00:00.000Z"),
+  });
+  assert.deepEqual(preview.codexJobs, [oldId]);
+  assert.equal(existsSync(join(jobs, `${oldId}.json`)), true);
+
+  const collected = await dispatcher.gc({
+    olderThanDays: 7,
+    dryRun: false,
+    now: new Date("2026-07-21T12:00:00.000Z"),
+  });
+  assert.deepEqual(collected.codexJobs, [oldId]);
+  for (const artifact of [
+    join(jobs, `${oldId}.json`),
+    join(jobs, `${oldId}.stream.jsonl`),
+    join(jobs, `${oldId}.attach.json`),
+    promptPath,
+  ]) assert.equal(existsSync(artifact), false, `GC retained ${artifact}`);
+  assert.equal(existsSync(join(jobs, `${liveId}.json`)), true);
+  assert.equal(existsSync(join(jobs, `${recentId}.json`)), true);
 });
 
 test("gc sweeps registered and stale orphan worktrees through stubbed fs and git layers", async (t) => {
