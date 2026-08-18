@@ -7,6 +7,13 @@ import { readFileNoFollowSync, writeFileAtomic } from "./fs-integrity.mjs";
 import { agents } from "./agents/index.mjs";
 import { SECRET_ENV_KEY } from "./exec.mjs";
 import { assertAllowedDispatchEnvKey } from "./execution/environment-policy.mjs";
+import {
+  BUILT_IN_TRUST_PROFILE,
+  CONFINEMENTS,
+  CREDENTIAL_CONTAINMENTS,
+  SANDBOX_BACKEND_IDS,
+  resolveTrustProfile,
+} from "./execution/sandbox.mjs";
 
 const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const DISPATCH_ENV_KEY = /^[A-Z][A-Z0-9_]*$/;
@@ -21,9 +28,13 @@ const VERIFY_MODES = new Set([
 ]);
 const PROJECT_OWN_DISPATCH_PROFILE = Symbol("projectOwnDispatchProfile");
 const PROJECT_OWN_MAX_FIX_ROUNDS = Symbol("projectOwnMaxFixRounds");
+const PROJECT_OWN_TRUST_PROFILE = Symbol("projectOwnTrustProfile");
+const PROJECT_OWN_SANDBOX_BACKEND = Symbol("projectOwnSandboxBackend");
 
 export const DEFAULTS = Object.freeze({
   dispatchProfile: Object.freeze({}),
+  trustProfile: BUILT_IN_TRUST_PROFILE,
+  sandboxBackend: "bwrap",
   maxFixRounds: 4,
 });
 
@@ -141,6 +152,50 @@ function validateDispatchProfile(profile, prefix) {
   }
   problems.push(...validateDispatchEnv(profile.dispatchEnv, `${prefix}.dispatchEnv`));
   return problems;
+}
+
+function validateTrustProfile(profile, prefix, { resolved = false } = {}) {
+  if (profile === undefined) return [];
+  if (!isObject(profile)) return [`${prefix} must be an object`];
+  const problems = [];
+  const unknown = Object.keys(profile).filter(
+    (key) => key !== "confinement" && key !== "credential",
+  );
+  if (unknown.length > 0) {
+    problems.push(`${prefix} has unknown fields: ${unknown.join(", ")}`);
+  }
+  if (
+    (resolved || profile.confinement !== undefined) &&
+    !CONFINEMENTS.includes(profile.confinement)
+  ) {
+    problems.push(`${prefix}.confinement must be one of: ${CONFINEMENTS.join(", ")}`);
+  }
+  if (
+    (resolved || profile.credential !== undefined) &&
+    !CREDENTIAL_CONTAINMENTS.includes(profile.credential)
+  ) {
+    problems.push(
+      `${prefix}.credential must be one of: ${CREDENTIAL_CONTAINMENTS.join(", ")}`,
+    );
+  }
+  if (
+    profile.credential === "in-sandbox" &&
+    (resolved || profile.confinement !== undefined) &&
+    !["sandboxed-write", "sandboxed-review-readonly"].includes(profile.confinement)
+  ) {
+    problems.push(
+      `${prefix} combination {${profile.confinement}, in-sandbox} is incoherent: ` +
+        "credential in-sandbox requires sandboxed confinement",
+    );
+  }
+  return problems;
+}
+
+function validateSandboxBackend(value, prefix) {
+  if (value === undefined) return [];
+  return SANDBOX_BACKEND_IDS.includes(value)
+    ? []
+    : [`${prefix} must be one of: ${SANDBOX_BACKEND_IDS.join(", ")}`];
 }
 
 function validateEditorCommand(editorCommand) {
@@ -300,6 +355,8 @@ export function validateProject(project, index = 0) {
 
   problems.push(...validateDispatchEnv(project.dispatchEnv, `${prefix}.dispatchEnv`));
   problems.push(...validateDispatchProfile(project.dispatchProfile, `${prefix}.dispatchProfile`));
+  problems.push(...validateTrustProfile(project.trustProfile, `${prefix}.trustProfile`));
+  problems.push(...validateSandboxBackend(project.sandboxBackend, `${prefix}.sandboxBackend`));
 
   return problems;
 }
@@ -440,6 +497,23 @@ export function validateRegistry(registry) {
     }
   }
   problems.push(...validateDispatchProfile(defaultDispatchProfile, "defaults.dispatchProfile"));
+  problems.push(...validateTrustProfile(registry.defaults?.trustProfile, "defaults.trustProfile"));
+  problems.push(...validateSandboxBackend(registry.defaults?.sandboxBackend, "defaults.sandboxBackend"));
+  if (isObject(registry.defaults)) {
+    const defaultTrust = resolveTrustProfile({}, registry.defaults);
+    problems.push(...validateTrustProfile(defaultTrust, "defaults.trustProfile", { resolved: true }));
+    if (Array.isArray(registry.projects)) {
+      for (let index = 0; index < registry.projects.length; index += 1) {
+        const project = registry.projects[index];
+        if (!isObject(project)) continue;
+        problems.push(...validateTrustProfile(
+          resolveTrustProfile(project, registry.defaults),
+          `projects[${index}].trustProfile`,
+          { resolved: true },
+        ));
+      }
+    }
+  }
   if (
     registry.defaults?.queueFailureLimit !== undefined &&
     (!Number.isInteger(registry.defaults.queueFailureLimit) ||
@@ -475,6 +549,8 @@ export function normalizeProject(project, defaults = {}) {
     : Object.hasOwn(project, "maxFixRounds")
       ? project.maxFixRounds
       : undefined;
+  const ownTrustProfile = projectOwnTrustProfile(project);
+  const ownSandboxBackend = projectOwnSandboxBackend(project);
   const hasDispatchEnv =
     defaultDispatchProfile.dispatchEnv !== undefined ||
     projectDispatchProfile.dispatchEnv !== undefined ||
@@ -490,6 +566,12 @@ export function normalizeProject(project, defaults = {}) {
       ? project[PROJECT_OWN_DISPATCH_PROFILE]
       : project.dispatchProfile,
     [PROJECT_OWN_MAX_FIX_ROUNDS]: projectMaxFixRounds,
+    [PROJECT_OWN_TRUST_PROFILE]: Object.hasOwn(project, PROJECT_OWN_TRUST_PROFILE)
+      ? project[PROJECT_OWN_TRUST_PROFILE]
+      : project.trustProfile,
+    [PROJECT_OWN_SANDBOX_BACKEND]: Object.hasOwn(project, PROJECT_OWN_SANDBOX_BACKEND)
+      ? project[PROJECT_OWN_SANDBOX_BACKEND]
+      : project.sandboxBackend,
     archetype: projectArchetype(project),
     autoCommitTracker: project.autoCommitTracker ?? false,
     autoCloseOnMerge: project.autoCloseOnMerge ?? false,
@@ -497,6 +579,8 @@ export function normalizeProject(project, defaults = {}) {
     legacyCodexCompanion: project.legacyCodexCompanion ?? false,
     reviewPolicy: project.reviewPolicy ?? "strict",
     maxFixRounds: projectMaxFixRounds ?? defaults.maxFixRounds ?? DEFAULTS.maxFixRounds,
+    trustProfile: resolveTrustProfile({ trustProfile: ownTrustProfile }, defaults),
+    sandboxBackend: ownSandboxBackend ?? defaults.sandboxBackend ?? DEFAULTS.sandboxBackend,
     ...(hasDispatchEnv ? { dispatchEnv } : {}),
     dispatchProfile: {
       ...defaultDispatchProfile,
@@ -511,6 +595,20 @@ export function projectOwnDispatchProfile(project) {
     return project[PROJECT_OWN_DISPATCH_PROFILE] || {};
   }
   return project.dispatchProfile || {};
+}
+
+export function projectOwnTrustProfile(project) {
+  if (Object.hasOwn(project, PROJECT_OWN_TRUST_PROFILE)) {
+    return project[PROJECT_OWN_TRUST_PROFILE] || {};
+  }
+  return project.trustProfile || {};
+}
+
+export function projectOwnSandboxBackend(project) {
+  if (Object.hasOwn(project, PROJECT_OWN_SANDBOX_BACKEND)) {
+    return project[PROJECT_OWN_SANDBOX_BACKEND];
+  }
+  return project.sandboxBackend;
 }
 
 export function resolveProjectDefaultAgent(project, defaults = {}) {
@@ -528,10 +626,18 @@ function registryForStorage(registry) {
     projects: registry.projects.map((project) => {
       const hasOwnDispatchProfile = Object.hasOwn(project, PROJECT_OWN_DISPATCH_PROFILE);
       const hasOwnMaxFixRounds = Object.hasOwn(project, PROJECT_OWN_MAX_FIX_ROUNDS);
+      const hasOwnTrustProfile = Object.hasOwn(project, PROJECT_OWN_TRUST_PROFILE);
+      const hasOwnSandboxBackend = Object.hasOwn(project, PROJECT_OWN_SANDBOX_BACKEND);
       const hasTrackerNoneDerivedFlags =
         project.tracker === "none" &&
         ["autoCommitTracker", "autoCloseOnMerge"].some((key) => Object.hasOwn(project, key));
-      if (!hasOwnDispatchProfile && !hasOwnMaxFixRounds && !hasTrackerNoneDerivedFlags) return project;
+      if (
+        !hasOwnDispatchProfile &&
+        !hasOwnMaxFixRounds &&
+        !hasOwnTrustProfile &&
+        !hasOwnSandboxBackend &&
+        !hasTrackerNoneDerivedFlags
+      ) return project;
       const stored = { ...project };
       if (hasOwnDispatchProfile) {
         const ownProfile = project[PROJECT_OWN_DISPATCH_PROFILE];
@@ -544,6 +650,18 @@ function registryForStorage(registry) {
         delete stored[PROJECT_OWN_MAX_FIX_ROUNDS];
         if (ownMaxFixRounds === undefined) delete stored.maxFixRounds;
         else stored.maxFixRounds = ownMaxFixRounds;
+      }
+      if (hasOwnTrustProfile) {
+        const ownTrustProfile = project[PROJECT_OWN_TRUST_PROFILE];
+        delete stored[PROJECT_OWN_TRUST_PROFILE];
+        if (ownTrustProfile === undefined) delete stored.trustProfile;
+        else stored.trustProfile = ownTrustProfile;
+      }
+      if (hasOwnSandboxBackend) {
+        const ownSandboxBackend = project[PROJECT_OWN_SANDBOX_BACKEND];
+        delete stored[PROJECT_OWN_SANDBOX_BACKEND];
+        if (ownSandboxBackend === undefined) delete stored.sandboxBackend;
+        else stored.sandboxBackend = ownSandboxBackend;
       }
       if (stored.tracker === "none") {
         delete stored.autoCommitTracker;
@@ -626,6 +744,12 @@ export async function updateProject(
   if (Object.hasOwn(changes, "maxFixRounds")) {
     candidate[PROJECT_OWN_MAX_FIX_ROUNDS] = changes.maxFixRounds ?? undefined;
     if (changes.maxFixRounds === null) delete candidate.maxFixRounds;
+  }
+  if (Object.hasOwn(changes, "trustProfile")) {
+    candidate[PROJECT_OWN_TRUST_PROFILE] = changes.trustProfile;
+  }
+  if (Object.hasOwn(changes, "sandboxBackend")) {
+    candidate[PROJECT_OWN_SANDBOX_BACKEND] = changes.sandboxBackend;
   }
   if (Object.hasOwn(changes, "trackerPath") && changes.trackerPath === undefined) {
     delete candidate.trackerPath;

@@ -65,6 +65,17 @@ import {
   supersedeExecutionProfile,
 } from "./execution/execution-profile.mjs";
 import { gitConfigCountSupported } from "./execution/environment-policy.mjs";
+import {
+  SANDBOX_UNAVAILABLE,
+  createSandboxBackends,
+  resolveSandboxBackendId,
+  resolveTrustProfile,
+  sandboxBackend,
+  sandboxEnforcesIsolation,
+  sandboxExecutionProfile,
+  sandboxPostureLabel,
+  wrapSandboxSpawn,
+} from "./execution/sandbox.mjs";
 import { acquireInstanceLock, liveInstanceOwner } from "./instance-lock.mjs";
 import {
   BREAK_GLASS_TTL_MS,
@@ -78,7 +89,12 @@ import {
   unavailableFinalOutput,
   userMessageLine,
 } from "./stream.mjs";
-import { DEFAULTS, resolveProjectDefaultAgent } from "./registry.mjs";
+import {
+  DEFAULTS,
+  projectOwnSandboxBackend,
+  projectOwnTrustProfile,
+  resolveProjectDefaultAgent,
+} from "./registry.mjs";
 import {
   appendGuarded,
   appendDurable,
@@ -558,6 +574,9 @@ function publicRecord(record) {
     executionProfileRefusal: record.executionProfileRefusal
       ? { ...record.executionProfileRefusal }
       : null,
+    trustProfile: record.trustProfile ? { ...record.trustProfile } : null,
+    sandboxBackend: record.sandboxBackend ?? null,
+    sandboxRefusal: record.sandboxRefusal ? { ...record.sandboxRefusal } : null,
     verify: record.verify ?? null,
     postMerge: record.postMerge ?? null,
     review: reviewState(record),
@@ -1612,6 +1631,7 @@ export function createDispatcher({
   // reaps and mutates on that server's behalf - and does so even under --dry-run,
   // which has to be side-effect-free.
   observer = false,
+  sandboxBackends = createSandboxBackends(),
 }) {
   let ownedInstanceLock;
   if (!observer && liveInstanceOwner(stateDir) !== process.pid) {
@@ -2504,6 +2524,9 @@ export function createDispatcher({
   }
 
   function queueFailureKind(record) {
+    if (record.sandboxRefusal || String(record.exitSummary || "").startsWith(SANDBOX_UNAVAILABLE)) {
+      return "sandbox_unavailable";
+    }
     if (record.state === "prepare_failed") return "prepare_failed";
     if (record.state === "stopped") return "stopped";
     if (record.verify?.state === "failed") return "verify_failed";
@@ -2938,6 +2961,12 @@ export function createDispatcher({
     if (!registry.projects.some((project) => project.name === record.project)) {
       exposed.projectRemoved = true;
     }
+    exposed.sandboxPosture = sandboxPostureLabel(
+      exposed.executionProfile?.sandbox ?? {
+        ...(exposed.trustProfile || {}),
+        backendId: exposed.sandboxBackend,
+      },
+    );
     exposed.gates = gatesFor(exposed);
     const entry = entries.get(record.id);
     exposed.persistenceDegraded = persistenceDegraded(entry);
@@ -4844,7 +4873,11 @@ export function createDispatcher({
       let child;
       try {
         if (!file) throw new Error("verify command must not be empty");
-        child = spawner(file, args, {
+        const project = registry.projects.find(
+          (candidate) => candidate.name === entry.record.project,
+        );
+        if (!project) throw new Error(`Project removed: ${entry.record.project}`);
+        child = entrySpawner(entry, project, `${eventType} step`)(file, args, {
           cwd,
           env,
         });
@@ -6332,12 +6365,14 @@ export function createDispatcher({
       });
       const prompt = opts.planFirst ? `${PLAN_PROMPT_PREFIX}${taskPrompt}` : taskPrompt;
       const spawnEnvironments = resolvedEntryEnvironments(project, agent, entry);
+      const launchSpawner = entrySpawner(entry, project, "agent launch");
       await agent.preLaunchChecks({
         entry,
         project,
         worktreePath,
         env: spawnEnvironments.providerEnv,
         commandRunner,
+        spawner: launchSpawner,
       });
       if (entry.record.state !== "preparing") {
         await abandonPreparation(entry, project);
@@ -6349,12 +6384,15 @@ export function createDispatcher({
       entry.disallowedTools = entry.record.readOnly
         ? [...REVIEW_DENIED_TOOLS]
         : opts.planFirst ? [...PLAN_DENIED_TOOLS] : undefined;
-      const executionProfile = agent.executionProfile({
-        entry,
-        env: spawnEnvironments.providerEnv,
-        controlledKeys: spawnEnvironments.controlledKeys,
-        hooksSupported: spawnEnvironments.hooksSupported,
-      });
+      const executionProfile = {
+        ...agent.executionProfile({
+          entry,
+          env: spawnEnvironments.providerEnv,
+          controlledKeys: spawnEnvironments.controlledKeys,
+          hooksSupported: spawnEnvironments.hooksSupported,
+        }),
+        sandbox: currentSandboxProfile(entry, project, spawnEnvironments.providerEnv),
+      };
       requireResolvedExecutionProfile(executionProfile, entry.record.lane === "codex"
         ? codexProfilePolicy(entry.record).requirements
         : { executable: true });
@@ -6376,7 +6414,7 @@ export function createDispatcher({
         dispatchDir,
         maxTurns: opts.maxTurns,
         env: entry.env,
-        spawner,
+        spawner: launchSpawner,
         commandRunner,
         callbacks: {
           childIdentityFields,
@@ -6441,6 +6479,108 @@ export function createDispatcher({
     };
   }
 
+  function resolvedSandboxPolicy(project) {
+    const trustProfile = resolveTrustProfile(
+      { trustProfile: projectOwnTrustProfile(project) },
+      registry.defaults,
+    );
+    const backendId = resolveSandboxBackendId(
+      { sandboxBackend: projectOwnSandboxBackend(project) },
+      registry.defaults,
+    );
+    return {
+      trustProfile,
+      backendId,
+      backend: sandboxBackend(sandboxBackends, backendId),
+    };
+  }
+
+  function recordSandboxRefusal(entry, error, operation) {
+    if (error?.code !== "EATELIER_SANDBOX_UNAVAILABLE") return;
+    const detail = redactText(String(error.message));
+    entry.record.sandboxRefusal = {
+      operation,
+      backendId: error.backendId ?? entry.record.sandboxBackend ?? null,
+      detail,
+      at: new Date().toISOString(),
+    };
+    addWarningOnce(entry.record, detail);
+    persist(entry);
+    emit(entry, { type: "status", state: entry.record.state, detail });
+    logEvent("dispatch.sandbox-refused", {
+      actor: entry.actionActor,
+      project: entry.record.project,
+      dispatchId: entry.record.id,
+      ticketId: entry.record.ticketId ?? null,
+      operation,
+      backendId: entry.record.sandboxRefusal.backendId,
+      detail,
+    });
+  }
+
+  function currentSandboxProfile(entry, project, env, cwd = entry.record.worktreePath) {
+    const policy = resolvedSandboxPolicy(project);
+    try {
+      return sandboxExecutionProfile({
+        trustProfile: policy.trustProfile,
+        backend: policy.backend,
+        cwd,
+        env,
+      });
+    } catch (error) {
+      recordSandboxRefusal(entry, error, "execution profile resolution");
+      throw error;
+    }
+  }
+
+  function entrySpawner(entry, project, operation) {
+    const policy = resolvedSandboxPolicy(project);
+    const wrappedSpawner = (file, args, options = {}) => {
+      try {
+        const spawnOptions = sandboxEnforcesIsolation(policy.trustProfile.confinement) && !options.cwd
+          ? { ...options, cwd: entry.record.worktreePath }
+          : options;
+        if (entry.record.executionProfile?.sandbox) {
+          // Resolve against the original worktree bind, not a later verifier's
+          // checkout. This compares trust policy and backend identity without
+          // making a legitimate post-merge cwd change look like a downgrade.
+          const sandbox = currentSandboxProfile(entry, project, spawnOptions.env);
+          const mismatch = executionProfileMismatch(
+            entry.record.executionProfile,
+            { ...entry.record.executionProfile, sandbox },
+            { sandbox: true },
+          );
+          if (mismatch) {
+            throw executionProfileRefusal(entry, mismatch, operation, { sandbox: true });
+          }
+        }
+        const wrapped = wrapSandboxSpawn({
+          trustProfile: policy.trustProfile,
+          backend: policy.backend,
+          file,
+          args,
+          options: spawnOptions,
+        });
+        return spawner(wrapped.file, wrapped.args, wrapped.options);
+      } catch (error) {
+        recordSandboxRefusal(entry, error, operation);
+        throw error;
+      }
+    };
+    // Codex's short-lived launcher is trusted Atelier control code and must
+    // write its job record before the detached runner can establish its own
+    // state-dir-only boundary. The provider and detached re-exec are wrapped
+    // explicitly inside codex-app-server-runner.mjs.
+    wrappedSpawner.controlPlane = spawner;
+    if (sandboxEnforcesIsolation(policy.trustProfile.confinement)) {
+      wrappedSpawner.sandboxConfig = {
+        trustProfile: { ...policy.trustProfile },
+        backendId: policy.backendId,
+      };
+    }
+    return wrappedSpawner;
+  }
+
   function addWarningOnce(record, warning) {
     if (!record.warnings.includes(warning)) record.warnings.push(warning);
   }
@@ -6470,12 +6610,13 @@ export function createDispatcher({
   }
 
   function codexProfilePolicy(record) {
-    if (record.lane !== "codex") return { compare: {}, requirements: {} };
+    if (record.lane !== "codex") return { compare: { sandbox: true }, requirements: {} };
     if (record.codexAdapter === "app-server") {
       const pinned = {
         executable: true,
         executableVersion: true,
         executableDigest: true,
+        sandbox: true,
       };
       return { compare: pinned, requirements: pinned };
     }
@@ -6484,6 +6625,7 @@ export function createDispatcher({
         executable: true,
         companionPath: true,
         companionDigest: true,
+        sandbox: true,
       };
       return { compare: pinned, requirements: pinned };
     }
@@ -6491,11 +6633,11 @@ export function createDispatcher({
     // undiscriminated records without companion evidence route app-server.
     return {
       compare: record.codexJobId || record.codexWorkspace || record.executionProfile?.companionPath
-        ? { executable: true, companionPath: true, companionDigest: true }
-        : { executable: true, executableVersion: true, executableDigest: true },
+        ? { executable: true, companionPath: true, companionDigest: true, sandbox: true }
+        : { executable: true, executableVersion: true, executableDigest: true, sandbox: true },
       requirements: record.codexJobId || record.codexWorkspace || record.executionProfile?.companionPath
-        ? { executable: true, companionPath: true, companionDigest: true }
-        : { executable: true, executableVersion: true, executableDigest: true },
+        ? { executable: true, companionPath: true, companionDigest: true, sandbox: true }
+        : { executable: true, executableVersion: true, executableDigest: true, sandbox: true },
     };
   }
 
@@ -6528,16 +6670,21 @@ export function createDispatcher({
   function reconcileExecutionProfile(entry, agent, resolved, {
     accept = false,
     acceptRecordedRefusal = false,
-    compare = {},
+    compare = { sandbox: true },
     requirements = compare,
   } = {}) {
-    const current = agent.executionProfile({
-      entry,
-      env: resolved.providerEnv,
-      controlledKeys: resolved.controlledKeys,
-      hooksSupported: resolved.hooksSupported,
-      resolveCurrent: true,
-    });
+    const project = registry.projects.find((candidate) => candidate.name === entry.record.project);
+    if (!project) throw new Error(`Project removed: ${entry.record.project}`);
+    const current = {
+      ...agent.executionProfile({
+        entry,
+        env: resolved.providerEnv,
+        controlledKeys: resolved.controlledKeys,
+        hooksSupported: resolved.hooksSupported,
+        resolveCurrent: true,
+      }),
+      sandbox: currentSandboxProfile(entry, project, resolved.providerEnv),
+    };
     const recorded = entry.record.executionProfile;
     if (!recorded) {
       return { current, mismatch: null, stamp: "legacy", requirements, comparison: compare };
@@ -6575,6 +6722,9 @@ export function createDispatcher({
           companionDigest: compare.companionDigest || acceptsRecordedRefusal
             ? current.companionDigest
             : recorded.companionDigest,
+          sandbox: compare.sandbox || acceptsRecordedRefusal
+            ? current.sandbox
+            : recorded.sandbox,
         }
       : current;
     return {
@@ -6633,11 +6783,12 @@ export function createDispatcher({
         executableDigest: refusal.compare.executableDigest === true,
         companionPath: refusal.compare.companionPath === true,
         companionDigest: refusal.compare.companionDigest === true,
+        sandbox: refusal.compare.sandbox === true,
       };
     }
     if (refusal?.operation === "codex boot reattach") return codexProfilePolicy(entry.record).compare;
     if (["reply resume", "plan continuation"].includes(refusal?.operation)) {
-      return { executable: true };
+      return { executable: true, sandbox: true };
     }
     return fallback;
   }
@@ -6656,6 +6807,7 @@ export function createDispatcher({
         executableDigest: compare.executableDigest === true,
         companionPath: compare.companionPath === true,
         companionDigest: compare.companionDigest === true,
+        sandbox: compare.sandbox === true,
       },
       at: new Date().toISOString(),
     };
@@ -7522,6 +7674,7 @@ export function createDispatcher({
     const model = agent.resolveModel({ requested: opts.model, profile });
     const effort = opts.effort ?? profile.effort;
     agent.validate({ model, effort });
+    const sandboxPolicy = resolvedSandboxPolicy(project);
     const maxTurns = Number(opts.maxTurns ?? profile.maxTurns ?? 50);
     if (!Number.isInteger(maxTurns) || maxTurns < 1) {
       throw new Error("maxTurns must be a positive integer");
@@ -7625,6 +7778,9 @@ export function createDispatcher({
       harvest: null,
       executionProfile: null,
       executionProfileRefusal: null,
+      trustProfile: { ...sandboxPolicy.trustProfile },
+      sandboxBackend: sandboxPolicy.backendId,
+      sandboxRefusal: null,
       warnings: claim?.warning ? [claim.warning] : [],
     };
     if (persistenceDegraded()) addPersistenceWarning(record);
@@ -8768,7 +8924,10 @@ ${diff}`;
         acceptRecordedRefusal: true,
         ...(entry.record.lane === "codex"
           ? codexProfilePolicy(entry.record)
-          : { compare: { executable: true }, requirements: { executable: true } }),
+          : {
+              compare: { executable: true, sandbox: true },
+              requirements: { executable: true },
+            }),
       });
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);
@@ -8850,7 +9009,7 @@ ${diff}`;
           dispatchDir,
           maxTurns: entry.maxTurns ?? entry.record.maxTurns ?? 50,
           env: entry.env,
-          spawner,
+          spawner: entrySpawner(entry, project, "agent resume"),
           commandRunner,
           callbacks: {
             childIdentityFields,
@@ -8961,7 +9120,10 @@ ${diff}`;
         accept: acceptExecutionProfile === true,
         ...(entry.record.lane === "codex"
           ? codexProfilePolicy(entry.record)
-          : { compare: { executable: true }, requirements: { executable: true } }),
+          : {
+              compare: { executable: true, sandbox: true },
+              requirements: { executable: true },
+            }),
       });
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);
@@ -9030,7 +9192,7 @@ ${diff}`;
           dispatchDir,
           maxTurns: entry.maxTurns ?? entry.record.maxTurns ?? 50,
           env: entry.env,
-          spawner,
+          spawner: entrySpawner(entry, project, "plan continuation"),
           commandRunner,
           callbacks: {
             childIdentityFields,

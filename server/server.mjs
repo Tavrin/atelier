@@ -112,6 +112,10 @@ const STATIC_ALLOWLIST = new Map([
   ],
   ["/request.mjs", { fileName: "request.mjs", contentType: "text/javascript; charset=utf-8" }],
   [
+    "/trust-profile.mjs",
+    { fileName: "trust-profile.mjs", contentType: "text/javascript; charset=utf-8" },
+  ],
+  [
     "/actor.mjs",
     { fileName: "actor.mjs", contentType: "text/javascript; charset=utf-8" },
   ],
@@ -183,11 +187,15 @@ const MCP_RESTRICTED_SETTINGS = new Set([
   "reviewPolicy",
   "budgetUSDPerDay",
   "unpricedDispatchCapPerDay",
+  "trustProfile",
+  "sandboxBackend",
 ]);
 const MCP_GATE_CRITICAL_SETTINGS = new Set([
   "verifyCommands",
   "requireReview",
   "reviewPolicy",
+  "trustProfile",
+  "sandboxBackend",
 ]);
 const serverResources = new WeakMap();
 
@@ -1118,6 +1126,8 @@ export function createServer({
           "queueFailureLimit",
           "unpricedDispatchCapPerDay",
           "legacyCodexCompanion",
+          "trustProfile",
+          "sandboxBackend",
         ]);
         const rejected = Object.keys(postBody).filter((key) => !mutableFields.has(key));
         if (rejected.length > 0) {

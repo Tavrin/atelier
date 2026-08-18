@@ -16,6 +16,7 @@ import {
   codexAppServerAgent,
   inspectCodexBinary,
   normalizeAppServerMessage,
+  probeCodexAppServer,
 } from "./codex-app-server.mjs";
 import { _runnerTest } from "./codex-app-server-runner.mjs";
 import {
@@ -28,6 +29,85 @@ import { normalizeLine } from "../stream.mjs";
 
 const execFileAsync = promisify(execFile);
 const FIXTURES = new URL("./fixtures/", import.meta.url);
+
+test("detached runner direct spawns route through backend-neutral sandbox wrapping", () => {
+  const calls = [];
+  const backend = {
+    id: "recording",
+    version: () => "1",
+    probe: () => ({ available: true, reason: "recording backend ready", evidence: {} }),
+    wrap(input) {
+      calls.push({ kind: "wrap", input: structuredClone(input) });
+      return {
+        file: "/recording/sandbox",
+        args: ["boundary", "--", input.file, ...input.args],
+        env: { ...input.env },
+      };
+    },
+  };
+  const spawned = { pid: 123 };
+  const result = _runnerTest.spawnWithSandbox(
+    {
+      trustProfile: { confinement: "sandboxed-write", credential: "none" },
+      backendId: "recording",
+    },
+    "/provider",
+    ["app-server", "--stdio"],
+    { cwd: "/workspace", env: { SAFE: "yes" } },
+    {
+      backends: new Map([[backend.id, backend]]),
+      spawn(file, args, options) {
+        calls.push({ kind: "spawn", file, args, options });
+        return spawned;
+      },
+    },
+  );
+  assert.equal(result, spawned);
+  assert.equal(calls[0].kind, "wrap");
+  assert.deepEqual(calls[0].input.args, ["app-server", "--stdio"]);
+  assert.deepEqual(calls[1], {
+    kind: "spawn",
+    file: "/recording/sandbox",
+    args: ["boundary", "--", "/provider", "app-server", "--stdio"],
+    options: { cwd: "/workspace", env: { SAFE: "yes" } },
+  });
+});
+
+test("app-server capability probe uses its supplied sandbox spawner", async () => {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.exitCode = null;
+  child.killed = false;
+  child.kill = () => { child.killed = true; };
+  let captured;
+  const resultPromise = probeCodexAppServer("/provider", { SAFE: "yes" }, {
+    spawner(file, args, options) {
+      captured = { file, args, options };
+      setImmediate(() => {
+        child.stdout.write(`${JSON.stringify({
+          id: 1,
+          result: { userAgent: "fixture", platformFamily: "unix", platformOs: "linux" },
+        })}\n`);
+        child.stdout.end();
+        child.exitCode = 0;
+        child.emit("close", 0);
+      });
+      return child;
+    },
+  });
+  assert.equal((await resultPromise).userAgent, "fixture");
+  assert.deepEqual(captured, {
+    file: "/provider",
+    args: ["app-server", "--stdio"],
+    options: {
+      env: { SAFE: "yes" },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  });
+});
 
 async function fixtureExecutable(t) {
   const root = await mkdtemp(join(tmpdir(), "atelier-codex-app-server-test-"));

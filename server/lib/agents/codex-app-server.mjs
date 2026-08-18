@@ -186,14 +186,18 @@ function validateInitializeResult(result) {
   return result;
 }
 
-export async function probeCodexAppServer(path, env = process.env, { timeoutMs = 10_000 } = {}) {
+export async function probeCodexAppServer(
+  path,
+  env = process.env,
+  { timeoutMs = 10_000, spawner = spawn } = {},
+) {
   if (env?.ATELIER_TEST_NO_REAL_PROVIDER === "1") {
     throw new Error(
       "EATELIER_REAL_PROVIDER_DISABLED: Codex app-server probe is disabled by ATELIER_TEST_NO_REAL_PROVIDER=1",
     );
   }
   return new Promise((resolvePromise, rejectPromise) => {
-    const proc = spawn(path, ["app-server", "--stdio"], {
+    const proc = spawner(path, ["app-server", "--stdio"], {
       env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -301,7 +305,7 @@ function addWarningOnce(entry, warning) {
   if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
 }
 
-async function preLaunchChecks({ entry, worktreePath, env, commandRunner }) {
+async function preLaunchChecks({ entry, worktreePath, env, commandRunner, spawner }) {
   const binary = inspectCodexBinary(env);
   entry.codexBinary = binary;
   entry.codexBinaryFromPreLaunch = true;
@@ -313,7 +317,7 @@ async function preLaunchChecks({ entry, worktreePath, env, commandRunner }) {
     throw new Error(`Codex lane unavailable: ${binary.resolvedPath} could not be digested`);
   }
   try {
-    await appServerProber(binary.resolvedPath, env);
+    await appServerProber(binary.resolvedPath, env, { spawner });
   } catch (error) {
     throw new Error(`Codex lane unavailable: app-server initialize handshake failed: ${error.message}`);
   }
@@ -642,12 +646,16 @@ function launchRunner(options, { resume = false } = {}) {
     worktreePath,
     "--prompt-file",
     promptFile(entry, prompt, dispatchDir),
+    ...(spawner.sandboxConfig
+      ? ["--sandbox-json", JSON.stringify(spawner.sandboxConfig)]
+      : []),
     "--background",
     "--json",
     ...(entry.record.readOnly ? [] : ["--write"]),
     ...(resume ? ["--resume", entry.record.sessionId] : []),
   ];
-  const child = spawner(process.execPath, args, { cwd: worktreePath, env });
+  const launcherSpawner = spawner.controlPlane || spawner;
+  const child = launcherSpawner(process.execPath, args, { cwd: worktreePath, env });
   entry.child = child;
   let output = "";
   callbacks.streamLines(child.stdout, (line) => { output += `${line}\n`; });

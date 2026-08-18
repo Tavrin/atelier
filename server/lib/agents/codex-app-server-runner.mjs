@@ -21,6 +21,11 @@ import {
   writeFileExclusiveDurable,
 } from "../fs-integrity.mjs";
 import { redactText, redactValue } from "../stream.mjs";
+import {
+  createSandboxBackends,
+  sandboxBackend,
+  wrapSandboxSpawn,
+} from "../execution/sandbox.mjs";
 
 const CLIENT_INFO = Object.freeze({
   name: "atelier",
@@ -36,6 +41,25 @@ const STREAM_TRUNCATION = `${JSON.stringify({
   params: { reason: `protocol stream exceeded ${STREAM_BYTE_LIMIT} bytes` },
 })}\n`;
 const truncatedStreams = new Set();
+const sandboxBackends = createSandboxBackends();
+
+function spawnWithSandbox(
+  config,
+  file,
+  args,
+  options,
+  { backends = sandboxBackends, spawn: spawnProcess = spawn } = {},
+) {
+  if (!config) return spawnProcess(file, args, options);
+  const wrapped = wrapSandboxSpawn({
+    trustProfile: config.trustProfile,
+    backend: sandboxBackend(backends, config.backendId),
+    file,
+    args,
+    options,
+  });
+  return spawnProcess(wrapped.file, wrapped.args, wrapped.options);
+}
 
 function testTunable(name, fallback) {
   if (process.env.ATELIER_TEST_NO_REAL_PROVIDER !== "1") return fallback;
@@ -449,7 +473,7 @@ async function runJob(path) {
     };
   });
   let terminalOutcome;
-  const proc = spawn(job.codexPath, ["app-server", "--stdio"], {
+  const proc = spawnWithSandbox(job.sandbox, job.codexPath, ["app-server", "--stdio"], {
     cwd: job.workspace,
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"],
@@ -632,6 +656,7 @@ async function task(values) {
     rawOutput: "",
     errorMessage: null,
     testStub: values["test-stub"] === true,
+    sandbox: values["sandbox-json"] ? JSON.parse(values["sandbox-json"]) : null,
   };
   let binaryPinsMatch = true;
   try {
@@ -763,4 +788,5 @@ export const _runnerTest = Object.freeze({
   appendStream,
   processStartIdentity,
   printableJob,
+  spawnWithSandbox,
 });

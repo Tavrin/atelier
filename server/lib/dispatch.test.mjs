@@ -421,6 +421,24 @@ function verifyChild({ stdout = [], stderr = [], code = 0 } = {}) {
   return child;
 }
 
+function recordingSandboxBackend() {
+  const state = { available: true, wraps: [] };
+  const backend = {
+    id: "bwrap",
+    version: () => "recording 1",
+    probe: () => ({
+      available: state.available,
+      reason: state.available ? "recording sandbox ready" : "recording namespace disappeared",
+      evidence: { recording: true },
+    }),
+    wrap(input) {
+      state.wraps.push(structuredClone(input));
+      return { file: input.file, args: [...input.args], env: { ...input.env } };
+    },
+  };
+  return { backend, state, backends: new Map([[backend.id, backend]]) };
+}
+
 function processStartIdentity(pid) {
   const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
   const commandEnd = stat.lastIndexOf(")");
@@ -24797,4 +24815,132 @@ test("stop preempts a SIGTERM-immune verification re-run and a later re-run is a
     () => dispatcher.get(record.id).verify.state === "passed",
     "the post-stop re-run was not accepted",
   );
+});
+
+test("sandbox-unavailable launch is a named prepare refusal and never reaches the spawner", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+  });
+  stubPreparation();
+  const sandbox = recordingSandboxBackend();
+  sandbox.state.available = false;
+  let spawns = 0;
+  _setSpawner(() => {
+    spawns += 1;
+    return successfulChild();
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+  });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "must refuse" });
+  const refused = await waitForState(dispatcher, id, ["prepare_failed"]);
+  assert.equal(spawns, 0);
+  assert.match(refused.exitSummary, /^EATELIER_SANDBOX_UNAVAILABLE: bwrap:/);
+  assert.equal(refused.sandboxRefusal.operation, "execution profile resolution");
+  assert.match(refused.sandboxRefusal.detail, /recording namespace disappeared/);
+});
+
+test("sandbox disappearance refuses resume before a second provider spawn", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+  });
+  stubPreparation();
+  const sandbox = recordingSandboxBackend();
+  let spawns = 0;
+  _setSpawner(() => {
+    spawns += 1;
+    return successfulChild();
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+  });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "launch once" });
+  const completed = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(completed.executionProfile.sandbox.backendId, "bwrap");
+  assert.equal(
+    completed.sandboxPosture,
+    "sandboxed-write (isolated by bwrap; credential none)",
+  );
+  assert.equal(spawns, 1);
+
+  setup.project.trustProfile = { confinement: "trusted-local", credential: "none" };
+  await assert.rejects(
+    dispatcher.reply(id, { text: "do not weaken confinement" }),
+    /EATELIER_EXECUTION_PROFILE_MISMATCH: .*sandbox\.confinement/,
+  );
+  assert.equal(spawns, 1);
+  setup.project.trustProfile = { confinement: "sandboxed-write", credential: "none" };
+  sandbox.state.available = false;
+  await assert.rejects(
+    dispatcher.reply(id, { text: "do not spawn unconfined" }),
+    /EATELIER_SANDBOX_UNAVAILABLE: bwrap: recording namespace disappeared/,
+  );
+  assert.equal(spawns, 1);
+  assert.equal(dispatcher.get(id).sandboxRefusal.operation, "execution profile resolution");
+});
+
+test("sandbox disappearance at verify-step spawn fails the gate without an unconfined verifier", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+    verifyCommands: ["node --test"],
+  });
+  stubPreparation();
+  const sandbox = recordingSandboxBackend();
+  const provider = heldChild();
+  let spawns = 0;
+  _setSpawner(() => {
+    spawns += 1;
+    return provider;
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+  });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "verify safely" });
+  await waitForState(dispatcher, id, ["running"]);
+  sandbox.state.available = false;
+  provider.complete("provider completed");
+  const completed = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(spawns, 1);
+  assert.equal(completed.verify.state, "failed");
+  assert.equal(completed.sandboxRefusal.operation, "verify step");
+  assert.match(completed.verify.steps[0].tail, /EATELIER_SANDBOX_UNAVAILABLE/);
+});
+
+test("sandbox downgrade between launch and verify is a profile mismatch and never runs unconfined", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+    verifyCommands: ["node --test"],
+  });
+  stubPreparation();
+  const sandbox = recordingSandboxBackend();
+  const provider = heldChild();
+  let spawns = 0;
+  _setSpawner(() => {
+    spawns += 1;
+    return provider;
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+  });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "keep verify confined" });
+  await waitForState(dispatcher, id, ["running"]);
+  setup.project.trustProfile = { confinement: "trusted-local", credential: "none" };
+  provider.complete("provider completed");
+  const completed = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(spawns, 1);
+  assert.equal(completed.verify.state, "failed");
+  assert.match(completed.verify.steps[0].tail, /EATELIER_EXECUTION_PROFILE_MISMATCH/);
+  assert.equal(completed.executionProfileRefusal.operation, "verify step");
 });

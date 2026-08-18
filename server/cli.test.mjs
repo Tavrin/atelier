@@ -83,6 +83,10 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   assert.match(stdout, /git: ok/);
   assert.match(stdout, /br: ok/);
   assert.match(stdout, /claude: ok/);
+  assert.match(
+    stdout,
+    /sandbox: ok \(bwrap; bubblewrap 0\.10\.0; bubblewrap unprivileged namespace probe succeeded\)/,
+  );
   assert.match(stdout, /codex: (?:guarded|not installed)/);
 
   const atelierState = join(root, "state");
@@ -293,6 +297,55 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   } else {
     assert.match(gc.stdout, /codex process sweep unavailable on this platform/);
   }
+});
+
+test("atelier doctor reports the selected backend's specific unavailable reason", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-cli-sandbox-doctor-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, "projects.json"),
+    JSON.stringify({
+      version: 1,
+      defaults: { sandboxBackend: "podman" },
+      groups: [],
+      projects: [],
+    }),
+  );
+  for (const command of ["git", "br", "claude"]) {
+    const path = join(root, command);
+    await writeFile(path, `#!/bin/sh\nprintf '%s\\n' '${command} fixture'\n`);
+    await chmod(path, 0o755);
+  }
+  const podman = join(root, "podman");
+  await writeFile(
+    podman,
+    "#!/bin/sh\n" +
+      "if [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'podman version 4.9.3'; exit 0; fi\n" +
+      "printf '%s\\n' 'AppArmor denied the rootless user namespace' >&2\n" +
+      "exit 1\n",
+  );
+  await chmod(podman, 0o755);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [resolve("bin", "atelier.mjs"), "doctor"], {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        PATH: root,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_STATE_DIR: join(root, "state"),
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(
+        error.stdout,
+        /sandbox: unavailable \(podman; podman version 4\.9\.3; rootless podman probe failed: AppArmor denied the rootless user namespace\)/,
+      );
+      return true;
+    },
+  );
 });
 
 test("atelier doctor validates the configured Codex binary with initialize only", async (t) => {

@@ -27,6 +27,13 @@ import {
 import { installService, restartServiceSafely } from "../server/lib/service.mjs";
 import { createBootStamp } from "../server/lib/version.mjs";
 import {
+  createSandboxBackends,
+  resolveSandboxBackendId,
+  resolveTrustProfile,
+  sandboxBackend,
+  sandboxPostureLabel,
+} from "../server/lib/execution/sandbox.mjs";
+import {
   createServer,
   listenLoopback,
   shutdownServer,
@@ -215,6 +222,10 @@ async function projects(args) {
         branch: probe.git.branch,
         dirty: probe.git.dirtyCount,
         worktrees: probe.git.worktrees,
+        execution: sandboxPostureLabel({
+          ...resolveTrustProfile(project, registry.defaults),
+          backendId: resolveSandboxBackendId(project, registry.defaults),
+        }),
       };
     }),
   );
@@ -673,6 +684,24 @@ async function doctor(args) {
     console.log(`${check.name}: ${check.ok ? "ok" : "missing"} (${check.detail})`);
   }
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
+
+  const backends = createSandboxBackends();
+  const selectedBackendIds = new Set([
+    resolveSandboxBackendId({}, registry.defaults),
+    ...registry.projects.map((project) =>
+      resolveSandboxBackendId(project, registry.defaults)),
+  ]);
+  for (const [index, backendId] of [...selectedBackendIds].entries()) {
+    const backend = sandboxBackend(backends, backendId);
+    const probe = backend.probe();
+    const version = backend.version() || "version unavailable";
+    const name = index === 0 ? "sandbox" : `sandbox ${backendId}`;
+    console.log(
+      `${name}: ${probe.available ? "ok" : "unavailable"} ` +
+        `(${backendId}; ${version}; ${probe.reason})`,
+    );
+    if (!probe.available) process.exitCode = 1;
+  }
 
   const binary = inspectCodexBinary(process.env);
   if (!binary.resolvedPath) {

@@ -75,6 +75,7 @@ export function createExecutionProfile({
   env,
   controlledKeys = [],
   hooksSupported = true,
+  sandbox = undefined,
   capturedAt = new Date().toISOString(),
 }) {
   const sortedEnv = sortedEnvironment(env);
@@ -123,6 +124,7 @@ export function createExecutionProfile({
       hooks: hooksSupported ? "disabled" : "unsupported",
       ...GIT_POSTURE,
     },
+    ...(sandbox === undefined ? {} : { sandbox: { ...sandbox } }),
   };
 }
 
@@ -152,6 +154,7 @@ export function executionProfileMismatch(recorded, current, {
   executableDigest = false,
   companionPath = false,
   companionDigest = false,
+  sandbox = false,
 } = {}) {
   const differences = [];
   if (recorded.envDigest !== current.envDigest) {
@@ -183,6 +186,15 @@ export function executionProfileMismatch(recorded, current, {
       : []),
     ...(companionDigest && recorded.companionDigest !== undefined
       ? [["companionDigest", recorded.companionDigest, current.companionDigest]]
+      : []),
+    ...(sandbox && recorded.sandbox !== undefined
+      ? [
+          ["sandbox.confinement", recorded.sandbox?.confinement, current.sandbox?.confinement],
+          ["sandbox.credential", recorded.sandbox?.credential, current.sandbox?.credential],
+          ["sandbox.backendId", recorded.sandbox?.backendId, current.sandbox?.backendId],
+          ["sandbox.backendVersion", recorded.sandbox?.backendVersion, current.sandbox?.backendVersion],
+          ["sandbox.argvDigest", recorded.sandbox?.argvDigest, current.sandbox?.argvDigest],
+        ]
       : []),
   ];
   for (const [name, before, after] of fields) {

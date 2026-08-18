@@ -2042,6 +2042,8 @@ test("project PATCH atomically updates only mutable settings and mutates the liv
       budgetUSDPerDay: 15.75,
       queueFailureLimit: 4,
       unpricedDispatchCapPerDay: 4,
+      trustProfile: { confinement: "sandboxed-write", credential: "none" },
+      sandboxBackend: "podman",
     }),
     contentType: "application/json",
   });
@@ -2068,6 +2070,11 @@ test("project PATCH atomically updates only mutable settings and mutates the liv
   assert.equal(registry.projects[0].budgetUSDPerDay, 15.75);
   assert.equal(registry.projects[0].queueFailureLimit, 4);
   assert.equal(registry.projects[0].unpricedDispatchCapPerDay, 4);
+  assert.deepEqual(updated.trustProfile, {
+    confinement: "sandboxed-write",
+    credential: "none",
+  });
+  assert.equal(updated.sandboxBackend, "podman");
   const stored = JSON.parse(await readFile(registryPath, "utf8"));
   assert.equal(stored.projects[0].warn, "never publish");
   assert.equal(stored.projects[0].defaultAgent, "codex");
@@ -2076,6 +2083,11 @@ test("project PATCH atomically updates only mutable settings and mutates the liv
   assert.equal(stored.projects[0].reviewPolicy, "tiered");
   assert.equal(stored.projects[0].queueFailureLimit, 4);
   assert.equal(stored.projects[0].unpricedDispatchCapPerDay, 4);
+  assert.deepEqual(stored.projects[0].trustProfile, {
+    confinement: "sandboxed-write",
+    credential: "none",
+  });
+  assert.equal(stored.projects[0].sandboxBackend, "podman");
   assert.deepEqual(
     (await readdir(join(root, "config"))).filter((name) => name.endsWith(".tmp")),
     [],
@@ -2090,6 +2102,8 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
     ["reviewPolicy", "tiered"],
     ["budgetUSDPerDay", 10],
     ["unpricedDispatchCapPerDay", 3],
+    ["trustProfile", { confinement: "sandboxed-write", credential: "none" }],
+    ["sandboxBackend", "podman"],
   ];
 
   for (const [field, value] of gateFields) {
@@ -2134,6 +2148,8 @@ test("MCP onboarding cannot set gate policy and accepted onboarding receives saf
     ["verifyCommands", ["node --test"]],
     ["requireReview", false],
     ["reviewPolicy", "advisory"],
+    ["trustProfile", { confinement: "sandboxed-write", credential: "none" }],
+    ["sandboxBackend", "podman"],
   ]) {
     const response = await send(port, {
       method: "POST",
@@ -2161,6 +2177,8 @@ test("MCP onboarding cannot set gate policy and accepted onboarding receives saf
   assert.equal(project.reviewPolicy, "strict");
   assert.equal(project.budgetUSDPerDay, 12);
   assert.equal(project.unpricedDispatchCapPerDay, 4);
+  assert.deepEqual(project.trustProfile, { confinement: "trusted-local", credential: "none" });
+  assert.equal(project.sandboxBackend, "bwrap");
 });
 
 test("queueFailureLimit parking changes immediately reach board SSE without a tracker write", async (t) => {

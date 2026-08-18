@@ -11,12 +11,73 @@ import {
   loadRegistry,
   normalizeProject,
   projectOwnDispatchProfile,
+  projectOwnSandboxBackend,
+  projectOwnTrustProfile,
   RegistryError,
   updateProject,
   validateProject,
   validateRegistry,
   writeRegistryAtomic,
 } from "./registry.mjs";
+
+test("trust profiles merge by axis without promoting registry defaults", async (t) => {
+  const { projectPath, registryPath } = await fixture(t);
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      defaults: {
+        trustProfile: { confinement: "sandboxed-write", credential: "none" },
+        sandboxBackend: "podman",
+      },
+      projects: [{
+        ...validProject(projectPath),
+        trustProfile: { credential: "in-sandbox" },
+      }],
+      groups: [],
+    }),
+  );
+  const registry = await loadRegistry(registryPath);
+  const project = registry.projects[0];
+  assert.deepEqual(project.trustProfile, {
+    confinement: "sandboxed-write",
+    credential: "in-sandbox",
+  });
+  assert.deepEqual(projectOwnTrustProfile(project), { credential: "in-sandbox" });
+  assert.equal(project.sandboxBackend, "podman");
+  assert.equal(projectOwnSandboxBackend(project), undefined);
+
+  await updateProject(registry, project.name, { notes: "preserve trust inheritance" }, registryPath);
+  const stored = JSON.parse(await readFile(registryPath, "utf8"));
+  assert.deepEqual(stored.projects[0].trustProfile, { credential: "in-sandbox" });
+  assert.equal(stored.projects[0].sandboxBackend, undefined);
+});
+
+test("registry rejects unknown trust values, unknown backends, and incoherent credentials", async (t) => {
+  const { projectPath } = await fixture(t);
+  const base = {
+    version: 1,
+    defaults: {},
+    groups: [],
+    projects: [validProject(projectPath)],
+  };
+  assert.ok(validateRegistry({
+    ...base,
+    projects: [{
+      ...base.projects[0],
+      trustProfile: { confinement: "trusted-local", credential: "in-sandbox" },
+    }],
+  }).some((problem) => /in-sandbox requires sandboxed confinement/.test(problem)));
+  assert.ok(validateRegistry({
+    ...base,
+    defaults: { trustProfile: { confinement: "mystery" } },
+  }).some((problem) => /defaults\.trustProfile\.confinement must be one of/.test(problem)));
+  assert.deepEqual(
+    validateProject({ ...base.projects[0], sandboxBackend: "unknown" })
+      .filter((problem) => problem.includes("sandboxBackend")),
+    ["projects[0].sandboxBackend must be one of: bwrap, podman"],
+  );
+});
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "atelier-registry-"));

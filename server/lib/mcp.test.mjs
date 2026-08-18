@@ -211,6 +211,14 @@ test("atelier_settings_patch excludes gate-critical policy fields from automatio
       project: "atelier",
       fields: { verifyCommands: ["node --test"] },
     }),
+    toolCall(5, "atelier_settings_patch", {
+      project: "atelier",
+      fields: { trustProfile: { confinement: "sandboxed-write", credential: "none" } },
+    }),
+    toolCall(6, "atelier_settings_patch", {
+      project: "atelier",
+      fields: { sandboxBackend: "podman" },
+    }),
   ), async (url, options) => {
     requests.push({ url, options });
     return new Response(JSON.stringify({ name: "atelier", reviewPolicy: "tiered" }), {
@@ -222,7 +230,10 @@ test("atelier_settings_patch excludes gate-critical policy fields from automatio
   assert.equal(requests.length, 0);
   for (const response of responses.slice(1)) {
     assert.equal(response.error.code, -32602);
-    assert.match(response.error.message, /Unknown argument field: fields\.(?:reviewPolicy|requireReview|verifyCommands)/);
+    assert.match(
+      response.error.message,
+      /Unknown argument field: fields\.(?:reviewPolicy|requireReview|verifyCommands|trustProfile|sandboxBackend)/,
+    );
   }
 });
 
@@ -248,7 +259,16 @@ test("atelier_project_add refuses gate-critical onboarding fields and forwards s
     toolCall(4, "atelier_project_add", {
       registration: { ...base, reviewPolicy: "advisory" },
     }),
-    toolCall(5, "atelier_project_add", { registration: base }),
+    toolCall(5, "atelier_project_add", {
+      registration: {
+        ...base,
+        trustProfile: { confinement: "sandboxed-write", credential: "none" },
+      },
+    }),
+    toolCall(6, "atelier_project_add", {
+      registration: { ...base, sandboxBackend: "podman" },
+    }),
+    toolCall(7, "atelier_project_add", { registration: base }),
   ), async (url, options) => {
     requests.push({ url, options });
     return new Response(JSON.stringify({
@@ -264,14 +284,14 @@ test("atelier_project_add refuses gate-critical onboarding fields and forwards s
 
   assert.equal(requests.length, 1);
   assert.deepEqual(JSON.parse(requests[0].options.body), base);
-  for (const response of responses.slice(1, 4)) {
+  for (const response of responses.slice(1, 6)) {
     assert.equal(response.error.code, -32602);
     assert.match(
       response.error.message,
-      /Unknown argument field: registration\.(?:verifyCommands|requireReview|reviewPolicy)/,
+      /Unknown argument field: registration\.(?:verifyCommands|requireReview|reviewPolicy|trustProfile|sandboxBackend)/,
     );
   }
-  assert.equal(responses[4].result.isError, false);
+  assert.equal(responses[6].result.isError, false);
 });
 
 test("parity tools proxy chronicle, ticket action, bake-off, main-health, agents, and diff routes", async () => {

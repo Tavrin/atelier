@@ -45,6 +45,7 @@ import {
 } from "./reply-availability.mjs";
 import { createDesktopNotifier } from "./notifications.mjs";
 import { atelierRequestOptions, setAtelierCsrfToken } from "./request.mjs";
+import { trustProfileSummary } from "./trust-profile.mjs";
 import {
   shouldReturnToDashboard,
   teardownTheme,
@@ -3202,6 +3203,28 @@ function renderProjectSettings(project, agentList, initialQueue) {
   maxTurns.placeholder = "Inherit default";
   maxTurns.value = profile.maxTurns ? String(profile.maxTurns) : "";
 
+  const confinement = document.createElement("select");
+  const selectedConfinement = project.trustProfile?.confinement || "trusted-local";
+  confinement.replaceChildren(
+    option("trusted-local", "Trusted local — no isolation", selectedConfinement),
+    option("sandboxed-write", "Sandboxed — worktree writable", selectedConfinement),
+    option("sandboxed-review-readonly", "Sandboxed — read-only", selectedConfinement),
+    option("advisory", "Advisory — non-enforcing", selectedConfinement),
+  );
+  const credential = document.createElement("select");
+  const selectedCredential = project.trustProfile?.credential || "none";
+  credential.replaceChildren(
+    option("none", "None", selectedCredential),
+    option("brokered", "Brokered", selectedCredential),
+    option("in-sandbox", "In sandbox", selectedCredential),
+  );
+  const sandboxBackend = document.createElement("select");
+  const selectedSandboxBackend = project.sandboxBackend || "bwrap";
+  sandboxBackend.replaceChildren(
+    option("bwrap", "Bubblewrap", selectedSandboxBackend),
+    option("podman", "Podman (wrap unavailable)", selectedSandboxBackend),
+  );
+
   const dailyBudget = document.createElement("input");
   dailyBudget.type = "number";
   dailyBudget.min = "0.01";
@@ -3300,6 +3323,14 @@ function renderProjectSettings(project, agentList, initialQueue) {
     field("Effort", effort, "field", effortHint),
     field("Max turns", maxTurns, "field", "Leave blank to inherit the Atelier default."),
     field(
+      "Execution confinement",
+      confinement,
+      "field",
+      "Trusted-local and advisory do not provide an isolation boundary.",
+    ),
+    field("Credential containment", credential),
+    field("Sandbox backend", sandboxBackend),
+    field(
       "Daily budget (USD)",
       dailyBudget,
       "field",
@@ -3364,6 +3395,11 @@ function renderProjectSettings(project, agentList, initialQueue) {
       requireReview: requireReview.control.checked,
       reviewPolicy: reviewPolicy.value,
       legacyCodexCompanion: legacyCodexCompanion.control.checked,
+      trustProfile: {
+        confinement: confinement.value,
+        credential: credential.value,
+      },
+      sandboxBackend: sandboxBackend.value,
     };
     if (maxFixRoundsEdited) body.maxFixRounds = Number(maxFixRounds.value);
     if (automationAvailable) {
@@ -5162,8 +5198,9 @@ async function renderDispatch(route, token) {
   header.firstElementChild.prepend(backLink);
   const branchChip = dispatchValueChip("Branch", record.branch);
   const worktreeChip = dispatchValueChip("Worktree", record.worktreePath);
+  const trustChip = dispatchValueChip("Execution", trustProfileSummary(record));
   const dispatchContext = element("div", "dispatch-context");
-  dispatchContext.append(branchChip.wrapper, worktreeChip.wrapper);
+  dispatchContext.append(branchChip.wrapper, worktreeChip.wrapper, trustChip.wrapper);
   header.firstElementChild.append(dispatchContext);
   const bakeoffLinks = element("div", "bakeoff-links");
   const bakeoffSiblings = () => state.dispatches.filter(
@@ -5488,6 +5525,7 @@ async function renderDispatch(route, token) {
     stop.hidden = !["resuming", "running", "verifying"].includes(record.state);
     elapsed.textContent = elapsedBetween(record.startedAt, lastActivityAt(record));
     branchChip.update(record.branch);
+    trustChip.update(trustProfileSummary(record));
     worktreeChip.update(record.worktreePath);
     if (openEditor) openEditor.hidden = !record.worktreePath;
     statusHistory.add(record.state);
