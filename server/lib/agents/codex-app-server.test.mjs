@@ -1171,7 +1171,13 @@ test("runner publishes finishing until the app-server is gone, then releases its
   await writeFile(promptPath, "finish cleanly\n");
   await writeFile(codexPath, `#!/usr/bin/env node
 import { createInterface } from "node:readline";
-process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));
+// This delay IS the "finishing" window the assertions below sample for, and
+// each sample costs a full runner status subprocess. Under the parallel batch
+// a single sample can outlast a short window, so the poller steps over
+// "finishing" entirely and the test fails while the runner behaved correctly.
+// Keep this comfortably longer than a subprocess spawn under load; do not
+// shrink it to speed the suite up.
+process.on("SIGTERM", () => setTimeout(() => process.exit(0), 2000));
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") console.log(JSON.stringify({ id: message.id, result: {
