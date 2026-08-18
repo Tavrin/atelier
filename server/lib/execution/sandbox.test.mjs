@@ -301,6 +301,44 @@ test("argvDigest changes for every claimed security control without persisting e
   assert.equal(JSON.stringify({ digest }).includes("not-persisted"), false);
 });
 
+test("verification side-effect roots are writable only beneath the read-only tested tree", () => {
+  const backend = createBwrapBackend({ file: "/fixture/bwrap" });
+  const wrapped = backend.wrap({
+    ...sandboxedWrite,
+    file: "/verifier",
+    args: [],
+    cwd: "/verification/checkout",
+    env: {},
+    readOnlyRoots: ["/verification/checkout"],
+    writableRoots: [
+      "/verification/scratch",
+      "/verification/checkout/generated/cache",
+    ],
+  });
+  assert.deepEqual(wrapped.security.readOnlyRoots, ["/verification/checkout"]);
+  assert.deepEqual(wrapped.security.writableRoots, [
+    "/verification/checkout/generated/cache",
+    "/verification/scratch",
+  ]);
+  const testedTreeBind = wrapped.args.indexOf("/verification/checkout");
+  const exceptionBind = wrapped.args.indexOf("/verification/checkout/generated/cache");
+  assert.equal(wrapped.args[testedTreeBind - 1], "--ro-bind");
+  assert.equal(wrapped.args[exceptionBind - 1], "--bind");
+  assert.ok(exceptionBind > testedTreeBind, "writable exception did not follow the read-only bind");
+  assert.throws(
+    () => backend.wrap({
+      ...sandboxedWrite,
+      file: "/verifier",
+      args: [],
+      cwd: "/verification/checkout",
+      env: {},
+      readOnlyRoots: ["/verification/checkout"],
+      writableRoots: ["/verification"],
+    }),
+    (error) => error.code === "EATELIER_VERIFICATION_READONLY_TREE",
+  );
+});
+
 test("network-dependent providers and unsupported platforms refuse with distinct named errors", () => {
   assert.throws(
     () => assertSandboxProviderCompatible({
@@ -454,4 +492,12 @@ test("real bwrap enforcement limits writes to the worktree and makes review work
     readOnlyRoots: [worktree],
   }).status, 0, "verification scratch was not writable");
   assert.equal(await readFile(scratchFile, "utf8"), "written");
+  const allowedRoot = join(worktree, "generated-cache");
+  await mkdir(allowedRoot);
+  const allowedFile = join(allowedRoot, "result.txt");
+  assert.equal(run("sandboxed-write", allowedFile, {
+    writableRoots: [scratch, allowedRoot],
+    readOnlyRoots: [worktree],
+  }).status, 0, "operator-owned nested side-effect root was not writable");
+  assert.equal(await readFile(allowedFile, "utf8"), "written");
 });

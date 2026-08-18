@@ -1258,6 +1258,31 @@ test("dispatch runs queued -> preparing -> running -> completed with prompt post
   );
 });
 
+test("result finalization receives the operator-owned verification side-effect allowlist", async (t) => {
+  const setup = await fixture(t, {}, {
+    verificationSideEffectAllowlist: ["generated/cache"],
+  });
+  stubPreparation();
+  let receivedAllowlist;
+  _setResultFinalizer(async ({ baseCommit, verificationSideEffectAllowlist }) => {
+    receivedAllowlist = verificationSideEffectAllowlist;
+    return {
+      resultCommit: FIXTURE_BASE_COMMIT,
+      resultTree: FIXTURE_RESULT_TREE,
+      baseCommit,
+      manifest: [],
+      workspaceClean: true,
+      commitCreated: false,
+    };
+  });
+  _setSpawner(() => successfulChild());
+
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "finalize safely" });
+  await waitForState(dispatcher, id, ["completed"]);
+  assert.deepEqual(receivedAllowlist, ["generated/cache"]);
+});
+
 test("workspace token naming collision hard-fails preparation and removes the new checkout", async (t) => {
   const setup = await fixture(t);
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
@@ -25120,6 +25145,57 @@ test("detached verification receives a read-only tested tree, writable scratch, 
   assert.equal(typeof verifierWrap.brokerSocketPath, "string");
   assert.deepEqual(sandbox.state.brokers[0].allowlist, ["/api/dispatches"]);
   assert.equal(existsSync(verifierWrap.writableRoots[0]), false, "verification scratch leaked");
+});
+
+test("operator-owned verification side effects are writable and filtered only after full status probes", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+    verifyCommands: ["node --test"],
+  }, {
+    verificationSideEffectAllowlist: ["generated/cache"],
+  });
+  let statusCalls = 0;
+  stubPreparation({
+    verificationStatus: () => {
+      statusCalls += 1;
+      return statusCalls === 1 ? "" : "!! generated/cache/output.bin\0";
+    },
+  });
+  const sandbox = recordingSandboxBackend();
+  const id = "sandbox-verify-side-effect";
+  const worktreePath = join(setup.state, "worktrees", "fixture", id);
+  const executionProfile = seededSandboxProfile(setup, sandbox, worktreePath);
+  await seedRerunnable(setup, {
+    id,
+    worktreePath,
+    executionProfile,
+    result: {
+      commit: FIXTURE_BASE_COMMIT,
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      manifest: [],
+      version: 1,
+    },
+  });
+  _setSpawner(() => verifyChild());
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+    daemonBrokerFactory: sandbox.daemonBrokerFactory,
+  });
+  configureRecordingDaemonBroker(dispatcher);
+
+  await dispatcher.rerunVerification(id);
+  const completed = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(completed.verify.state, "passed");
+  assert.equal(statusCalls, 2);
+  const verifierWrap = sandbox.state.wraps.find((input) => input.file === "node");
+  assert.ok(verifierWrap);
+  assert.deepEqual(verifierWrap.readOnlyRoots, [verifierWrap.cwd]);
+  assert.equal(verifierWrap.writableRoots.length, 2);
+  assert.ok(verifierWrap.writableRoots.includes(join(verifierWrap.cwd, "generated", "cache")));
 });
 
 test("sandbox disappearance at verify spawn fails the gate without an unconfined verifier", async (t) => {

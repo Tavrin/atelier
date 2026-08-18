@@ -80,6 +80,11 @@ import {
   wrapSandboxSpawn,
 } from "./execution/sandbox.mjs";
 import {
+  prepareVerificationSideEffectRoots,
+  resolveVerificationSideEffectAllowlist,
+  verificationSideEffectAllowed,
+} from "./execution/verification-side-effects.mjs";
+import {
   createDaemonApiBroker,
   resolveSandboxBrokerAllowlist,
 } from "./execution/daemon-broker.mjs";
@@ -4870,7 +4875,7 @@ export function createDispatcher({
           /\bEROFS\b|read-only file system/i.test(capturedOutput())
         ) {
           appendDiagnostic(
-            `${VERIFICATION_READONLY_TREE}the verifier attempted to write inside the read-only tested tree; the operator-owned side-effect allowlist is not implemented until slice 3`,
+            `${VERIFICATION_READONLY_TREE}the verifier attempted to write outside the operator-owned verification side-effect allowlist`,
           );
         }
         const exitCode = timedOut ? null : Number.isInteger(code) ? code : null;
@@ -5342,14 +5347,39 @@ export function createDispatcher({
     }
   }
 
-  async function verificationSnapshot(worktree) {
+  function verificationStatusOutsideAllowlist(status, allowlist) {
+    if (!status || allowlist.length === 0) return status;
+    const records = String(status).split("\0");
+    const retained = [];
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      if (!record) continue;
+      const code = record.slice(0, 2);
+      const paths = [record.slice(3)];
+      if (code.includes("R") || code.includes("C")) {
+        const original = records[index + 1];
+        if (original) {
+          paths.push(original);
+          index += 1;
+        }
+      }
+      if (paths.every((path) => verificationSideEffectAllowed(path, allowlist))) continue;
+      retained.push(record, ...paths.slice(1));
+    }
+    return retained.length > 0 ? `${retained.join("\0")}\0` : "";
+  }
+
+  async function verificationSnapshot(worktree, sideEffectAllowlist = []) {
     const head = (
       await commandRunner("git", ["-C", worktree, "rev-parse", "HEAD"])
     ).trim();
     const tree = (
       await commandRunner("git", ["-C", worktree, "rev-parse", "HEAD^{tree}"])
     ).trim();
-    const status = String(await commandRunner("git", [
+    // Always ask git for every tracked, untracked, and ignored path. The
+    // operator exception is applied only after the complete observation, so a
+    // repository-controlled .gitignore cannot turn into an inspection gap.
+    const observedStatus = String(await commandRunner("git", [
       "-C",
       worktree,
       "status",
@@ -5361,6 +5391,7 @@ export function createDispatcher({
       ".",
       `:(exclude)${WORKSPACE_IDENTITY_FILE}`,
     ]));
+    const status = verificationStatusOutsideAllowlist(observedStatus, sideEffectAllowlist);
     return { head, tree, status };
   }
 
@@ -5393,14 +5424,19 @@ export function createDispatcher({
     };
   }
 
-  async function runVerifyCommands(entry, commands, stageDeadline, { attempt, cwd, scratch }) {
+  async function runVerifyCommands(entry, commands, stageDeadline, {
+    attempt,
+    cwd,
+    scratch,
+    sideEffectRoots = [],
+  }) {
     for (let index = 0; index < commands.length; index += 1) {
       if (entry.record.state !== "verifying") return { interrupted: true };
       const result = await runVerifyStep(entry, commands[index], index, stageDeadline, {
         cwd,
         ...(scratch ? {
           env: verificationSandboxEnv(entry.workloadEnv ?? entry.env, scratch),
-          writableRoots: [scratch],
+          writableRoots: [scratch, ...sideEffectRoots],
           readOnlyRoots: [cwd],
           readOnlyTestedTree: true,
         } : {}),
@@ -5467,6 +5503,7 @@ export function createDispatcher({
       const verifyRoot = join(stateDir, "verify-worktrees", project.name);
       const worktree = join(verifyRoot, randomBytes(8).toString("hex"));
       const scratch = `${worktree}.scratch`;
+      const sideEffectAllowlist = resolveVerificationSideEffectAllowlist(registry.defaults);
       try {
         mkdirSync(verifyRoot, { recursive: true });
         mkdirSync(scratch, { recursive: true });
@@ -5502,7 +5539,11 @@ export function createDispatcher({
             }
           },
         }, async () => {
-          const pre = await verificationSnapshot(worktree);
+          const sideEffectRoots = prepareVerificationSideEffectRoots(
+            worktree,
+            sideEffectAllowlist,
+          );
+          const pre = await verificationSnapshot(worktree, sideEffectAllowlist);
           if (pre.status) {
             return {
               state: "failed",
@@ -5520,12 +5561,12 @@ export function createDispatcher({
             entry,
             commands,
             stageDeadline,
-            { attempt, cwd: worktree, scratch },
+            { attempt, cwd: worktree, scratch, sideEffectRoots },
           );
           if (commandsOutcome.interrupted) return commandsOutcome;
           let post;
           try {
-            post = await verificationSnapshot(worktree);
+            post = await verificationSnapshot(worktree, sideEffectAllowlist);
           } catch (error) {
             if (commandsOutcome.state === "passed") {
               return {
@@ -5730,6 +5771,7 @@ export function createDispatcher({
     const verifyRoot = join(stateDir, "post-merge-worktrees", project.name);
     const worktree = join(verifyRoot, randomBytes(8).toString("hex"));
     const scratch = `${worktree}.scratch`;
+    const sideEffectAllowlist = resolveVerificationSideEffectAllowlist(registry.defaults);
     const stageDeadline = Date.now() + VERIFY_STAGE_TIMEOUT_MS;
     if (shuttingDown) {
       throw new Error("server shutdown interrupted queued post-merge verification");
@@ -5807,13 +5849,14 @@ export function createDispatcher({
         }
       },
     }, async ({ head: testedTree }) => {
+      const sideEffectRoots = prepareVerificationSideEffectRoots(worktree, sideEffectAllowlist);
       entry.record.postMerge.testedTree = testedTree;
       persist(entry);
       for (let index = 0; index < commands.length; index += 1) {
         const result = await runVerifyStep(entry, commands[index], index, stageDeadline, {
           cwd: worktree,
           env: verificationSandboxEnv(entry.workloadEnv ?? entry.env, scratch),
-          writableRoots: [scratch],
+          writableRoots: [scratch, ...sideEffectRoots],
           readOnlyRoots: [worktree],
           readOnlyTestedTree: true,
           eventType: "post-merge-verify",
@@ -6153,6 +6196,8 @@ export function createDispatcher({
         baseCommit: entry.record.baseCommit,
         runGit: (args) => commandRunner("git", args),
         expectedCommonDir: join(project.path, ".git"),
+        verificationSideEffectAllowlist:
+          resolveVerificationSideEffectAllowlist(registry.defaults),
       });
       if (entry.record.state === "stopping") {
         transition(entry, "stopped", { exitSummary: "stopped by user" });

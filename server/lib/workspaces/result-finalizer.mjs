@@ -1,6 +1,8 @@
 import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { verificationSideEffectAllowed } from "../execution/verification-side-effects.mjs";
+
 const NON_TRACKER_PATHS = Object.freeze([
   ".",
   ":(exclude).beads",
@@ -302,8 +304,12 @@ async function status(runGit, worktreePath) {
   ]));
 }
 
-function assertNoIgnored(entries) {
-  const ignored = entries.filter(({ code }) => code === "!!").map(({ path }) => path);
+function assertNoIgnored(entries, verificationSideEffectAllowlist) {
+  const ignored = entries
+    .filter(({ code, path }) =>
+      code === "!!" &&
+      !verificationSideEffectAllowed(path, verificationSideEffectAllowlist))
+    .map(({ path }) => path);
   if (ignored.length > 0) {
     throw finalizationError(
       "ERESULT_IGNORED_FILES",
@@ -398,7 +404,13 @@ async function manifestFor(runGit, worktreePath, baseCommit, resultCommit) {
   });
 }
 
-export async function finalizeResult({ worktreePath, baseCommit, runGit, expectedCommonDir }) {
+export async function finalizeResult({
+  worktreePath,
+  baseCommit,
+  runGit,
+  expectedCommonDir,
+  verificationSideEffectAllowlist = [],
+}) {
   if (typeof runGit !== "function") {
     throw finalizationError("ERESULT_RUNNER", "Result finalization requires a git runner");
   }
@@ -413,7 +425,7 @@ export async function finalizeResult({ worktreePath, baseCommit, runGit, expecte
   const embeddedRepos = await inspectWorkspace(worktreePath);
   await assertTrackedEmbeddedRepos(runGit, worktreePath, embeddedRepos);
   const before = await status(runGit, worktreePath);
-  assertNoIgnored(before);
+  assertNoIgnored(before, verificationSideEffectAllowlist);
   const dirt = dirtyEntries(before);
   let commitCreated = false;
   if (dirt.length > 0) {
@@ -438,7 +450,7 @@ export async function finalizeResult({ worktreePath, baseCommit, runGit, expecte
   }
 
   const after = await status(runGit, worktreePath);
-  assertNoIgnored(after);
+  assertNoIgnored(after, verificationSideEffectAllowlist);
   if (dirtyEntries(after).length > 0) {
     throw finalizationError(
       "ERESULT_DIRTY_WORKSPACE",

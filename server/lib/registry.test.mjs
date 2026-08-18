@@ -134,6 +134,31 @@ test("daemon broker allowlist is validated only in operator-owned registry defau
   }).some((problem) => /must be an \/api\/ path/.test(problem)));
 });
 
+test("verification side-effect allowlist is validated only in operator-owned registry defaults", async (t) => {
+  const { projectPath } = await fixture(t);
+  const base = {
+    version: 1,
+    defaults: { verificationSideEffectAllowlist: [".cache/verify", "generated/reports"] },
+    groups: [],
+    projects: [validProject(projectPath)],
+  };
+  assert.deepEqual(validateRegistry(base), []);
+  assert.ok(validateRegistry({
+    ...base,
+    projects: [{
+      ...base.projects[0],
+      verificationSideEffectAllowlist: ["repository-controlled"],
+    }],
+  }).some((problem) =>
+    /verificationSideEffectAllowlist is forbidden;.*operator-owned defaults/.test(problem)));
+  for (const invalid of ["/absolute", "../outside", ".git/hooks", "mixed\\separator"] ) {
+    assert.ok(validateRegistry({
+      ...base,
+      defaults: { verificationSideEffectAllowlist: [invalid] },
+    }).some((problem) => /worktree-relative directory root/.test(problem)), invalid);
+  }
+});
+
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "atelier-registry-"));
   const projectPath = join(root, "project");
