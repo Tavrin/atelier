@@ -14,7 +14,12 @@ unexpected API billing, and credentials appearing in operator-visible output.
    a signed bearer or browser session. Mutations additionally enforce the exact
    loopback Host and same-origin Origin; browser mutations require the session's
    CSRF token. Remote exposure remains forbidden.
-   This authentication does not defend against another process running as the same OS user; that boundary requires the ATT-008 OS sandbox and ATT-010 human break-glass policy.
+   This authentication does not defend against another trusted-local process
+   running as the same OS user. An ATT-008 sandboxed dispatch has no loopback
+   network and reaches the daemon only through a bound unix broker socket. The
+   operator-owned broker allowlist denies unknown paths and unconditionally
+   denies `/api/session` and `/api/break-glass` before allowlist matching.
+   The broker does not provide remote provider API access.
 2. **No shell execution.** Subprocesses use `execFile` or `spawn` with explicit
    argv arrays. User strings remain single arguments and are never interpolated
    into a shell command.

@@ -4,6 +4,10 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { isSecretEnvKey } from "./secret-environment.mjs";
+import {
+  SANDBOX_BROKER_ENV,
+  SANDBOX_BROKER_SOCKET,
+} from "./daemon-broker.mjs";
 
 export const SANDBOX_UNAVAILABLE = "EATELIER_SANDBOX_UNAVAILABLE: ";
 export const SANDBOX_UNSUPPORTED_PLATFORM = "EATELIER_SANDBOX_UNSUPPORTED_PLATFORM: ";
@@ -72,7 +76,16 @@ export function sandboxPostureLabel(sandbox) {
     return `advisory (non-enforcing; credential ${credential})`;
   }
   const backend = sandbox?.backendId || "unknown backend";
-  return `${confinement} (isolated by ${backend}; credential ${credential})`;
+  const brokerAccess = sandbox?.brokerAccess;
+  const brokerState = brokerAccess === "brokered-daemon-api"
+    ? "brokered"
+    : `broker ${brokerAccess || "unavailable"}`;
+  const broker = Array.isArray(sandbox?.brokerAllowlist)
+    ? `; daemon API ${brokerState}` +
+      ` [${sandbox.brokerAllowlist.join(", ") || "deny all"}]` +
+      "; remote provider API unavailable"
+    : "";
+  return `${confinement} (isolated by ${backend}; credential ${credential}${broker})`;
 }
 
 function commandResult(file, args, spawn = spawnSync) {
@@ -161,6 +174,7 @@ function bwrapArgs({
   cwd,
   env,
   operatorBindings = [],
+  brokerSocketPath,
   writableRoots,
   readOnlyRoots,
   homePath,
@@ -188,6 +202,16 @@ function bwrapArgs({
   }
   for (const path of bindings) {
     wrapped.push("--ro-bind", path, path);
+  }
+  if (brokerSocketPath !== undefined) {
+    const brokerSource = absolutePaths([brokerSocketPath], "brokerSocketPath")[0];
+    wrapped.push(
+      "--dir",
+      "/tmp/atelier",
+      "--ro-bind",
+      brokerSource,
+      SANDBOX_BROKER_SOCKET,
+    );
   }
   for (const path of readOnly) {
     wrapped.push("--ro-bind", path, path);
@@ -261,6 +285,7 @@ export function createBwrapBackend({
       cwd,
       env,
       operatorBindings = [],
+      brokerSocketPath,
       writableRoots,
       readOnlyRoots,
       processGroupPosture = SANDBOX_PROCESS_GROUP_POSTURE,
@@ -269,6 +294,10 @@ export function createBwrapBackend({
         return { file: childFile, args, env };
       }
       const wrappedEnv = credential === "in-sandbox" ? { ...(env || {}) } : withoutCredentials(env);
+      delete wrappedEnv[SANDBOX_BROKER_ENV];
+      if (brokerSocketPath !== undefined) {
+        wrappedEnv[SANDBOX_BROKER_ENV] = SANDBOX_BROKER_SOCKET;
+      }
       const construction = bwrapArgs({
         confinement,
         file: childFile,
@@ -276,6 +305,7 @@ export function createBwrapBackend({
         cwd,
         env,
         operatorBindings,
+        brokerSocketPath,
         writableRoots,
         readOnlyRoots,
         homePath,
@@ -585,7 +615,7 @@ export function assertSandboxProviderCompatible({
   }
   if (networkAccess === "required") {
     const error = new Error(
-      `${SANDBOX_NETWORK_INCOMPATIBLE}${providerId} requires provider network access, but ${profile.confinement} denies network and the slice-2 broker is not available`,
+      `${SANDBOX_NETWORK_INCOMPATIBLE}${providerId} requires provider network access for its remote API, but ${profile.confinement} denies network; the daemon API broker does not proxy provider APIs`,
     );
     error.code = "EATELIER_SANDBOX_NETWORK_INCOMPATIBLE";
     throw error;

@@ -58,13 +58,39 @@ test("bearers bind the client label and compare signatures safely", (t) => {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const secret = ensureAuthSecret(directory);
 
-  for (const label of ["api", "cli", "mcp"]) {
+  for (const label of ["api", "cli", "mcp", "sandboxed-agent"]) {
     const token = mintBearerToken(secret, label);
     assert.equal(verifyBearerToken(secret, token), label);
     assert.equal(clientBearerToken(label, { directory, env: {} }), token);
   }
   assert.equal(verifyBearerToken(secret, `${mintBearerToken(secret, "mcp")}x`), undefined);
   assert.equal(verifyBearerToken(secret, "atelier-v1.human-ui.invalid"), undefined);
+});
+
+test("dispatch-scoped sandbox bearers authenticate as one actor with distinct credential keys", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "atelier-auth-dispatch-token-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const secret = ensureAuthSecret(directory);
+  const first = mintBearerToken(secret, "sandboxed-agent", "dispatch-one");
+  const second = mintBearerToken(secret, "sandboxed-agent", "dispatch-two");
+  assert.notEqual(first, second);
+  assert.equal(verifyBearerToken(secret, first), "sandboxed-agent");
+  assert.equal(verifyBearerToken(secret, second), "sandboxed-agent");
+
+  const auth = createRequestAuth({ directory });
+  const contextFor = (token) => auth.guard({
+    method: "GET",
+    headers: {
+      host: "127.0.0.1:5170",
+      authorization: `Bearer ${token}`,
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  }, { path: "/api/events", port: 5170 });
+  const firstContext = contextFor(first);
+  const secondContext = contextFor(second);
+  assert.equal(firstContext.actor, "sandboxed-agent");
+  assert.equal(secondContext.actor, "sandboxed-agent");
+  assert.notEqual(firstContext.credentialKey, secondContext.credentialKey);
 });
 
 test("break-glass tokens use a distinct signed purpose and random identifier", (t) => {

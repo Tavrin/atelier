@@ -31,9 +31,11 @@ import {
   resolveSandboxBackendId,
   resolveTrustProfile,
   sandboxBackend,
+  sandboxEnforcesIsolation,
   sandboxPlatformSupport,
   sandboxPostureLabel,
 } from "../server/lib/execution/sandbox.mjs";
+import { resolveSandboxBrokerAllowlist } from "../server/lib/execution/daemon-broker.mjs";
 import {
   createServer,
   listenLoopback,
@@ -217,6 +219,7 @@ async function projects(args) {
     registry.projects.map(async (project) => {
       const probe = await probeProject(project);
       const detected = await trackerMode(project, probe);
+      const trustProfile = resolveTrustProfile(project, registry.defaults);
       return {
         name: project.name,
         tracker: `${project.tracker}/${detected}`,
@@ -224,8 +227,11 @@ async function projects(args) {
         dirty: probe.git.dirtyCount,
         worktrees: probe.git.worktrees,
         execution: sandboxPostureLabel({
-          ...resolveTrustProfile(project, registry.defaults),
+          ...trustProfile,
           backendId: resolveSandboxBackendId(project, registry.defaults),
+          ...(sandboxEnforcesIsolation(trustProfile.confinement)
+            ? { brokerAllowlist: resolveSandboxBrokerAllowlist(registry.defaults) }
+            : {}),
         }),
       };
     }),
@@ -712,6 +718,10 @@ async function doctor(args) {
     );
     if (!probe.available) process.exitCode = 1;
   }
+  const brokerAllowlist = resolveSandboxBrokerAllowlist(registry.defaults);
+  console.log(
+    `sandbox daemon broker: ok (unix socket; operator allowlist: ${brokerAllowlist.join(", ") || "deny all"}; /api/session and /api/break-glass unconditionally denied; remote provider APIs unavailable)`,
+  );
 
   const binary = inspectCodexBinary(process.env);
   if (!binary.resolvedPath) {

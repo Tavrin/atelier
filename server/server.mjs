@@ -13,7 +13,12 @@ import {
   trackerMode,
 } from "./lib/capabilities.mjs";
 import { agents } from "./lib/agents/index.mjs";
-import { createRequestAuth } from "./lib/auth.mjs";
+import {
+  createRequestAuth,
+  ensureAuthSecret,
+  mintBearerToken,
+} from "./lib/auth.mjs";
+import { SANDBOX_BROKER_ACTOR } from "./lib/execution/daemon-broker.mjs";
 import { createBoardEvents } from "./lib/board-events.mjs";
 import {
   LONG_GIT_TIMEOUT_MS,
@@ -198,6 +203,14 @@ const MCP_GATE_CRITICAL_SETTINGS = new Set([
   "sandboxBackend",
 ]);
 const serverResources = new WeakMap();
+
+function isAutomationBearer(actor) {
+  return actor === "mcp" || actor === SANDBOX_BROKER_ACTOR;
+}
+
+function automationBearerLabel(actor) {
+  return actor === "mcp" ? "MCP" : "Sandboxed agent";
+}
 
 function projectByName(registry, name) {
   const project = registry.projects.find((candidate) => candidate.name === name);
@@ -804,6 +817,7 @@ export function createServer({
   });
   const boardEvents = providedBoardEvents ?? createBoardEvents({ registry });
   const eventLog = providedEventLog ?? createEventLog({ stateDir: atelierStateDir });
+  const authSecret = ensureAuthSecret(atelierStateDir);
   const requestAuth = createRequestAuth({ directory: atelierStateDir });
   const requestAuthContexts = new WeakMap();
   const requestActor = (request) => requestAuthContexts.get(request)?.actor ?? "api";
@@ -847,10 +861,10 @@ export function createServer({
       });
       requestAuthContexts.set(request, authContext);
       if (authContext.requestClass === "session-bootstrap") {
-        // Surface discipline only: any unlabeled same-UID process can bootstrap
-        // this session and is trusted-local by owner decision. ATT-008 must make
-        // the human boundary enforceable by excluding /api/session and
-        // /api/break-glass from sandboxed agents' brokered API access.
+        // Trusted-local same-UID callers remain a surface-discipline boundary.
+        // Sandboxed dispatches are now structurally separated: they have no
+        // loopback route, and their only daemon socket unconditionally denies
+        // /api/session and /api/break-glass before consulting its allowlist.
         const session = requestAuth.mintSession();
         response.setHeader("Set-Cookie", session.cookie);
         jsonResponse(response, 200, { csrfToken: session.csrfToken });
@@ -859,16 +873,16 @@ export function createServer({
       const postBody = ["POST", "PATCH"].includes(request.method)
         ? await readJsonBody(request)
         : undefined;
-      if (authContext.actor === "mcp" && postBody?.force === true) {
+      if (isAutomationBearer(authContext.actor) && postBody?.force === true) {
         throw new HttpError(
           409,
-          "MCP operator overrides are forbidden; use the human break-glass policy",
+          `${automationBearerLabel(authContext.actor)} operator overrides are forbidden; use the human break-glass policy`,
         );
       }
-      if (authContext.actor === "mcp" && postBody?.acceptExecutionProfile === true) {
+      if (isAutomationBearer(authContext.actor) && postBody?.acceptExecutionProfile === true) {
         throw new HttpError(
           409,
-          "MCP operator overrides are forbidden; use atelier reply --accept-execution-profile or the web UI accept checkbox",
+          `${automationBearerLabel(authContext.actor)} operator overrides are forbidden; use atelier reply --accept-execution-profile or the web UI accept checkbox`,
         );
       }
 
@@ -914,9 +928,9 @@ export function createServer({
       }
 
       if (request.method === "POST" && path === "/api/break-glass") {
-        // This actor/credential gate rejects every labeled automation surface.
-        // It is not a same-UID boundary while /api/session is locally reachable;
-        // ATT-008 owns the real sandbox-and-broker exclusion (see REGISTRY.md).
+        // This actor/credential gate is defence in depth for labeled automation.
+        // The enforceable sandbox boundary is the broker socket, where this path
+        // and /api/session are structurally denied before allowlist matching.
         if (authContext.actor !== "human-ui" || authContext.credential !== "session") {
           throw new HttpError(
             409,
@@ -1031,13 +1045,13 @@ export function createServer({
           const restricted = Object.keys(registration).filter((key) =>
             MCP_GATE_CRITICAL_SETTINGS.has(key)
           );
-          if (requestActor(request) === "mcp" && restricted.length > 0) {
+          if (isAutomationBearer(requestActor(request)) && restricted.length > 0) {
             throw new HttpError(
               409,
-              `MCP cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
+              `${automationBearerLabel(requestActor(request))} cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
             );
           }
-          if (requestActor(request) === "mcp") {
+          if (isAutomationBearer(requestActor(request))) {
             registration.verifyCommands = [];
             registration.requireReview = false;
             registration.reviewPolicy = "strict";
@@ -1139,10 +1153,10 @@ export function createServer({
         const restricted = Object.keys(postBody).filter((key) =>
           MCP_RESTRICTED_SETTINGS.has(key)
         );
-        if (requestActor(request) === "mcp" && restricted.length > 0) {
+        if (isAutomationBearer(requestActor(request)) && restricted.length > 0) {
           throw new HttpError(
             409,
-            `MCP cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
+            `${automationBearerLabel(requestActor(request))} cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
           );
         }
         const before = { ...projectByName(registry, name) };
@@ -1416,7 +1430,10 @@ export function createServer({
           await commentIssue(project, id, requiredString(body, "text"));
         }
         if (action === "claim") {
-          const result = await claimIssue(project, id, requiredString(body, "actor"));
+          const actor = authContext.actor === SANDBOX_BROKER_ACTOR
+            ? SANDBOX_BROKER_ACTOR
+            : requiredString(body, "actor");
+          const result = await claimIssue(project, id, actor);
           jsonResponse(response, 200, result);
           return;
         }
@@ -1773,6 +1790,17 @@ export function createServer({
         response.end();
       }
     }
+  });
+  dispatcher.configureDaemonBroker?.({
+    targetPort() {
+      const address = server.address();
+      return typeof address === "object" && address ? address.port : null;
+    },
+    bearerTokenForDispatch(dispatchId) {
+      // mintBearerToken is intentionally invoked for each dispatch broker.
+      // The actor label is defence in depth; the unix socket is the boundary.
+      return mintBearerToken(authSecret, SANDBOX_BROKER_ACTOR, dispatchId);
+    },
   });
   server.on("connection", (socket) => {
     sockets.add(socket);

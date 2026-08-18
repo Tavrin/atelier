@@ -57,6 +57,7 @@ function spawnWithSandbox(
     file,
     args,
     options,
+    brokerSocketPath: config.brokerSocketPath,
     operatorBindings: config.operatorBindings,
   });
   return spawnProcess(wrapped.file, wrapped.args, wrapped.options);

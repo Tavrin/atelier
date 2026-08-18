@@ -79,6 +79,10 @@ import {
   sandboxPostureLabel,
   wrapSandboxSpawn,
 } from "./execution/sandbox.mjs";
+import {
+  createDaemonApiBroker,
+  resolveSandboxBrokerAllowlist,
+} from "./execution/daemon-broker.mjs";
 import { acquireInstanceLock, liveInstanceOwner } from "./instance-lock.mjs";
 import {
   BREAK_GLASS_TTL_MS,
@@ -579,6 +583,7 @@ function publicRecord(record) {
       : null,
     trustProfile: record.trustProfile ? { ...record.trustProfile } : null,
     sandboxBackend: record.sandboxBackend ?? null,
+    sandboxBroker: record.sandboxBroker ? structuredClone(record.sandboxBroker) : null,
     sandboxRefusal: record.sandboxRefusal ? { ...record.sandboxRefusal } : null,
     verify: record.verify ?? null,
     postMerge: record.postMerge ?? null,
@@ -1635,6 +1640,7 @@ export function createDispatcher({
   // which has to be side-effect-free.
   observer = false,
   sandboxBackends = createSandboxBackends(),
+  daemonBrokerFactory = createDaemonApiBroker,
 }) {
   let ownedInstanceLock;
   if (!observer && liveInstanceOwner(stateDir) !== process.pid) {
@@ -1657,6 +1663,7 @@ export function createDispatcher({
   const pendingEventWrites = new Map();
   const malformedTailWarnings = new Set();
   let breakGlassAuthority;
+  let daemonBrokerConfiguration;
 
   function tokenAuthority() {
     breakGlassAuthority ??= createBreakGlassTokenAuthority({ directory: stateDir });
@@ -2964,12 +2971,18 @@ export function createDispatcher({
     if (!registry.projects.some((project) => project.name === record.project)) {
       exposed.projectRemoved = true;
     }
-    exposed.sandboxPosture = sandboxPostureLabel(
-      exposed.executionProfile?.sandbox ?? {
+    exposed.sandboxPosture = sandboxPostureLabel({
+      ...(exposed.executionProfile?.sandbox ?? {
         ...(exposed.trustProfile || {}),
         backendId: exposed.sandboxBackend,
-      },
-    );
+      }),
+      ...(Array.isArray(exposed.sandboxBroker?.allowlist)
+        ? {
+            brokerAllowlist: exposed.sandboxBroker.allowlist,
+            brokerAccess: exposed.sandboxBroker.access,
+          }
+        : {}),
+    });
     exposed.gates = gatesFor(exposed);
     const entry = entries.get(record.id);
     exposed.persistenceDegraded = persistenceDegraded(entry);
@@ -3697,6 +3710,9 @@ export function createDispatcher({
     );
     settleLinkedReview(entry);
     if (CONVOY_FAILURE_STATES.has(effectiveState)) pauseConvoyForRecord(entry, effectiveState);
+    if (TERMINAL_STATES.has(effectiveState) && !TERMINAL_STATES.has(previousState)) {
+      void closeDaemonBroker(entry);
+    }
     if (TERMINAL_STATES.has(effectiveState) && !wasTerminal) {
       pushNotify(entry.record);
       // The companion job is over, so its app-server and MCP children have no
@@ -5718,6 +5734,7 @@ export function createDispatcher({
     if (shuttingDown) {
       throw new Error("server shutdown interrupted queued post-merge verification");
     }
+    await ensureDaemonBroker(entry, project);
     const agent = getAgent(entry.record.lane);
     const postMergeEnvironments = resolvedEntryEnvironments(project, agent, entry);
     const postMergeReconciliation = reconcileExecutionProfile(
@@ -5855,6 +5872,7 @@ export function createDispatcher({
       });
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+      await closeDaemonBroker(entry);
     }
   }
 
@@ -6430,6 +6448,7 @@ export function createDispatcher({
       });
       const prompt = opts.planFirst ? `${PLAN_PROMPT_PREFIX}${taskPrompt}` : taskPrompt;
       const spawnEnvironments = resolvedEntryEnvironments(project, agent, entry);
+      await ensureDaemonBroker(entry, project);
       const launchSpawner = entrySpawner(entry, project, "agent launch");
       await agent.preLaunchChecks({
         entry,
@@ -6560,6 +6579,102 @@ export function createDispatcher({
     };
   }
 
+  function configureDaemonBroker(configuration) {
+    if (
+      !configuration ||
+      typeof configuration.targetPort !== "function" ||
+      typeof configuration.bearerTokenForDispatch !== "function"
+    ) {
+      throw new TypeError("daemon broker configuration requires targetPort and bearerTokenForDispatch callbacks");
+    }
+    daemonBrokerConfiguration = configuration;
+  }
+
+  function sandboxBrokerError(message, cause) {
+    const error = new Error(`EATELIER_SANDBOX_BROKER_UNAVAILABLE: ${message}`, { cause });
+    error.code = "EATELIER_SANDBOX_BROKER_UNAVAILABLE";
+    return error;
+  }
+
+  async function ensureDaemonBroker(entry, project) {
+    const policy = resolvedSandboxPolicy(project);
+    if (!sandboxEnforcesIsolation(policy.trustProfile.confinement)) return undefined;
+    if (entry.daemonBrokerClosing) await entry.daemonBrokerClosing;
+    if (entry.daemonBroker) return entry.daemonBroker.socketPath;
+    if (entry.daemonBrokerStarting) {
+      const broker = await entry.daemonBrokerStarting;
+      return broker.socketPath;
+    }
+    if (!daemonBrokerConfiguration) {
+      throw sandboxBrokerError("the daemon API broker is not configured");
+    }
+    const allowlist = resolveSandboxBrokerAllowlist(registry.defaults);
+    const socketPath = join(stateDir, "brokers", `${entry.record.id}.sock`);
+    entry.daemonBrokerStarting = Promise.resolve().then(() => daemonBrokerFactory({
+      socketPath,
+      allowlist,
+      targetPort: daemonBrokerConfiguration.targetPort,
+      bearerToken: daemonBrokerConfiguration.bearerTokenForDispatch(entry.record.id),
+    }));
+    try {
+      entry.daemonBroker = await entry.daemonBrokerStarting;
+      entry.record.sandboxBroker = {
+        access: "brokered-daemon-api",
+        allowlist: [...allowlist],
+        providerApi: "unavailable",
+      };
+      persist(entry);
+      return entry.daemonBroker.socketPath;
+    } catch (error) {
+      const refusal = error?.code === "EATELIER_SANDBOX_BROKER_UNAVAILABLE"
+        ? error
+        : sandboxBrokerError(error?.message ?? String(error), error);
+      entry.record.sandboxBroker = {
+        access: "refused",
+        allowlist: [...allowlist],
+        providerApi: "unavailable",
+      };
+      recordSandboxRefusal(entry, refusal, "daemon broker start");
+      throw refusal;
+    } finally {
+      entry.daemonBrokerStarting = undefined;
+    }
+  }
+
+  async function closeDaemonBroker(entry) {
+    if (!entry) return;
+    if (entry.daemonBrokerClosing) return entry.daemonBrokerClosing;
+    const broker = entry.daemonBroker;
+    const starting = entry.daemonBrokerStarting;
+    if (!broker && !starting) return;
+    entry.daemonBroker = undefined;
+    let resolvedBroker = broker;
+    const closing = (async () => {
+      if (!resolvedBroker && starting) {
+        try {
+          resolvedBroker = await starting;
+        } catch {
+          return;
+        }
+      }
+      if (entry.daemonBroker === resolvedBroker) entry.daemonBroker = undefined;
+      await resolvedBroker?.close();
+    })();
+    let settled;
+    settled = closing
+      .catch((error) => {
+        if (!entry.daemonBroker && resolvedBroker) entry.daemonBroker = resolvedBroker;
+        logPersistenceWarning(
+          `Atelier daemon broker cleanup failed for ${entry.record.id}: ${error.message}`,
+        );
+      })
+      .finally(() => {
+        if (entry.daemonBrokerClosing === settled) entry.daemonBrokerClosing = undefined;
+      });
+    entry.daemonBrokerClosing = settled;
+    return settled;
+  }
+
   function recordSandboxRefusal(entry, error, operation) {
     if (!String(error?.code || "").startsWith("EATELIER_SANDBOX_")) return;
     const detail = redactText(String(error.message));
@@ -6596,6 +6711,7 @@ export function createDispatcher({
         backend: policy.backend,
         cwd,
         env,
+        brokerSocketPath: entry.daemonBroker?.socketPath,
         operatorBindings,
       });
     } catch (error) {
@@ -6648,6 +6764,7 @@ export function createDispatcher({
           file,
           args,
           options: spawnOptions,
+          brokerSocketPath: entry.daemonBroker?.socketPath,
           operatorBindings,
           writableRoots,
           readOnlyRoots,
@@ -6667,6 +6784,7 @@ export function createDispatcher({
       wrappedSpawner.sandboxConfig = {
         trustProfile: { ...policy.trustProfile },
         backendId: policy.backendId,
+        brokerSocketPath: entry.daemonBroker?.socketPath,
         operatorBindings: [...operatorBindings],
       };
     }
@@ -7872,6 +7990,13 @@ export function createDispatcher({
       executionProfileRefusal: null,
       trustProfile: { ...sandboxPolicy.trustProfile },
       sandboxBackend: sandboxPolicy.backendId,
+      sandboxBroker: sandboxEnforcesIsolation(sandboxPolicy.trustProfile.confinement)
+        ? {
+            access: "unavailable",
+            allowlist: resolveSandboxBrokerAllowlist(registry.defaults),
+            providerApi: "unavailable",
+          }
+        : null,
       sandboxRefusal: null,
       warnings: claim?.warning ? [claim.warning] : [],
     };
@@ -8713,6 +8838,7 @@ ${diff}`;
       if (!record.worktreePath || !existsSync(record.worktreePath)) {
         throw dispatcherError(409, "Verification re-run unavailable: dispatch worktree is missing");
       }
+      await ensureDaemonBroker(entry, project);
       // Never run a suite in a worktree a worker Atelier cannot prove dead may
       // still be writing to, and never while a sibling record for this ticket is
       // in that condition.
@@ -8786,7 +8912,10 @@ ${diff}`;
         });
       return exposedRecord(record);
     } finally {
-      if (!admitted) releaseLifecycle();
+      if (!admitted) {
+        await closeDaemonBroker(entries.get(id));
+        releaseLifecycle();
+      }
     }
   }
 
@@ -8812,6 +8941,10 @@ ${diff}`;
         { replyText, force, forceReason, acceptExecutionProfile, actor },
       );
     } finally {
+      const current = entries.get(id);
+      if (current && TERMINAL_STATES.has(current.record.state)) {
+        await closeDaemonBroker(current);
+      }
       releaseLifecycle();
     }
   }
@@ -8950,6 +9083,17 @@ ${diff}`;
     if (!entry.record.sessionId) {
       throw dispatcherError(409, "Dispatch has no sessionId to resume");
     }
+    try {
+      assertSandboxProviderCompatible({
+        trustProfile: resolvedSandboxPolicy(project).trustProfile,
+        providerId: agent.id,
+        networkAccess: agent.networkAccess,
+        legacyCompanion: entry.record.codexAdapter === "legacy-companion",
+      });
+    } catch (error) {
+      recordSandboxRefusal(entry, error, "agent resume");
+      throw error;
+    }
     const cap = Number(registry.defaults?.concurrentDispatchCap ?? Infinity);
     const active = [...entries.values()].filter((candidate) =>
       ACTIVE_STATES.has(candidate.record.state),
@@ -8992,6 +9136,7 @@ ${diff}`;
     // (round-3 review, major 4). Everything assertAdmissionOpen answers was decided
     // before it: re-assert, so a drain lease granted or a shutdown completed during
     // the wait refuses this resume instead of spawning into a closing server.
+    await ensureDaemonBroker(entry, project);
     assertAdmissionOpen("Resume");
     beginAdmission();
     try {
@@ -9189,6 +9334,18 @@ ${diff}`;
     if (!entry.record.sessionId) {
       throw dispatcherError(409, "Dispatch has no sessionId to resume");
     }
+    try {
+      assertSandboxProviderCompatible({
+        trustProfile: resolvedSandboxPolicy(project).trustProfile,
+        providerId: agent.id,
+        networkAccess: agent.networkAccess,
+        legacyCompanion: entry.record.codexAdapter === "legacy-companion",
+      });
+    } catch (error) {
+      recordSandboxRefusal(entry, error, "plan continuation");
+      throw error;
+    }
+    await ensureDaemonBroker(entry, project);
     const cap = Number(registry.defaults?.concurrentDispatchCap ?? Infinity);
     const active = [...entries.values()].filter((candidate) =>
       ACTIVE_STATES.has(candidate.record.state),
@@ -9504,6 +9661,7 @@ ${diff}`;
       // deregistered project does not change whether a stray codex tree still
       // gets torn down.
       await reapCodexProcessTree(reservedEntry, "dispatch dismissed");
+      await closeDaemonBroker(reservedEntry);
 
       if (!reservedEntry.record.merged) {
         if (project) {
@@ -10530,8 +10688,9 @@ ${diff}`;
     dispositionRef,
     actor,
   } = {}) {
-    // Surface discipline today: ATT-008 makes this enforceable by withholding
-    // /api/session and /api/break-glass from sandboxed agents' brokered access.
+    // Actor checking is defence in depth. Sandboxed callers cannot reach this
+    // authority path because their only daemon socket denies it structurally;
+    // trusted-local same-UID callers remain a surface-discipline boundary.
     if (actor !== "human-ui") {
       throw dispatcherError(
         409,
@@ -10766,6 +10925,7 @@ ${diff}`;
       // lifecycle. Background history refreshes must not replace the object
       // while the protected merge awaits git commands.
       reservedEntry.inert = false;
+      await closeDaemonBroker(reservedEntry);
 
       const previous = mergeTails.get(project.name) ?? Promise.resolve();
       const run = previous.then(() => mergeUnlocked(id, {
@@ -13086,6 +13246,10 @@ ${diff}`;
           new Promise((resolvePromise) => setTimeout(resolvePromise, remainingMs)),
         ]);
       }
+      await Promise.allSettled(
+        [...entries.values()]
+          .map((entry) => closeDaemonBroker(entry)),
+      );
     })().finally(() => {
       ownedInstanceLock?.release();
     });
@@ -13144,6 +13308,7 @@ ${diff}`;
     drainQueuesOnce,
     sweepCodexProcesses,
     shutdown,
+    configureDaemonBroker,
     acquireDrainLease,
     releaseDrainLease,
     persistenceStatus,

@@ -87,6 +87,10 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
     stdout,
     /sandbox: ok \(linux; bwrap; bubblewrap 0\.10\.0; bubblewrap unprivileged namespace probe succeeded\)/,
   );
+  assert.match(
+    stdout,
+    /sandbox daemon broker: ok \(unix socket; operator allowlist: \/api\/dispatches; \/api\/session and \/api\/break-glass unconditionally denied; remote provider APIs unavailable\)/,
+  );
   assert.match(stdout, /codex: (?:guarded|not installed)/);
 
   const atelierState = join(root, "state");

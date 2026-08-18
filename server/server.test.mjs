@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 
 import { _clearProbeCache } from "./lib/capabilities.mjs";
 import { _setModelFileOps } from "./lib/agents/codex.mjs";
-import { ensureAuthSecret, mintBearerToken } from "./lib/auth.mjs";
+import { ensureAuthSecret, mintBearerToken, verifyBearerToken } from "./lib/auth.mjs";
 import {
   createDispatcher,
   _setProbe as _setDispatchProbe,
@@ -36,7 +36,8 @@ const authByPort = new Map();
 function registerServerAuth(port, directory) {
   const secret = ensureAuthSecret(directory);
   const tokens = Object.fromEntries(
-    ["api", "cli", "mcp"].map((label) => [label, mintBearerToken(secret, label)]),
+    ["api", "cli", "mcp", "sandboxed-agent"]
+      .map((label) => [label, mintBearerToken(secret, label)]),
   );
   authByPort.set(port, tokens);
   return tokens;
@@ -606,25 +607,76 @@ test("API authentication enforces the bearer, browser CSRF, Host, and Origin mat
   assert.deepEqual(actors, ["api", "human-ui", "mcp"]);
 });
 
-test("MCP bearer cannot exercise server-side force authority", async (t) => {
-  const { port, dispatcher } = await serverFixture(t);
+test("daemon broker bearer configuration mints a distinct credential per dispatch", async (t) => {
+  let brokerConfiguration;
+  const dispatcher = {
+    ...dispatcherStub(),
+    configureDaemonBroker(configuration) {
+      brokerConfiguration = configuration;
+    },
+  };
+  const { atelierStateDir } = await serverFixture(t, { dispatcher });
+  const first = brokerConfiguration.bearerTokenForDispatch("dispatch-one");
+  const second = brokerConfiguration.bearerTokenForDispatch("dispatch-two");
+  assert.notEqual(first, second);
+  const secret = ensureAuthSecret(atelierStateDir);
+  assert.equal(verifyBearerToken(secret, first), "sandboxed-agent");
+  assert.equal(verifyBearerToken(secret, second), "sandboxed-agent");
+});
+
+test("sandboxed tracker claims discard caller-supplied actor attribution", async (t) => {
+  const calls = [];
+  _setTrackerBrResolver(() => "/fixture/br");
+  _setRunner(async (file, args, options) => {
+    calls.push({ file, args, cwd: options.cwd });
+    return "";
+  });
+  const { port, tracked } = await serverFixture(t);
   const response = await send(port, {
     method: "POST",
-    path: "/api/dispatch/dispatch-1/merge",
-    body: JSON.stringify({
-      force: true,
-      forcedBy: "spoofed-human",
-      reason: "override",
-      dispositionRef: "none",
-    }),
+    path: "/api/projects/tracked/claim",
+    body: JSON.stringify({ id: "tracked-1", actor: "spoofed-human" }),
     contentType: "application/json",
-    credential: "mcp",
-    actor: "human",
+    credential: "sandboxed-agent",
   });
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.text), {
+    id: "tracked-1",
+    actor: "sandboxed-agent",
+  });
+  assert.ok(calls.some(({ file, args, cwd }) =>
+    file === "/fixture/br" &&
+    cwd === tracked.path &&
+    JSON.stringify(args) === JSON.stringify([
+      "update",
+      "tracked-1",
+      "--claim",
+      "--actor",
+      "sandboxed-agent",
+    ])));
+});
 
-  assert.equal(response.status, 409);
-  assert.match(JSON.parse(response.text).error, /human break-glass policy/);
-  assert.doesNotMatch(JSON.parse(response.text).error, /accept-execution-profile/);
+test("automation bearers cannot exercise server-side force authority", async (t) => {
+  const { port, dispatcher } = await serverFixture(t);
+  for (const credential of ["mcp", "sandboxed-agent"]) {
+    const response = await send(port, {
+      method: "POST",
+      path: "/api/dispatch/dispatch-1/merge",
+      body: JSON.stringify({
+        force: true,
+        forcedBy: "spoofed-human",
+        reason: "override",
+        dispositionRef: "none",
+      }),
+      contentType: "application/json",
+      credential,
+      actor: "human",
+    });
+
+    assert.equal(response.status, 409, credential);
+    assert.match(JSON.parse(response.text).error, /human break-glass policy/, credential);
+    assert.doesNotMatch(JSON.parse(response.text).error, /accept-execution-profile/, credential);
+  }
   assert.deepEqual(dispatcher._merges, []);
 });
 
@@ -638,7 +690,7 @@ test("break-glass mint requires a browser session plus CSRF and rejects every be
     reason: "Emergency adjudication.",
     dispositionRef: "ticket-comment-75",
   });
-  for (const credential of ["api", "cli", "mcp"]) {
+  for (const credential of ["api", "cli", "mcp", "sandboxed-agent"]) {
     const rejected = await send(port, {
       method: "POST",
       path: "/api/break-glass",
@@ -684,20 +736,22 @@ test("break-glass mint requires a browser session plus CSRF and rejects every be
   }]);
 });
 
-test("MCP bearer cannot exercise execution-profile acceptance", async (t) => {
+test("automation bearers cannot exercise execution-profile acceptance", async (t) => {
   const { port, dispatcher } = await serverFixture(t);
-  const response = await send(port, {
-    method: "POST",
-    path: "/api/dispatch/dispatch-1/merge",
-    body: JSON.stringify({ acceptExecutionProfile: true }),
-    contentType: "application/json",
-    credential: "mcp",
-    actor: "human",
-  });
+  for (const credential of ["mcp", "sandboxed-agent"]) {
+    const response = await send(port, {
+      method: "POST",
+      path: "/api/dispatch/dispatch-1/merge",
+      body: JSON.stringify({ acceptExecutionProfile: true }),
+      contentType: "application/json",
+      credential,
+      actor: "human",
+    });
 
-  assert.equal(response.status, 409);
-  assert.match(JSON.parse(response.text).error, /atelier reply --accept-execution-profile/);
-  assert.match(JSON.parse(response.text).error, /web UI accept checkbox/);
+    assert.equal(response.status, 409, credential);
+    assert.match(JSON.parse(response.text).error, /atelier reply --accept-execution-profile/);
+    assert.match(JSON.parse(response.text).error, /web UI accept checkbox/);
+  }
   assert.deepEqual(dispatcher._merges, []);
 });
 

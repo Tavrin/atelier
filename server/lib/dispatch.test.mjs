@@ -41,6 +41,7 @@ import {
   createExecutionProfile,
   resolveExecutable,
 } from "./execution/execution-profile.mjs";
+import { createDaemonApiBroker } from "./execution/daemon-broker.mjs";
 import { sandboxExecutionProfile } from "./execution/sandbox.mjs";
 import { createEventLog } from "./event-log.mjs";
 import { acquireInstanceLock } from "./instance-lock.mjs";
@@ -423,7 +424,7 @@ function verifyChild({ stdout = [], stderr = [], code = 0 } = {}) {
 }
 
 function recordingSandboxBackend() {
-  const state = { available: true, wraps: [] };
+  const state = { available: true, wraps: [], brokers: [] };
   const backend = {
     id: "bwrap",
     version: () => "recording 1",
@@ -437,7 +438,29 @@ function recordingSandboxBackend() {
       return { file: input.file, args: [...input.args], env: { ...input.env } };
     },
   };
-  return { backend, state, backends: new Map([[backend.id, backend]]) };
+  return {
+    backend,
+    state,
+    backends: new Map([[backend.id, backend]]),
+    async daemonBrokerFactory(input) {
+      state.brokers.push(structuredClone({
+        socketPath: input.socketPath,
+        allowlist: input.allowlist,
+      }));
+      return {
+        socketPath: input.socketPath,
+        allowlist: input.allowlist,
+        async close() {},
+      };
+    },
+  };
+}
+
+function configureRecordingDaemonBroker(dispatcher) {
+  dispatcher.configureDaemonBroker({
+    targetPort: () => 5170,
+    bearerTokenForDispatch: () => "fixture-sandboxed-agent-token",
+  });
 }
 
 function processStartIdentity(pid) {
@@ -24897,6 +24920,121 @@ function seededSandboxProfile(setup, sandbox, worktreePath) {
   };
 }
 
+test("dispatch-scoped daemon brokers release handles and sockets after terminal and refused verification runs", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+    verifyCommands: ["node --test"],
+  });
+  stubPreparation();
+  const sandbox = recordingSandboxBackend();
+  const inputs = Array.from({ length: 4 }, (_, index) => {
+    const id = `broker-lifecycle-${index + 1}`;
+    const worktreePath = join(setup.state, "worktrees", "fixture", id);
+    return {
+      id,
+      worktreePath,
+      verify: { ...FAILED_VERIFY, steps: FAILED_VERIFY.steps.map((step) => ({ ...step })) },
+      result: null,
+      attestation: null,
+      executionProfile: seededSandboxProfile(setup, sandbox, worktreePath),
+    };
+  });
+  const records = await seedDispatches(setup, inputs);
+  for (const record of records) {
+    await mkdir(record.worktreePath, { recursive: true });
+    await writeWorkspaceToken(record);
+  }
+  _setSpawner(() => verifyChild());
+  const brokerStates = [];
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+    async daemonBrokerFactory(input) {
+      const broker = await createDaemonApiBroker(input);
+      const state = { socketPath: broker.socketPath, closed: false };
+      brokerStates.push(state);
+      return {
+        socketPath: broker.socketPath,
+        allowlist: broker.allowlist,
+        actor: broker.actor,
+        async close() {
+          await broker.close();
+          state.closed = true;
+        },
+      };
+    },
+  });
+  t.after(() => dispatcher.shutdown({ graceMs: 0 }));
+  dispatcher.configureDaemonBroker({
+    targetPort: () => 1,
+    bearerTokenForDispatch: (id) => `fixture-${id}`,
+  });
+  const serverHandleCount = () => process._getActiveHandles()
+    .filter((handle) => handle?.constructor?.name === "Server").length;
+  const baselineHandles = serverHandleCount();
+
+  for (const record of records.slice(0, 3)) {
+    await dispatcher.rerunVerification(record.id);
+    const completed = await waitForState(dispatcher, record.id, ["completed"]);
+    assert.equal(completed.verify.state, "passed");
+    await waitForConditionOverTime(
+      () => brokerStates.at(-1)?.closed === true,
+      `broker for ${record.id} did not close`,
+    );
+    assert.equal(existsSync(brokerStates.at(-1).socketPath), false);
+  }
+
+  setup.project.dispatchEnv = { BROKER_REFUSAL_DRIFT: "changed" };
+  await assert.rejects(
+    dispatcher.rerunVerification(records[3].id),
+    /EATELIER_EXECUTION_PROFILE_MISMATCH:/,
+  );
+  assert.equal(brokerStates.at(-1).closed, true);
+  assert.equal(existsSync(brokerStates.at(-1).socketPath), false);
+  assert.equal(brokerStates.length, 4);
+  assert.equal(brokerStates.every((state) => state.closed), true);
+  assert.deepEqual(await readdir(join(setup.state, "brokers")), []);
+  await waitForConditionOverTime(
+    () => serverHandleCount() <= baselineHandles,
+    "daemon broker server handles did not return to baseline",
+  );
+  await dispatcher.shutdown({ graceMs: 0 });
+});
+
+test("failed daemon broker startup surfaces refused rather than brokered access", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+    verifyCommands: ["node --test"],
+  });
+  stubPreparation();
+  const sandbox = recordingSandboxBackend();
+  const id = "sandbox-broker-refused";
+  const worktreePath = join(setup.state, "worktrees", "fixture", id);
+  const executionProfile = seededSandboxProfile(setup, sandbox, worktreePath);
+  await seedRerunnable(setup, { id, worktreePath, executionProfile });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+    async daemonBrokerFactory() {
+      throw new Error("fixture broker bind failed");
+    },
+  });
+  configureRecordingDaemonBroker(dispatcher);
+  await assert.rejects(
+    dispatcher.rerunVerification(id),
+    /EATELIER_SANDBOX_BROKER_UNAVAILABLE: fixture broker bind failed/,
+  );
+  const refused = dispatcher.get(id);
+  assert.equal(refused.sandboxBroker.access, "refused");
+  assert.match(refused.sandboxPosture, /daemon API broker refused/);
+  assert.doesNotMatch(refused.sandboxPosture, /daemon API brokered/);
+  assert.equal(refused.sandboxRefusal.operation, "daemon broker start");
+});
+
 test("network-dependent provider is also refused before a seeded resume spawn", async (t) => {
   const setup = await fixture(t, {
     trustProfile: { confinement: "sandboxed-write", credential: "none" },
@@ -24963,7 +25101,9 @@ test("detached verification receives a read-only tested tree, writable scratch, 
     registry: setup.registry,
     stateDir: setup.state,
     sandboxBackends: sandbox.backends,
+    daemonBrokerFactory: sandbox.daemonBrokerFactory,
   });
+  configureRecordingDaemonBroker(dispatcher);
   await dispatcher.rerunVerification(id);
   const completed = await waitForState(dispatcher, id, ["completed"]);
   assert.equal(spawns, 1);
@@ -24977,6 +25117,8 @@ test("detached verification receives a read-only tested tree, writable scratch, 
   assert.equal(verifierWrap.env.PYTHONDONTWRITEBYTECODE, "1");
   assert.equal(verifierWrap.env.CARGO_TARGET_DIR.startsWith(verifierWrap.writableRoots[0]), true);
   assert.equal(verifierWrap.env.npm_config_cache.startsWith(verifierWrap.writableRoots[0]), true);
+  assert.equal(typeof verifierWrap.brokerSocketPath, "string");
+  assert.deepEqual(sandbox.state.brokers[0].allowlist, ["/api/dispatches"]);
   assert.equal(existsSync(verifierWrap.writableRoots[0]), false, "verification scratch leaked");
 });
 
@@ -25001,7 +25143,9 @@ test("sandbox disappearance at verify spawn fails the gate without an unconfined
     registry: setup.registry,
     stateDir: setup.state,
     sandboxBackends: sandbox.backends,
+    daemonBrokerFactory: sandbox.daemonBrokerFactory,
   });
+  configureRecordingDaemonBroker(dispatcher);
   sandbox.state.available = false;
   await dispatcher.rerunVerification(id);
   const completed = await waitForState(dispatcher, id, ["completed"]);

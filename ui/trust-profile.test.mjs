@@ -28,3 +28,35 @@ test("sandbox posture surfacing names the recorded enforcing backend", () => {
     "sandboxed-review-readonly · isolated by bwrap · credential none",
   );
 });
+
+test("sandbox posture surfacing names the daemon allowlist and provider-API boundary", () => {
+  assert.equal(
+    trustProfileSummary({
+      trustProfile: { confinement: "sandboxed-write", credential: "brokered" },
+      sandboxBackend: "bwrap",
+      sandboxBroker: {
+        access: "brokered-daemon-api",
+        allowlist: ["/api/dispatches"],
+        providerApi: "unavailable",
+      },
+    }),
+    "sandboxed-write · isolated by bwrap · credential brokered · daemon API brokered [/api/dispatches] · remote provider API unavailable",
+  );
+});
+
+test("sandbox posture surfacing never calls an unavailable or refused broker active", () => {
+  const value = {
+    trustProfile: { confinement: "sandboxed-write", credential: "brokered" },
+    sandboxBackend: "bwrap",
+    sandboxBroker: {
+      access: "unavailable",
+      allowlist: ["/api/dispatches"],
+      providerApi: "unavailable",
+    },
+  };
+  assert.match(trustProfileSummary(value), /daemon API broker unavailable/);
+  assert.doesNotMatch(trustProfileSummary(value), /daemon API brokered/);
+  value.sandboxBroker.access = "refused";
+  assert.match(trustProfileSummary(value), /daemon API broker refused/);
+  assert.doesNotMatch(trustProfileSummary(value), /daemon API brokered/);
+});
