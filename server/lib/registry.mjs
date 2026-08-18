@@ -18,6 +18,10 @@ import {
   DEFAULT_SANDBOX_BROKER_ALLOWLIST,
   validateSandboxBrokerAllowlist,
 } from "./execution/daemon-broker.mjs";
+import {
+  DEFAULT_VERIFICATION_SIDE_EFFECT_ALLOWLIST,
+  validateVerificationSideEffectAllowlist,
+} from "./execution/verification-side-effects.mjs";
 
 const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const DISPATCH_ENV_KEY = /^[A-Z][A-Z0-9_]*$/;
@@ -40,6 +44,7 @@ export const DEFAULTS = Object.freeze({
   trustProfile: BUILT_IN_TRUST_PROFILE,
   sandboxBackend: "bwrap",
   sandboxBrokerAllowlist: DEFAULT_SANDBOX_BROKER_ALLOWLIST,
+  verificationSideEffectAllowlist: DEFAULT_VERIFICATION_SIDE_EFFECT_ALLOWLIST,
   maxFixRounds: 4,
 });
 
@@ -272,6 +277,11 @@ export function validateProject(project, index = 0) {
   if (project.sandboxBrokerAllowlist !== undefined) {
     problems.push(
       `${prefix}.sandboxBrokerAllowlist is forbidden; daemon broker access is operator-owned defaults`,
+    );
+  }
+  if (project.verificationSideEffectAllowlist !== undefined) {
+    problems.push(
+      `${prefix}.verificationSideEffectAllowlist is forbidden; verification side effects are operator-owned defaults`,
     );
   }
 
@@ -555,6 +565,9 @@ export function validateRegistry(registry) {
   problems.push(...validateSandboxBackend(registry.defaults?.sandboxBackend, "defaults.sandboxBackend"));
   problems.push(...validateSandboxBindings(registry.defaults?.sandboxBindings));
   problems.push(...validateSandboxBrokerAllowlist(registry.defaults?.sandboxBrokerAllowlist));
+  problems.push(...validateVerificationSideEffectAllowlist(
+    registry.defaults?.verificationSideEffectAllowlist,
+  ));
   if (isObject(registry.defaults)) {
     const defaultTrust = resolveTrustProfile({}, registry.defaults);
     problems.push(...validateTrustProfile(defaultTrust, "defaults.trustProfile", { resolved: true }));

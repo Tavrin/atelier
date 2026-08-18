@@ -49,10 +49,10 @@ operator, outside Atelier's authority claims and audit guarantees.
   `sandboxed-review-readonly`; only the `sandboxed-*` values are enforced
   isolation. Credential containment is `none`, `brokered`, or `in-sandbox`.
   Sandboxed verification mounts the tested checkout read-only and provides a
-  separate writable scratch directory for build caches. Until slice 3's escape
-  harness proves the complete boundary, the precise claim is that a verifier
-  cannot durably modify the tested tree, not that no verifier escape class
-  exists.
+  separate writable scratch directory for build caches. The controlled
+  verification environment redirects Cargo and npm caches there and disables
+  Python bytecode writes. The escape harness names the confinement gate for
+  every historically deferred verifier class.
 - `defaults.sandboxBackend` - sandbox backend id (`bwrap` or `podman`). Podman
   probing is real but its wrapping remains deliberately fail-closed.
 - `defaults.sandboxBindings` - operator-owned read-only bind paths, keyed by
@@ -70,6 +70,16 @@ operator, outside Atelier's authority claims and audit guarantees.
   them. This broker does not proxy remote provider APIs, so network-dependent
   providers remain incompatible with sandboxed profiles. A
   `projects[].sandboxBrokerAllowlist` value is rejected.
+- `defaults.verificationSideEffectAllowlist` - operator-owned worktree-relative
+  directory roots that a verifier may write inside an otherwise read-only
+  tested checkout and that result finalization may retain when Git reports
+  ignored content. Entries use `/` separators, match the named root and its
+  descendants, and may not contain dot segments or name `.git`; the default is
+  `[]`. Atelier still asks Git for all tracked, untracked, and ignored paths and
+  applies the exception only after that full observation. Symlinked components
+  are refused before a writable bind is granted. A
+  `projects[].verificationSideEffectAllowlist` value is rejected, so a
+  repository cannot declare its own hiding place.
 - `defaults.editorCommand` - optional executable name or absolute executable
   path used by the local "Open in editor" actions. Atelier appends the resolved
   project/worktree path as the sole argument. Spaces, arguments, and shell

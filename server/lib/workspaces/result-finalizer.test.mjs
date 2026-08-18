@@ -133,6 +133,36 @@ test("ignored-file surprises abort without creating a commit", async (t) => {
   assert.match(await runGit(["-C", fixture.root, "status", "--porcelain=v1"]), /code\.mjs/);
 });
 
+test("operator-owned side-effect roots permit only named ignored paths after full status inspection", async (t) => {
+  const fixture = await repository(t);
+  await writeFile(join(fixture.root, ".gitignore"), "allowed-cache/\nother-cache/\n");
+  await runGit(["-C", fixture.root, "add", ".gitignore"]);
+  await runGit(["-C", fixture.root, "commit", "-q", "-m", "ignore policy"]);
+  fixture.baseCommit = (await runGit(["-C", fixture.root, "rev-parse", "HEAD"])).trim();
+  await mkdir(join(fixture.root, "allowed-cache"));
+  await writeFile(join(fixture.root, "allowed-cache", "result.bin"), "operator-approved\n");
+
+  const observed = [];
+  const result = await finalizeResult({
+    ...finalizationInput(fixture),
+    verificationSideEffectAllowlist: ["allowed-cache"],
+    runGit: async (args) => {
+      if (args.includes("--ignored=matching")) observed.push([...args]);
+      return runGit(args);
+    },
+  });
+  assert.equal(result.workspaceClean, true);
+  assert.equal(observed.length, 2);
+  assert.equal(observed.every((args) => args.includes("--untracked-files=all")), true);
+
+  await mkdir(join(fixture.root, "other-cache"));
+  await writeFile(join(fixture.root, "other-cache", "result.bin"), "not approved\n");
+  await assertTypedFailure(finalizeResult({
+    ...finalizationInput(fixture),
+    verificationSideEffectAllowlist: ["allowed-cache"],
+  }), "ERESULT_IGNORED_FILES");
+});
+
 test("an ignored file created during staging is skipped and caught by the post-check", async (t) => {
   const fixture = await repository(t);
   await writeFile(join(fixture.root, ".gitignore"), "late-ignored.log\n");

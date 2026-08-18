@@ -151,7 +151,11 @@ function pathInside(parent, candidate) {
 function assertWritableRootsDoNotOverlapReadOnly(writableRoots, readOnlyRoots) {
   for (const writable of writableRoots) {
     for (const readOnly of readOnlyRoots) {
-      if (pathInside(readOnly, writable) || pathInside(writable, readOnly)) {
+      // Nested writable roots are the operator-owned verification side-effect
+      // escape hatch. bwrap applies them after the read-only tested-tree bind.
+      // Equal roots or a writable ancestor would make the whole tested tree
+      // writable and remain a named refusal.
+      if (writable === readOnly || pathInside(writable, readOnly)) {
         const error = new Error(
           `${VERIFICATION_READONLY_TREE}${readOnly} cannot overlap writable root ${writable}`,
         );
