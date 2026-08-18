@@ -76,16 +76,26 @@ function constantTimeEqual(left, right) {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
-export function mintBearerToken(secret, label) {
+export function mintBearerToken(secret, label, credentialId) {
   if (!CLIENT_LABELS.has(label)) throw new TypeError(`Invalid bearer client label: ${label}`);
-  return `${TOKEN_PREFIX}.${label}.${signature(secret, "bearer", label)}`;
+  if (credentialId === undefined) {
+    return `${TOKEN_PREFIX}.${label}.${signature(secret, "bearer", label)}`;
+  }
+  if (typeof credentialId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(credentialId)) {
+    throw new TypeError("Bearer credential id must be 1-128 URL-safe characters");
+  }
+  const payload = `${label}.${credentialId}`;
+  return `${TOKEN_PREFIX}.${payload}.${signature(secret, "bearer", payload)}`;
 }
 
 export function verifyBearerToken(secret, token) {
   if (typeof token !== "string") return undefined;
-  const match = token.match(/^atelier-v1\.(api|cli|mcp|sandboxed-agent)\.([A-Za-z0-9_-]+)$/);
+  const match = token.match(
+    /^atelier-v1\.(api|cli|mcp|sandboxed-agent)(?:\.([A-Za-z0-9_-]{1,128}))?\.([A-Za-z0-9_-]+)$/,
+  );
   if (!match) return undefined;
-  return constantTimeEqual(match[2], signature(secret, "bearer", match[1]))
+  const payload = match[2] === undefined ? match[1] : `${match[1]}.${match[2]}`;
+  return constantTimeEqual(match[3], signature(secret, "bearer", payload))
     ? match[1]
     : undefined;
 }

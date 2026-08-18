@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 
 import { _clearProbeCache } from "./lib/capabilities.mjs";
 import { _setModelFileOps } from "./lib/agents/codex.mjs";
-import { ensureAuthSecret, mintBearerToken } from "./lib/auth.mjs";
+import { ensureAuthSecret, mintBearerToken, verifyBearerToken } from "./lib/auth.mjs";
 import {
   createDispatcher,
   _setProbe as _setDispatchProbe,
@@ -605,6 +605,55 @@ test("API authentication enforces the bearer, browser CSRF, Host, and Origin mat
   assert.equal(spoofedMcp.status, 202);
   assert.equal(JSON.parse(spoofedMcp.text).actor, "mcp");
   assert.deepEqual(actors, ["api", "human-ui", "mcp"]);
+});
+
+test("daemon broker bearer configuration mints a distinct credential per dispatch", async (t) => {
+  let brokerConfiguration;
+  const dispatcher = {
+    ...dispatcherStub(),
+    configureDaemonBroker(configuration) {
+      brokerConfiguration = configuration;
+    },
+  };
+  const { atelierStateDir } = await serverFixture(t, { dispatcher });
+  const first = brokerConfiguration.bearerTokenForDispatch("dispatch-one");
+  const second = brokerConfiguration.bearerTokenForDispatch("dispatch-two");
+  assert.notEqual(first, second);
+  const secret = ensureAuthSecret(atelierStateDir);
+  assert.equal(verifyBearerToken(secret, first), "sandboxed-agent");
+  assert.equal(verifyBearerToken(secret, second), "sandboxed-agent");
+});
+
+test("sandboxed tracker claims discard caller-supplied actor attribution", async (t) => {
+  const calls = [];
+  _setTrackerBrResolver(() => "/fixture/br");
+  _setRunner(async (file, args, options) => {
+    calls.push({ file, args, cwd: options.cwd });
+    return "";
+  });
+  const { port, tracked } = await serverFixture(t);
+  const response = await send(port, {
+    method: "POST",
+    path: "/api/projects/tracked/claim",
+    body: JSON.stringify({ id: "tracked-1", actor: "spoofed-human" }),
+    contentType: "application/json",
+    credential: "sandboxed-agent",
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.text), {
+    id: "tracked-1",
+    actor: "sandboxed-agent",
+  });
+  assert.ok(calls.some(({ file, args, cwd }) =>
+    file === "/fixture/br" &&
+    cwd === tracked.path &&
+    JSON.stringify(args) === JSON.stringify([
+      "update",
+      "tracked-1",
+      "--claim",
+      "--actor",
+      "sandboxed-agent",
+    ])));
 });
 
 test("automation bearers cannot exercise server-side force authority", async (t) => {

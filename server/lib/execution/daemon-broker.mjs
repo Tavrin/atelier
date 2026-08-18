@@ -1,5 +1,5 @@
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
-import { mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export const SANDBOX_BROKER_ACTOR = "sandboxed-agent";
@@ -70,10 +70,15 @@ function allowlistMatches(path, pattern) {
   return path === pattern;
 }
 
+function canonicalDeniedPath(path) {
+  const withoutTrailingSlashes = String(path).replace(/\/+$/, "") || "/";
+  return withoutTrailingSlashes.toLowerCase();
+}
+
 // This guard is deliberately separate from allowlist matching. No registry
 // value, including /api/*, can make either human-authority endpoint eligible.
 export function daemonBrokerDecision(path, allowlist) {
-  if (UNCONDITIONALLY_DENIED_PATHS.has(path)) {
+  if (UNCONDITIONALLY_DENIED_PATHS.has(canonicalDeniedPath(path))) {
     return { allowed: false, reason: "unconditionally-denied" };
   }
   if (!allowlist.some((pattern) => allowlistMatches(path, pattern))) {
@@ -124,6 +129,7 @@ export async function createDaemonApiBroker({
     sandboxBrokerAllowlist: allowlist,
   });
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
+  await chmod(dirname(socketPath), 0o700);
   await rm(socketPath, { force: true });
 
   const server = createHttpServer((incoming, outgoing) => {
@@ -151,21 +157,34 @@ export async function createDaemonApiBroker({
       writeJson(outgoing, 503, { error: "Atelier daemon broker target is unavailable" });
       return;
     }
+    let upstreamResponse;
     const upstream = request({
       hostname: "127.0.0.1",
       port,
       method: incoming.method,
       path: `${url.pathname}${url.search}`,
       headers: forwardedHeaders(incoming.headers, bearerToken),
-    }, (upstreamResponse) => {
+    }, (response) => {
+      upstreamResponse = response;
       const headers = {};
-      for (const [name, value] of Object.entries(upstreamResponse.headers)) {
+      for (const [name, value] of Object.entries(response.headers)) {
         if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== "set-cookie") {
           headers[name] = value;
         }
       }
-      outgoing.writeHead(upstreamResponse.statusCode ?? 502, headers);
-      upstreamResponse.pipe(outgoing);
+      outgoing.writeHead(response.statusCode ?? 502, headers);
+      response.pipe(outgoing);
+    });
+    let downstreamAborted = false;
+    const abortUpstream = () => {
+      if (downstreamAborted) return;
+      downstreamAborted = true;
+      upstreamResponse?.destroy();
+      upstream.destroy();
+    };
+    incoming.once("aborted", abortUpstream);
+    outgoing.once("close", () => {
+      if (!outgoing.writableFinished) abortUpstream();
     });
     upstream.once("error", (error) => {
       if (!outgoing.headersSent) {
@@ -195,6 +214,7 @@ export async function createDaemonApiBroker({
     server.once("listening", onListening);
     server.listen(socketPath);
   });
+  await chmod(socketPath, 0o600);
 
   let closed = false;
   return Object.freeze({

@@ -76,8 +76,13 @@ export function sandboxPostureLabel(sandbox) {
     return `advisory (non-enforcing; credential ${credential})`;
   }
   const backend = sandbox?.backendId || "unknown backend";
+  const brokerAccess = sandbox?.brokerAccess;
+  const brokerState = brokerAccess === "brokered-daemon-api"
+    ? "brokered"
+    : `broker ${brokerAccess || "unavailable"}`;
   const broker = Array.isArray(sandbox?.brokerAllowlist)
-    ? `; daemon API brokered [${sandbox.brokerAllowlist.join(", ") || "deny all"}]` +
+    ? `; daemon API ${brokerState}` +
+      ` [${sandbox.brokerAllowlist.join(", ") || "deny all"}]` +
       "; remote provider API unavailable"
     : "";
   return `${confinement} (isolated by ${backend}; credential ${credential}${broker})`;

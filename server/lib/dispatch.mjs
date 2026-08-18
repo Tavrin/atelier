@@ -2977,7 +2977,10 @@ export function createDispatcher({
         backendId: exposed.sandboxBackend,
       }),
       ...(Array.isArray(exposed.sandboxBroker?.allowlist)
-        ? { brokerAllowlist: exposed.sandboxBroker.allowlist }
+        ? {
+            brokerAllowlist: exposed.sandboxBroker.allowlist,
+            brokerAccess: exposed.sandboxBroker.access,
+          }
         : {}),
     });
     exposed.gates = gatesFor(exposed);
@@ -3707,6 +3710,9 @@ export function createDispatcher({
     );
     settleLinkedReview(entry);
     if (CONVOY_FAILURE_STATES.has(effectiveState)) pauseConvoyForRecord(entry, effectiveState);
+    if (TERMINAL_STATES.has(effectiveState) && !TERMINAL_STATES.has(previousState)) {
+      void closeDaemonBroker(entry);
+    }
     if (TERMINAL_STATES.has(effectiveState) && !wasTerminal) {
       pushNotify(entry.record);
       // The companion job is over, so its app-server and MCP children have no
@@ -5866,6 +5872,7 @@ export function createDispatcher({
       });
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+      await closeDaemonBroker(entry);
     }
   }
 
@@ -6592,6 +6599,7 @@ export function createDispatcher({
   async function ensureDaemonBroker(entry, project) {
     const policy = resolvedSandboxPolicy(project);
     if (!sandboxEnforcesIsolation(policy.trustProfile.confinement)) return undefined;
+    if (entry.daemonBrokerClosing) await entry.daemonBrokerClosing;
     if (entry.daemonBroker) return entry.daemonBroker.socketPath;
     if (entry.daemonBrokerStarting) {
       const broker = await entry.daemonBrokerStarting;
@@ -6621,11 +6629,50 @@ export function createDispatcher({
       const refusal = error?.code === "EATELIER_SANDBOX_BROKER_UNAVAILABLE"
         ? error
         : sandboxBrokerError(error?.message ?? String(error), error);
+      entry.record.sandboxBroker = {
+        access: "refused",
+        allowlist: [...allowlist],
+        providerApi: "unavailable",
+      };
       recordSandboxRefusal(entry, refusal, "daemon broker start");
       throw refusal;
     } finally {
       entry.daemonBrokerStarting = undefined;
     }
+  }
+
+  async function closeDaemonBroker(entry) {
+    if (!entry) return;
+    if (entry.daemonBrokerClosing) return entry.daemonBrokerClosing;
+    const broker = entry.daemonBroker;
+    const starting = entry.daemonBrokerStarting;
+    if (!broker && !starting) return;
+    entry.daemonBroker = undefined;
+    let resolvedBroker = broker;
+    const closing = (async () => {
+      if (!resolvedBroker && starting) {
+        try {
+          resolvedBroker = await starting;
+        } catch {
+          return;
+        }
+      }
+      if (entry.daemonBroker === resolvedBroker) entry.daemonBroker = undefined;
+      await resolvedBroker?.close();
+    })();
+    let settled;
+    settled = closing
+      .catch((error) => {
+        if (!entry.daemonBroker && resolvedBroker) entry.daemonBroker = resolvedBroker;
+        logPersistenceWarning(
+          `Atelier daemon broker cleanup failed for ${entry.record.id}: ${error.message}`,
+        );
+      })
+      .finally(() => {
+        if (entry.daemonBrokerClosing === settled) entry.daemonBrokerClosing = undefined;
+      });
+    entry.daemonBrokerClosing = settled;
+    return settled;
   }
 
   function recordSandboxRefusal(entry, error, operation) {
@@ -7945,7 +7992,7 @@ export function createDispatcher({
       sandboxBackend: sandboxPolicy.backendId,
       sandboxBroker: sandboxEnforcesIsolation(sandboxPolicy.trustProfile.confinement)
         ? {
-            access: "brokered-daemon-api",
+            access: "unavailable",
             allowlist: resolveSandboxBrokerAllowlist(registry.defaults),
             providerApi: "unavailable",
           }
@@ -8865,7 +8912,10 @@ ${diff}`;
         });
       return exposedRecord(record);
     } finally {
-      if (!admitted) releaseLifecycle();
+      if (!admitted) {
+        await closeDaemonBroker(entries.get(id));
+        releaseLifecycle();
+      }
     }
   }
 
@@ -8891,6 +8941,10 @@ ${diff}`;
         { replyText, force, forceReason, acceptExecutionProfile, actor },
       );
     } finally {
+      const current = entries.get(id);
+      if (current && TERMINAL_STATES.has(current.record.state)) {
+        await closeDaemonBroker(current);
+      }
       releaseLifecycle();
     }
   }
@@ -9607,6 +9661,7 @@ ${diff}`;
       // deregistered project does not change whether a stray codex tree still
       // gets torn down.
       await reapCodexProcessTree(reservedEntry, "dispatch dismissed");
+      await closeDaemonBroker(reservedEntry);
 
       if (!reservedEntry.record.merged) {
         if (project) {
@@ -10870,6 +10925,7 @@ ${diff}`;
       // lifecycle. Background history refreshes must not replace the object
       // while the protected merge awaits git commands.
       reservedEntry.inert = false;
+      await closeDaemonBroker(reservedEntry);
 
       const previous = mergeTails.get(project.name) ?? Promise.resolve();
       const run = previous.then(() => mergeUnlocked(id, {
@@ -13192,9 +13248,7 @@ ${diff}`;
       }
       await Promise.allSettled(
         [...entries.values()]
-          .map((entry) => entry.daemonBroker)
-          .filter(Boolean)
-          .map((broker) => broker.close()),
+          .map((entry) => closeDaemonBroker(entry)),
       );
     })().finally(() => {
       ownedInstanceLock?.release();

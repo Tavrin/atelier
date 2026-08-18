@@ -13,8 +13,13 @@ export function trustProfileSummary(value) {
   }
   const backend = sandbox?.backendId ?? value?.sandboxBackend ?? "unknown backend";
   const allowlist = value?.sandboxBroker?.allowlist;
+  const brokerAccess = value?.sandboxBroker?.access;
+  const brokerState = brokerAccess === "brokered-daemon-api"
+    ? "brokered"
+    : `broker ${brokerAccess || "unavailable"}`;
   const broker = Array.isArray(allowlist)
-    ? ` · daemon API brokered [${allowlist.join(", ") || "deny all"}] · remote provider API unavailable`
+    ? ` · daemon API ${brokerState}` +
+      ` [${allowlist.join(", ") || "deny all"}] · remote provider API unavailable`
     : "";
   return `${confinement} · isolated by ${backend} · credential ${credential}${broker}`;
 }

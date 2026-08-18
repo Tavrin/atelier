@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, request as httpRequest } from "node:http";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -108,6 +108,26 @@ test("denial matrix: permissive operator configuration cannot admit either autho
   assert.equal(seen.length, 0);
 });
 
+test("denial matrix: trailing-slash authority paths are unconditionally denied", async (t) => {
+  const { broker, seen } = await fixture(t, ["/api/*"]);
+  for (const path of ["/api/session/", "/api/break-glass/"]) {
+    const response = await brokerRequest(broker.socketPath, path, { method: "PATCH" });
+    assert.equal(response.status, 403, path);
+    assert.equal(response.value.reason, "unconditionally-denied", path);
+  }
+  assert.equal(seen.length, 0);
+});
+
+test("denial matrix: mixed-case authority paths are unconditionally denied", async (t) => {
+  const { broker, seen } = await fixture(t, ["/api/*"]);
+  for (const path of ["/API/SeSsIoN", "/Api/BrEaK-GlAsS/"]) {
+    const response = await brokerRequest(broker.socketPath, path, { method: "PATCH" });
+    assert.equal(response.status, 403, path);
+    assert.equal(response.value.reason, "unconditionally-denied", path);
+  }
+  assert.equal(seen.length, 0);
+});
+
 test("denial matrix: a path outside the operator allowlist is denied", async (t) => {
   const { broker, seen } = await fixture(t, ["/api/dispatches"]);
   const response = await brokerRequest(broker.socketPath, "/api/projects");
@@ -129,6 +149,85 @@ test("denial matrix: an allowlisted request reaches the daemon as sandboxed-agen
   assert.equal(response.value.actor, SANDBOX_BROKER_ACTOR);
   assert.equal(seen.length, 1);
   assert.equal(seen[0].actor, SANDBOX_BROKER_ACTOR);
+});
+
+test("abandoned broker responses repeatedly abort their upstream SSE connections", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "atelier-daemon-broker-abort-"));
+  const socketPath = join(directory, "broker.sock");
+  let upstreamClosed = 0;
+  const waiters = [];
+  const daemon = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write("data: ready\n\n");
+    response.once("close", () => {
+      upstreamClosed += 1;
+      waiters.splice(0).forEach((resolvePromise) => resolvePromise());
+    });
+  });
+  const port = await listen(daemon);
+  const broker = await createDaemonApiBroker({
+    socketPath,
+    allowlist: ["/api/dispatches"],
+    targetPort: port,
+    bearerToken: mintBearerToken(SECRET, SANDBOX_BROKER_ACTOR),
+  });
+  t.after(async () => {
+    await broker.close();
+    await close(daemon);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  for (let expected = 1; expected <= 3; expected += 1) {
+    await new Promise((resolvePromise, rejectPromise) => {
+      const outgoing = httpRequest({ socketPath, path: "/api/dispatches" }, (incoming) => {
+        incoming.once("data", () => {
+          incoming.destroy();
+          resolvePromise();
+        });
+      });
+      outgoing.once("error", (error) => {
+        if (error.code === "ECONNRESET") resolvePromise();
+        else rejectPromise(error);
+      });
+      outgoing.end();
+    });
+    if (upstreamClosed < expected) {
+      await Promise.race([
+        new Promise((resolvePromise) => waiters.push(resolvePromise)),
+        new Promise((_, rejectPromise) =>
+          setTimeout(() => rejectPromise(new Error("upstream SSE connection stayed open")), 2_000)),
+      ]);
+    }
+    assert.equal(upstreamClosed, expected);
+  }
+});
+
+test("broker directory and socket are owner-only despite prior mode and umask", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix socket permissions are POSIX-only");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "atelier-daemon-broker-mode-"));
+  const socketPath = join(directory, "broker.sock");
+  await chmod(directory, 0o777);
+  const previousUmask = process.umask(0);
+  let broker;
+  try {
+    broker = await createDaemonApiBroker({
+      socketPath,
+      allowlist: ["/api/dispatches"],
+      targetPort: 1,
+      bearerToken: mintBearerToken(SECRET, SANDBOX_BROKER_ACTOR),
+    });
+  } finally {
+    process.umask(previousUmask);
+  }
+  t.after(async () => {
+    await broker?.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  assert.equal((await stat(socketPath)).mode & 0o777, 0o600);
 });
 
 test("denial matrix: sandbox construction exposes only the broker socket, never daemon TCP", () => {

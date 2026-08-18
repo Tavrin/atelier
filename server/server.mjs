@@ -1430,7 +1430,10 @@ export function createServer({
           await commentIssue(project, id, requiredString(body, "text"));
         }
         if (action === "claim") {
-          const result = await claimIssue(project, id, requiredString(body, "actor"));
+          const actor = authContext.actor === SANDBOX_BROKER_ACTOR
+            ? SANDBOX_BROKER_ACTOR
+            : requiredString(body, "actor");
+          const result = await claimIssue(project, id, actor);
           jsonResponse(response, 200, result);
           return;
         }
@@ -1793,10 +1796,10 @@ export function createServer({
       const address = server.address();
       return typeof address === "object" && address ? address.port : null;
     },
-    bearerTokenForDispatch() {
+    bearerTokenForDispatch(dispatchId) {
       // mintBearerToken is intentionally invoked for each dispatch broker.
       // The actor label is defence in depth; the unix socket is the boundary.
-      return mintBearerToken(authSecret, SANDBOX_BROKER_ACTOR);
+      return mintBearerToken(authSecret, SANDBOX_BROKER_ACTOR, dispatchId);
     },
   });
   server.on("connection", (socket) => {
