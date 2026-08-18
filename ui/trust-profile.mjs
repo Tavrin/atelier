@@ -12,5 +12,9 @@ export function trustProfileSummary(value) {
     return `advisory · non-enforcing · credential ${credential}`;
   }
   const backend = sandbox?.backendId ?? value?.sandboxBackend ?? "unknown backend";
-  return `${confinement} · isolated by ${backend} · credential ${credential}`;
+  const allowlist = value?.sandboxBroker?.allowlist;
+  const broker = Array.isArray(allowlist)
+    ? ` · daemon API brokered [${allowlist.join(", ") || "deny all"}] · remote provider API unavailable`
+    : "";
+  return `${confinement} · isolated by ${backend} · credential ${credential}${broker}`;
 }

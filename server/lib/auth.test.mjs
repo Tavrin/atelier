@@ -58,7 +58,7 @@ test("bearers bind the client label and compare signatures safely", (t) => {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const secret = ensureAuthSecret(directory);
 
-  for (const label of ["api", "cli", "mcp"]) {
+  for (const label of ["api", "cli", "mcp", "sandboxed-agent"]) {
     const token = mintBearerToken(secret, label);
     assert.equal(verifyBearerToken(secret, token), label);
     assert.equal(clientBearerToken(label, { directory, env: {} }), token);

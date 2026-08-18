@@ -23,7 +23,7 @@ export const SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
 export const BREAK_GLASS_TTL_MS = 10 * 60 * 1_000;
 
 const TOKEN_PREFIX = "atelier-v1";
-const CLIENT_LABELS = new Set(["api", "cli", "mcp"]);
+const CLIENT_LABELS = new Set(["api", "cli", "mcp", "sandboxed-agent"]);
 const AUTH_FAILURE_LIMIT = 60;
 const AUTH_FAILURE_WINDOW_MS = 1_000;
 
@@ -83,7 +83,7 @@ export function mintBearerToken(secret, label) {
 
 export function verifyBearerToken(secret, token) {
   if (typeof token !== "string") return undefined;
-  const match = token.match(/^atelier-v1\.(api|cli|mcp)\.([A-Za-z0-9_-]+)$/);
+  const match = token.match(/^atelier-v1\.(api|cli|mcp|sandboxed-agent)\.([A-Za-z0-9_-]+)$/);
   if (!match) return undefined;
   return constantTimeEqual(match[2], signature(secret, "bearer", match[1]))
     ? match[1]

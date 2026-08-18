@@ -62,6 +62,14 @@ operator, outside Atelier's authority claims and audit guarantees.
   user's `/run/user/<uid>`. Bind paths are never inferred from the environment,
   and `projects[].sandboxBindings` is rejected so a project cannot declare its
   own exceptions.
+- `defaults.sandboxBrokerAllowlist` - operator-owned daemon API path patterns
+  exposed through the sandbox's unix socket. Entries are exact `/api/` paths or
+  a trailing `/*` prefix; the default is `["/api/dispatches"]`, and unknown
+  paths are denied. `/api/session` and `/api/break-glass` are unconditional
+  broker denials even under `/api/*`; no project, actor, or setting can enable
+  them. This broker does not proxy remote provider APIs, so network-dependent
+  providers remain incompatible with sandboxed profiles. A
+  `projects[].sandboxBrokerAllowlist` value is rejected.
 - `defaults.editorCommand` - optional executable name or absolute executable
   path used by the local "Open in editor" actions. Atelier appends the resolved
   project/worktree path as the sole argument. Spaces, arguments, and shell

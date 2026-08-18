@@ -108,6 +108,32 @@ test("sandbox bind paths are validated only in operator-owned registry defaults"
   }).some((problem) => /must be an absolute path/.test(problem)));
 });
 
+test("daemon broker allowlist is validated only in operator-owned registry defaults", async (t) => {
+  const { projectPath } = await fixture(t);
+  const base = {
+    version: 1,
+    defaults: { sandboxBrokerAllowlist: ["/api/dispatches", "/api/dispatch/*"] },
+    groups: [],
+    projects: [validProject(projectPath)],
+  };
+  assert.deepEqual(validateRegistry(base), []);
+  assert.deepEqual(validateRegistry({
+    ...base,
+    defaults: { sandboxBrokerAllowlist: ["/api/*"] },
+  }), []);
+  assert.ok(validateRegistry({
+    ...base,
+    projects: [{
+      ...base.projects[0],
+      sandboxBrokerAllowlist: ["/api/projects"],
+    }],
+  }).some((problem) => /sandboxBrokerAllowlist is forbidden;.*operator-owned defaults/.test(problem)));
+  assert.ok(validateRegistry({
+    ...base,
+    defaults: { sandboxBrokerAllowlist: ["relative", "/api/bad/*/shape"] },
+  }).some((problem) => /must be an \/api\/ path/.test(problem)));
+});
+
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "atelier-registry-"));
   const projectPath = join(root, "project");

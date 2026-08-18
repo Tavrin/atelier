@@ -14,6 +14,10 @@ import {
   SANDBOX_BACKEND_IDS,
   resolveTrustProfile,
 } from "./execution/sandbox.mjs";
+import {
+  DEFAULT_SANDBOX_BROKER_ALLOWLIST,
+  validateSandboxBrokerAllowlist,
+} from "./execution/daemon-broker.mjs";
 
 const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const DISPATCH_ENV_KEY = /^[A-Z][A-Z0-9_]*$/;
@@ -35,6 +39,7 @@ export const DEFAULTS = Object.freeze({
   dispatchProfile: Object.freeze({}),
   trustProfile: BUILT_IN_TRUST_PROFILE,
   sandboxBackend: "bwrap",
+  sandboxBrokerAllowlist: DEFAULT_SANDBOX_BROKER_ALLOWLIST,
   maxFixRounds: 4,
 });
 
@@ -262,6 +267,11 @@ export function validateProject(project, index = 0) {
   if (project.sandboxBindings !== undefined) {
     problems.push(
       `${prefix}.sandboxBindings is forbidden; sandbox bindings are operator-owned defaults`,
+    );
+  }
+  if (project.sandboxBrokerAllowlist !== undefined) {
+    problems.push(
+      `${prefix}.sandboxBrokerAllowlist is forbidden; daemon broker access is operator-owned defaults`,
     );
   }
 
@@ -544,6 +554,7 @@ export function validateRegistry(registry) {
   problems.push(...validateTrustProfile(registry.defaults?.trustProfile, "defaults.trustProfile"));
   problems.push(...validateSandboxBackend(registry.defaults?.sandboxBackend, "defaults.sandboxBackend"));
   problems.push(...validateSandboxBindings(registry.defaults?.sandboxBindings));
+  problems.push(...validateSandboxBrokerAllowlist(registry.defaults?.sandboxBrokerAllowlist));
   if (isObject(registry.defaults)) {
     const defaultTrust = resolveTrustProfile({}, registry.defaults);
     problems.push(...validateTrustProfile(defaultTrust, "defaults.trustProfile", { resolved: true }));

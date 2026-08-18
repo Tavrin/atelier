@@ -423,7 +423,7 @@ function verifyChild({ stdout = [], stderr = [], code = 0 } = {}) {
 }
 
 function recordingSandboxBackend() {
-  const state = { available: true, wraps: [] };
+  const state = { available: true, wraps: [], brokers: [] };
   const backend = {
     id: "bwrap",
     version: () => "recording 1",
@@ -437,7 +437,29 @@ function recordingSandboxBackend() {
       return { file: input.file, args: [...input.args], env: { ...input.env } };
     },
   };
-  return { backend, state, backends: new Map([[backend.id, backend]]) };
+  return {
+    backend,
+    state,
+    backends: new Map([[backend.id, backend]]),
+    async daemonBrokerFactory(input) {
+      state.brokers.push(structuredClone({
+        socketPath: input.socketPath,
+        allowlist: input.allowlist,
+      }));
+      return {
+        socketPath: input.socketPath,
+        allowlist: input.allowlist,
+        async close() {},
+      };
+    },
+  };
+}
+
+function configureRecordingDaemonBroker(dispatcher) {
+  dispatcher.configureDaemonBroker({
+    targetPort: () => 5170,
+    bearerTokenForDispatch: () => "fixture-sandboxed-agent-token",
+  });
 }
 
 function processStartIdentity(pid) {
@@ -24963,7 +24985,9 @@ test("detached verification receives a read-only tested tree, writable scratch, 
     registry: setup.registry,
     stateDir: setup.state,
     sandboxBackends: sandbox.backends,
+    daemonBrokerFactory: sandbox.daemonBrokerFactory,
   });
+  configureRecordingDaemonBroker(dispatcher);
   await dispatcher.rerunVerification(id);
   const completed = await waitForState(dispatcher, id, ["completed"]);
   assert.equal(spawns, 1);
@@ -24977,6 +25001,8 @@ test("detached verification receives a read-only tested tree, writable scratch, 
   assert.equal(verifierWrap.env.PYTHONDONTWRITEBYTECODE, "1");
   assert.equal(verifierWrap.env.CARGO_TARGET_DIR.startsWith(verifierWrap.writableRoots[0]), true);
   assert.equal(verifierWrap.env.npm_config_cache.startsWith(verifierWrap.writableRoots[0]), true);
+  assert.equal(typeof verifierWrap.brokerSocketPath, "string");
+  assert.deepEqual(sandbox.state.brokers[0].allowlist, ["/api/dispatches"]);
   assert.equal(existsSync(verifierWrap.writableRoots[0]), false, "verification scratch leaked");
 });
 
@@ -25001,7 +25027,9 @@ test("sandbox disappearance at verify spawn fails the gate without an unconfined
     registry: setup.registry,
     stateDir: setup.state,
     sandboxBackends: sandbox.backends,
+    daemonBrokerFactory: sandbox.daemonBrokerFactory,
   });
+  configureRecordingDaemonBroker(dispatcher);
   sandbox.state.available = false;
   await dispatcher.rerunVerification(id);
   const completed = await waitForState(dispatcher, id, ["completed"]);
