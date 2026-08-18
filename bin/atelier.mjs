@@ -46,6 +46,7 @@ function usage() {
     "  atelier dispatch <project> (<ticketId>|--prompt \"...\") [--model X] [--effort low|medium|high|xhigh|max] [--lane codex] [--follow]",
     "  atelier reply <dispatchId> <text...> [--follow] [--accept-execution-profile]",
     "  atelier plan <dispatchId> (--approve | --revise \"text\") [--accept-execution-profile]",
+    "  atelier merge <dispatchId> [--force]",
     "  atelier logs [--follow] [--kind K[,K]] [--project NAME] [--dispatch ID] [--ticket ID] [--actor A] [--since ISO] [--limit N]",
     "  atelier doctor [--install-service | --gc [--older-than-days N] [--offline-maintenance] | --safe-restart [--port N]] [--dry-run]",
   ].join("\n");
@@ -411,6 +412,15 @@ async function plan(args) {
   console.log(JSON.stringify(await dispatcher.plan(dispatchId, body)));
 }
 
+async function merge(args) {
+  const { values, positionals } = parseOptions(args, new Set(), new Set(["force"]));
+  if (positionals.length !== 1) throw new Error("merge requires exactly one dispatch id");
+  const record = await serverDispatcher().merge(positionals[0], {
+    ...(values.force ? { force: true } : {}),
+  });
+  console.log(JSON.stringify(record));
+}
+
 const LOG_FOLLOW_INTERVAL_MS = 500;
 
 function printLogEvent(event) {
@@ -595,6 +605,13 @@ async function doctor(args) {
     for (const path of result.orphans) console.log(`${orphanVerb}: ${path}`);
     const codexJobVerb = result.dryRun ? "would remove codex job" : "removed codex job";
     for (const jobId of result.codexJobs ?? []) console.log(`${codexJobVerb}: ${jobId}`);
+    const breakGlassAuthorizations = result.breakGlassAuthorizations ?? [];
+    const breakGlassVerb = result.dryRun
+      ? "would remove break-glass authorization"
+      : "removed break-glass authorization";
+    for (const authorizationId of breakGlassAuthorizations) {
+      console.log(`${breakGlassVerb}: ${authorizationId}`);
+    }
     const codexProcesses = result.codexProcesses ??
       { supported: false, reaped: [], reported: [], errors: [] };
     for (const reaped of codexProcesses.reaped) {
@@ -631,7 +648,7 @@ async function doctor(args) {
       : `${codexProcesses.reaped.length} codex process${codexProcesses.reaped.length === 1 ? "" : "es"} reaped, ${codexProcesses.reported.length} reported`;
     const errorCount = result.errors.length + (codexProcesses.errors?.length ?? 0);
     console.log(
-      `gc summary: ${result.dismissed.length} dispatch${result.dismissed.length === 1 ? "" : "es"}, ${result.orphans.length} orphan worktree${result.orphans.length === 1 ? "" : "s"}, ${advisoryDebts.length} review advisory debt${advisoryDebts.length === 1 ? "" : "s"}, ${processSummary}, ${errorCount} error${errorCount === 1 ? "" : "s"}`,
+      `gc summary: ${result.dismissed.length} dispatch${result.dismissed.length === 1 ? "" : "es"}, ${result.orphans.length} orphan worktree${result.orphans.length === 1 ? "" : "s"}, ${breakGlassAuthorizations.length} break-glass authorization${breakGlassAuthorizations.length === 1 ? "" : "s"}, ${advisoryDebts.length} review advisory debt${advisoryDebts.length === 1 ? "" : "s"}, ${processSummary}, ${errorCount} error${errorCount === 1 ? "" : "s"}`,
     );
     if (errorCount > 0) process.exitCode = 1;
     return;
@@ -710,6 +727,7 @@ async function main() {
   if (command === "dispatch") return dispatch(args);
   if (command === "reply") return reply(args);
   if (command === "plan") return plan(args);
+  if (command === "merge") return merge(args);
   if (command === "logs") return logs(args);
   if (command === "doctor") return doctor(args);
   throw new Error(`Unknown command: ${command}\n${usage()}`);

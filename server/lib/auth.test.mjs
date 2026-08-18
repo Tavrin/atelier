@@ -7,10 +7,12 @@ import test from "node:test";
 import {
   AUTH_SECRET_FILE,
   clientBearerToken,
+  createBreakGlassTokenAuthority,
   createRequestAuth,
   ensureAuthSecret,
   mintBearerToken,
   verifyBearerToken,
+  verifyBreakGlassToken,
 } from "./auth.mjs";
 
 test("auth secret is created owner-only and reused across starts", (t) => {
@@ -63,6 +65,21 @@ test("bearers bind the client label and compare signatures safely", (t) => {
   }
   assert.equal(verifyBearerToken(secret, `${mintBearerToken(secret, "mcp")}x`), undefined);
   assert.equal(verifyBearerToken(secret, "atelier-v1.human-ui.invalid"), undefined);
+});
+
+test("break-glass tokens use a distinct signed purpose and random identifier", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "atelier-auth-break-glass-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const secret = ensureAuthSecret(directory);
+  const authority = createBreakGlassTokenAuthority({ directory });
+  const minted = authority.mint();
+
+  assert.match(minted.tokenId, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(authority.verify(minted.token), minted.tokenId);
+  assert.equal(verifyBreakGlassToken(secret, minted.token), minted.tokenId);
+  assert.equal(verifyBearerToken(secret, minted.token), undefined);
+  assert.equal(authority.verify(mintBearerToken(secret, "api")), undefined);
+  assert.equal(authority.verify(`${minted.token}x`), undefined);
 });
 
 test("explicit bearer configuration wins and missing installation state is clear", (t) => {

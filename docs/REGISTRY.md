@@ -4,6 +4,29 @@ Location: `~/.config/atelier/projects.json` (override: ATELIER_CONFIG_DIR).
 Validated on load by server/lib/registry.mjs; `atelier doctor` reports all
 problems at once.
 
+MCP automation may read project settings and patch ordinary workflow fields,
+but it cannot change the gate-critical `verifyCommands`, `requireReview`, or
+`reviewPolicy` fields. Those three remain mutable through the human UI, CLI,
+and API bearer surfaces; they do not require a break-glass token. This keeps
+automation from pre-loosening a merge gate while preserving normal operator
+configuration workflows. A break-glass token authorizes only one force merge
+and is minted only by a web-session action; bearer credentials cannot mint one.
+This is surface discipline, not a same-UID security boundary: the loopback
+`/api/session` bootstrap is unauthenticated, so an unlabeled process running as
+the Atelier user is trusted-local by owner decision and can obtain the
+`human-ui` session. The static CSRF value and eight-hour session lifetime do not
+change that fact. Consequently, `atelier merge <dispatchId> --force` refuses
+with instructions to mint in the web UI; there is intentionally no CLI mint
+path. ATT-008 makes the distinction enforceable: sandboxed agents must receive
+brokered API access that excludes both `/api/session` and `/api/break-glass`.
+The existing actor gate remains valuable for every labeled surface and for
+those future sandboxed agents.
+
+Break-glass deliberately fails closed when daemon persistence is degraded:
+Atelier cannot mint or consume an override without durable authorization and
+audit evidence. The remaining emergency escape is manual git performed by the
+operator, outside Atelier's authority claims and audit guarantees.
+
 ## Schema (version 1)
 
 - `defaults.concurrentDispatchCap` - running+preparing dispatches across all

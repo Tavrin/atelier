@@ -163,6 +163,7 @@ export async function createGoldenHarness(t, {
   let daemonStderr = "";
   let projectInitialized = false;
   let tornDown = false;
+  let humanSession;
 
   async function rawApi(path, { method = "GET", body } = {}) {
     // The daemon writes its auth secret at startup; authenticate once it exists
@@ -194,6 +195,53 @@ export async function createGoldenHarness(t, {
 
   async function api(path, options) {
     const response = await rawApi(path, options);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${path}: ${response.value.error || response.value.text}`);
+    }
+    return response.value;
+  }
+
+  async function ensureHumanSession() {
+    if (humanSession) return humanSession;
+    const response = await fetch(`http://127.0.0.1:${port}/api/session`);
+    const value = await response.json();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} /api/session: ${value.error ?? "session failed"}`);
+    }
+    const setCookie = response.headers.getSetCookie?.()[0] ?? response.headers.get("set-cookie");
+    if (!setCookie || typeof value.csrfToken !== "string") {
+      throw new Error("human session bootstrap returned no cookie or CSRF token");
+    }
+    humanSession = {
+      cookie: setCookie.split(";", 1)[0],
+      csrfToken: value.csrfToken,
+    };
+    return humanSession;
+  }
+
+  async function rawHumanApi(path, { method = "GET", body } = {}) {
+    const session = await ensureHumanSession();
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method,
+      headers: {
+        Cookie: session.cookie,
+        "X-Atelier-CSRF": session.csrfToken,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    let value;
+    try {
+      value = text ? JSON.parse(text) : {};
+    } catch {
+      value = { text };
+    }
+    return { ok: response.ok, status: response.status, value };
+  }
+
+  async function humanApi(path, options) {
+    const response = await rawHumanApi(path, options);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${path}: ${response.value.error || response.value.text}`);
     }
@@ -348,6 +396,8 @@ export async function createGoldenHarness(t, {
     env,
     api,
     rawApi,
+    humanApi,
+    rawHumanApi,
     teardown,
     childPids,
     trackDispatch(id) {

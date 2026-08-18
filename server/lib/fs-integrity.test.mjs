@@ -96,6 +96,28 @@ test("new durable products are owner-only without chmodding existing append targ
   assert.equal(readFileSync(appendPath, "utf8"), "legacy\nappend\n");
 });
 
+test("first durable append best-effort fsyncs its containing directory", (t) => {
+  const root = fixture(t);
+  const path = join(root, "created.jsonl");
+  let directoryFsyncs = 0;
+  const descriptors = new Set();
+  appendDurable(path, "created\n", {
+    fileOps: {
+      openSync(target, ...args) {
+        const descriptor = openSync(target, ...args);
+        if (target === root) descriptors.add(descriptor);
+        return descriptor;
+      },
+      fsyncSync(descriptor) {
+        if (descriptors.has(descriptor)) directoryFsyncs += 1;
+        return fsyncSync(descriptor);
+      },
+    },
+  });
+  assert.equal(directoryFsyncs, 1);
+  assert.equal(readFileSync(path, "utf8"), "created\n");
+});
+
 test("guarded append keeps owner-only creation and does not fsync output lines", (t) => {
   const root = fixture(t);
   const path = join(root, "stream.jsonl");

@@ -275,6 +275,7 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
     gc.stdout,
     /review advisory debt: merged-with-advisory-debt round-1:finding-1 for fixture-1 \(2 attempts; last error: tracker unavailable\)/,
   );
+  assert.match(gc.stdout, /gc summary: .* 0 break-glass authorizations,/);
   assert.match(gc.stdout, /gc summary: .* 1 review advisory debt,/);
   if (process.platform === "linux") {
     assert.match(gc.stdout, new RegExp(`would reap codex process: ${leaked.pid} `));
@@ -1169,6 +1170,43 @@ test("atelier plan sends approve or revision feedback through the loopback API",
       body: { action: "revise", text: "cover rollback" },
     },
   ]);
+});
+
+test("atelier merge --force prints the human break-glass mint instruction", async (t) => {
+  const state = await liveFakeDaemonState(t);
+  const server = createServer(async (request, response) => {
+    for await (const chunk of request) void chunk;
+    response.writeHead(409, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      error: "EATELIER_BREAK_GLASS_REQUIRED: force merge requires a token minted by POST /api/break-glass in the web UI",
+    }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => {
+    server.close();
+    await once(server, "close").catch(() => {});
+  });
+
+  const failure = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "merge", "dispatch-1", "--force"],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_STATE_DIR: state,
+        PORT: String(server.address().port),
+      },
+    },
+  ).then(
+    (result) => ({ code: 0, ...result }),
+    (error) => error,
+  );
+
+  assert.equal(failure.code, 1);
+  assert.match(failure.stderr, /EATELIER_BREAK_GLASS_REQUIRED/);
+  assert.match(failure.stderr, /POST \/api\/break-glass in the web UI/);
 });
 
 test("atelier move-tracker delegates to the loopback API and prints next steps", async (t) => {

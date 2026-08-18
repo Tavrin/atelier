@@ -76,7 +76,7 @@ import {
   _setRunFile as setRunFile,
   _setSpawner,
   _resolveDispatchLane,
-  createDispatcher,
+  createDispatcher as createDispatcherCore,
   invalidateResult,
 } from "./dispatch.mjs";
 
@@ -86,6 +86,22 @@ const FORCE_AUDIT = Object.freeze({
   dispositionRef: "fixture-disposition-ref",
 });
 const seededSyntheticBranches = new Set();
+const testEventLogs = new Map();
+
+// Tests inject one writer per disposable state directory. Production owns this
+// wiring in createServer; keeping it explicit here prevents the dispatcher from
+// masking writer-identity bugs with a lazy second event log.
+function createDispatcher(options) {
+  let eventLog = options.eventLog;
+  if (!eventLog) {
+    eventLog = testEventLogs.get(options.stateDir);
+    if (!eventLog) {
+      eventLog = createEventLog({ stateDir: options.stateDir });
+      testEventLogs.set(options.stateDir, eventLog);
+    }
+  }
+  return createDispatcherCore({ ...options, eventLog });
+}
 
 function isCommand(file, name) {
   return basename(String(file)).toLowerCase().replace(/\.exe$/, "") === name;
@@ -839,6 +855,27 @@ function stubFastForwardMerge(setup, { branchHead = "validated-head", mainHead =
     if (args[2] === "rev-parse" && args[3] === "main") return `${mainHead}\n`;
     if (args[2] === "merge-base") return "";
     return "";
+  });
+}
+
+async function forceMerge(dispatcher, id, {
+  actor = "human-ui",
+  mintActor = "human-ui",
+  targetSha,
+  audit = FORCE_AUDIT,
+} = {}) {
+  const record = dispatcher.get(id);
+  const authorization = await dispatcher.mintBreakGlass(id, {
+    dispatchId: id,
+    action: "merge",
+    targetSha: targetSha ?? record?.branchHead ?? FIXTURE_BASE_COMMIT,
+    ...audit,
+    actor: mintActor,
+  });
+  return dispatcher.merge(id, {
+    force: true,
+    breakGlassToken: authorization.token,
+    actor,
   });
 }
 
@@ -2420,14 +2457,14 @@ test("persistence degradation blocks forced merge and queue automation while man
   assert.equal(completed.persistenceDegraded, true);
   assert.ok(completed.warnings.some((warning) => warning.startsWith("PERSISTENCE DEGRADED:")));
   await assert.rejects(
-    dispatcher.merge(seeded.id, { force: true, ...FORCE_AUDIT }),
+    forceMerge(dispatcher, seeded.id),
     (error) =>
       error.status === 409 &&
       /persistence degradation gate failed/.test(error.message) &&
       /queue\.json/.test(error.message),
   );
   await assert.rejects(
-    dispatcher.merge(manual.id, { force: true, ...FORCE_AUDIT }),
+    forceMerge(dispatcher, manual.id),
     (error) =>
       error.status === 409 &&
       /persistence degradation gate failed/.test(error.message) &&
@@ -6294,12 +6331,10 @@ test("merge gates verification, duplicate merge, and stranded writes unless forc
   assert.deepEqual(eventLog.read({ kind: "dispatch.merge" }), [], "a gate alone emits no merge");
   await assert.rejects(
     forcedDispatcher.merge("dispatch-merge", { force: true }),
-    /forcedBy must be a non-empty string/,
+    /^Error: EATELIER_BREAK_GLASS_REQUIRED:/,
   );
-  const forced = await forcedDispatcher.merge("dispatch-merge", {
-    force: true,
+  const forced = await forceMerge(forcedDispatcher, "dispatch-merge", {
     actor: "theme:forest-town",
-    ...FORCE_AUDIT,
   });
   assert.equal(forced.merged.commit, "fedcba9876543210");
   assert.deepEqual(
@@ -6310,10 +6345,14 @@ test("merge gates verification, duplicate merge, and stranded writes unless forc
     },
     FORCE_AUDIT,
   );
-  assert.deepEqual(
-    forced.gates.find((gate) => gate.gate === "merge"),
-    { gate: "merge", state: "passed", ...FORCE_AUDIT },
-  );
+  assert.equal(forced.gates.find((gate) => gate.gate === "merge")?.state, "bypassed");
+  assert.equal(forced.merged.targetSha, "validated-head");
+  assert.match(forced.merged.tokenId, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(forced.merged.mintedAt, /^2026-/);
+  assert.match(forced.merged.consumedAt, /^2026-/);
+  const breakGlassEvents = eventLog.read({ kind: "dispatch.break-glass" });
+  assert.deepEqual(breakGlassEvents.map((event) => event.phase), ["minted", "consumed"]);
+  assert.ok(breakGlassEvents.every((event) => event.tokenId === forced.merged.tokenId));
   const mergeEvents = eventLog.read({ kind: "dispatch.merge" });
   assert.equal(mergeEvents.length, 1);
   assert.equal(mergeEvents[0].dispatchId, "dispatch-merge");
@@ -6327,6 +6366,506 @@ test("merge gates verification, duplicate merge, and stranded writes unless forc
   assert.equal(mergeEvents[0].forcedBy, FORCE_AUDIT.forcedBy);
   assert.equal(mergeEvents[0].reason, FORCE_AUDIT.reason);
   assert.equal(mergeEvents[0].dispositionRef, FORCE_AUDIT.dispositionRef);
+});
+
+test("break-glass authorization is single-use and its pending record is private", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup, {
+    verify: { state: "failed", steps: [] },
+  });
+  stubFastForwardMerge(setup);
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const authorization = await dispatcher.mintBreakGlass(seeded.id, {
+    action: "merge",
+    targetSha: seeded.branchHead,
+    ...FORCE_AUDIT,
+    actor: "human-ui",
+  });
+  const files = await readdir(join(setup.state, "break-glass"));
+  assert.equal(files.length, 1);
+  assert.equal((await stat(join(setup.state, "break-glass", files[0]))).mode & 0o777, 0o600);
+
+  const merged = await dispatcher.merge(seeded.id, {
+    force: true,
+    breakGlassToken: authorization.token,
+    actor: "human-ui",
+  });
+  assert.equal(merged.merged.targetSha, seeded.branchHead);
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: authorization.token,
+      actor: "human-ui",
+    }),
+    /EATELIER_BREAK_GLASS_INVALID: authorization was already consumed/,
+  );
+});
+
+test("durable security events require the injected service writer", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const dispatcher = createDispatcherCore({ registry: setup.registry, stateDir: setup.state });
+
+  await assert.rejects(
+    dispatcher.mintBreakGlass(seeded.id, {
+      action: "merge",
+      targetSha: seeded.branchHead,
+      ...FORCE_AUDIT,
+      actor: "human-ui",
+    }),
+    (error) =>
+      /durable event append requires the injected Atelier event log/.test(error.message) &&
+      /manual git, outside Atelier's authority claims/.test(error.message),
+  );
+  assert.equal(existsSync(join(setup.state, "logs")), false, "dispatcher must not construct a second writer");
+});
+
+test("break-glass authorization is bound to result and attestation evidence at the same HEAD", async (t) => {
+  for (const scenario of [
+    {
+      label: "result version",
+      mutate(record) {
+        record.result.version += 1;
+        record.attestation.resultVersion += 1;
+      },
+      expected: /result evidence changed/,
+    },
+    {
+      label: "attestation commit",
+      mutate(record) {
+        record.attestation.resultCommit = "re-attested-same-head";
+      },
+      expected: /attestation evidence changed/,
+    },
+  ]) {
+    const setup = await fixture(t);
+    const seeded = await seedDispatch(setup);
+    stubFastForwardMerge(setup);
+    const eventLog = createEventLog({ stateDir: setup.state });
+    const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+    const authorization = await dispatcher.mintBreakGlass(seeded.id, {
+      action: "merge",
+      targetSha: seeded.branchHead,
+      ...FORCE_AUDIT,
+      actor: "human-ui",
+    });
+    const changed = rawRecord(setup, seeded.id);
+    scenario.mutate(changed);
+    appendFileSync(
+      join(setup.state, "dispatches", "index.jsonl"),
+      `${JSON.stringify(changed)}\n`,
+    );
+    const restarted = createDispatcher({
+      registry: setup.registry,
+      stateDir: setup.state,
+      eventLog,
+    });
+
+    await assert.rejects(
+      restarted.merge(seeded.id, {
+        force: true,
+        breakGlassToken: authorization.token,
+        actor: "human-ui",
+      }),
+      scenario.expected,
+      scenario.label,
+    );
+  }
+});
+
+test("break-glass authorization refuses expiry and a branch move after mint", async (t) => {
+  const expiredSetup = await fixture(t);
+  const expiredSeed = await seedDispatch(expiredSetup);
+  let now = Date.parse("2026-08-18T10:00:00.000Z");
+  _setRunFile(async (_file, args) =>
+    args[2] === "rev-parse" && args[3] === "--verify" ? "validated-head\n" : "",
+  );
+  const expiredEventLog = createEventLog({ stateDir: expiredSetup.state });
+  const expiredDispatcher = createDispatcher({
+    registry: expiredSetup.registry,
+    stateDir: expiredSetup.state,
+    eventLog: expiredEventLog,
+    breakGlassNow: () => now,
+  });
+  const expired = await expiredDispatcher.mintBreakGlass(expiredSeed.id, {
+    action: "merge",
+    targetSha: expiredSeed.branchHead,
+    ...FORCE_AUDIT,
+    actor: "human-ui",
+  });
+  now += 10 * 60 * 1_000 + 1;
+  await assert.rejects(
+    expiredDispatcher.merge(expiredSeed.id, {
+      force: true,
+      breakGlassToken: expired.token,
+      actor: "human-ui",
+    }),
+    /EATELIER_BREAK_GLASS_INVALID: authorization expired/,
+  );
+  const [expiredStoreName] = await readdir(join(expiredSetup.state, "break-glass"));
+  const expiredStorePath = join(expiredSetup.state, "break-glass", expiredStoreName);
+  const expiredStore = JSON.parse(await readFile(expiredStorePath, "utf8"));
+  assert.equal(expiredStore.status, "expired");
+  assert.match(expiredStore.expiredAt, /^2026-/);
+  assert.deepEqual(
+    expiredEventLog.read({ kind: "dispatch.break-glass" }).map((event) => event.phase),
+    ["minted", "expired"],
+  );
+  now -= 60 * 60 * 1_000;
+  await assert.rejects(
+    expiredDispatcher.merge(expiredSeed.id, {
+      force: true,
+      breakGlassToken: expired.token,
+      actor: "human-ui",
+    }),
+    /EATELIER_BREAK_GLASS_INVALID: authorization expired/,
+    "clock rollback must not revive an expiry tombstone",
+  );
+
+  const movedSetup = await fixture(t);
+  const movedSeed = await seedDispatch(movedSetup);
+  let head = movedSeed.branchHead;
+  _setRunFile(async (_file, args) =>
+    args[2] === "rev-parse" && args[3] === "--verify" ? `${head}\n` : "",
+  );
+  const movedDispatcher = createDispatcher({
+    registry: movedSetup.registry,
+    stateDir: movedSetup.state,
+  });
+  await assert.rejects(
+    movedDispatcher.mintBreakGlass(movedSeed.id, {
+      action: "merge",
+      targetSha: "stale-client-head",
+      ...FORCE_AUDIT,
+      actor: "human-ui",
+    }),
+    /target SHA mismatch \(requested stale-client-head, current validated-head\)/,
+  );
+  const moved = await movedDispatcher.mintBreakGlass(movedSeed.id, {
+    action: "merge",
+    targetSha: movedSeed.branchHead,
+    ...FORCE_AUDIT,
+    actor: "human-ui",
+  });
+  head = "moved-after-mint";
+  await assert.rejects(
+    movedDispatcher.merge(movedSeed.id, {
+      force: true,
+      breakGlassToken: moved.token,
+      actor: "human-ui",
+    }),
+    /EATELIER_BREAK_GLASS_INVALID: branch moved \(authorized validated-head, current moved-after-mint\)/,
+  );
+});
+
+test("boot recovers a consumed break-glass event debt from the durable token store", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  let failConsumed = true;
+  const failingLog = {
+    append: (...args) => eventLog.append(...args),
+    appendDurable(kind, payload, options) {
+      if (kind === "dispatch.break-glass" && payload.phase === "consumed" && failConsumed) {
+        failConsumed = false;
+        throw new Error("fixture consumed audit EIO");
+      }
+      return eventLog.appendDurable(kind, payload, options);
+    },
+  };
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog: failingLog,
+  });
+  const authorization = await dispatcher.mintBreakGlass(seeded.id, {
+    action: "merge",
+    targetSha: seeded.branchHead,
+    ...FORCE_AUDIT,
+    actor: "human-ui",
+  });
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: authorization.token,
+      actor: "human-ui",
+    }),
+    /break-glass audit event could not be persisted/,
+  );
+  const [storeName] = await readdir(join(setup.state, "break-glass"));
+  const storePath = join(setup.state, "break-glass", storeName);
+  assert.equal(JSON.parse(await readFile(storePath, "utf8")).consumedEventAt, null);
+
+  const recovered = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => recovered.shutdown({ graceMs: 0 }));
+  await waitForCondition(
+    () => Boolean(JSON.parse(readFileSync(storePath, "utf8")).consumedEventAt),
+    "boot did not settle consumed-event debt",
+  );
+  const consumedEvents = eventLog.read({ kind: "dispatch.break-glass" })
+    .filter((event) => event.phase === "consumed");
+  assert.equal(consumedEvents.length, 1);
+  assert.equal(consumedEvents[0].recovered, true);
+  assert.equal(rawRecord(setup, seeded.id).merged, null);
+});
+
+test("consumed-event marker debt never fails a merge or duplicates its durable event", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  let failMarkers = true;
+  let markerFailures = 0;
+  _setPersistenceFileOps({
+    writeDescriptorSync(descriptor, contents, options, path) {
+      let value;
+      try {
+        value = JSON.parse(String(contents));
+      } catch {
+        value = null;
+      }
+      if (failMarkers && value?.status === "consumed" && value.consumedEventAt) {
+        markerFailures += 1;
+        throw Object.assign(new Error("fixture marker EIO"), { code: "EIO" });
+      }
+      writeFileSync(descriptor, contents, options);
+    },
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog,
+  });
+  const merged = await forceMerge(dispatcher, seeded.id);
+  assert.equal(merged.merged.commit, "main-head");
+  assert.equal(markerFailures, 1);
+
+  const [storeName] = await readdir(join(setup.state, "break-glass"));
+  const storePath = join(setup.state, "break-glass", storeName);
+  assert.equal(JSON.parse(await readFile(storePath, "utf8")).consumedEventAt, null);
+  assert.equal(
+    eventLog.read({ kind: "dispatch.break-glass" }).filter((event) => event.phase === "consumed").length,
+    1,
+  );
+
+  const firstRecovery = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => firstRecovery.shutdown({ graceMs: 0 }));
+  await waitForCondition(() => markerFailures >= 2, "first marker recovery did not run");
+  const secondRecovery = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => secondRecovery.shutdown({ graceMs: 0 }));
+  await waitForCondition(() => markerFailures >= 3, "second marker recovery did not run");
+  assert.equal(
+    eventLog.read({ kind: "dispatch.break-glass" }).filter((event) => event.phase === "consumed").length,
+    1,
+    "each recovery scans the durable log before deciding whether to append",
+  );
+
+  failMarkers = false;
+  const finalRecovery = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => finalRecovery.shutdown({ graceMs: 0 }));
+  await waitForCondition(
+    () => Boolean(JSON.parse(readFileSync(storePath, "utf8")).consumedEventAt),
+    "marker debt did not settle after persistence recovered",
+  );
+  assert.equal(
+    eventLog.read({ kind: "dispatch.break-glass" }).filter((event) => event.phase === "consumed").length,
+    1,
+  );
+});
+
+test("merge audit append debt never retroactively fails a landed merge and drains later and at boot", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  let mergeFailures = 2;
+  const failingLog = {
+    append: (...args) => eventLog.append(...args),
+    appendDurable(kind, payload, options) {
+      if (kind === "dispatch.merge" && mergeFailures > 0) {
+        mergeFailures -= 1;
+        throw new Error("fixture merge audit EIO");
+      }
+      return eventLog.appendDurable(kind, payload, options);
+    },
+  };
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog: failingLog,
+  });
+  const merged = await forceMerge(dispatcher, seeded.id);
+  assert.ok(merged.merged, "landed merge remains a successful operation");
+  assert.equal(merged.postMerge.state, "skipped", "post-merge handoff still ran");
+  assert.equal(merged.mergeEventDebt.attempts, 1);
+  assert.ok(merged.warnings.some((warning) => warning.startsWith("merge audit event pending:")));
+
+  const duplicate = await dispatcher.merge(seeded.id);
+  assert.equal(duplicate.merged.commit, merged.merged.commit);
+  assert.equal(duplicate.mergeEventDebt.attempts, 2, "later operation retried without failing");
+
+  const restarted = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => restarted.shutdown({ graceMs: 0 }));
+  await waitForCondition(
+    () => restarted.get(seeded.id)?.mergeEventDebt === undefined,
+    "boot did not drain merge event debt",
+  );
+  assert.equal(eventLog.read({ kind: "dispatch.merge" }).length, 1);
+  assert.equal(
+    restarted.get(seeded.id).warnings.some((warning) =>
+      warning.startsWith("merge audit event pending:")),
+    false,
+  );
+});
+
+test("expiry terminal events cover supersede discovery and doctor GC tombstones", async (t) => {
+  for (const path of ["supersede", "gc"]) {
+    const setup = await fixture(t);
+    const seeded = await seedDispatch(setup);
+    let now = Date.parse("2026-08-18T10:00:00.000Z");
+    const eventLog = createEventLog({ stateDir: setup.state });
+    const dispatcher = createDispatcher({
+      registry: setup.registry,
+      stateDir: setup.state,
+      eventLog,
+      breakGlassNow: () => now,
+    });
+    t.after(() => dispatcher.shutdown({ graceMs: 0 }));
+    _setRunFile(async (_file, args) =>
+      args[2] === "rev-parse" && args[3] === "--verify" ? "validated-head\n" : ""
+    );
+    await dispatcher.mintBreakGlass(seeded.id, {
+      action: "merge",
+      targetSha: seeded.branchHead,
+      ...FORCE_AUDIT,
+      actor: "human-ui",
+    });
+    now += 10 * 60 * 1_000 + 1;
+    if (path === "supersede") {
+      await dispatcher.mintBreakGlass(seeded.id, {
+        action: "merge",
+        targetSha: seeded.branchHead,
+        ...FORCE_AUDIT,
+        actor: "human-ui",
+      });
+      assert.deepEqual(
+        eventLog.read({ kind: "dispatch.break-glass" }).map((event) => event.phase),
+        ["minted", "expired", "minted"],
+      );
+    } else {
+      await dispatcher.gc({ olderThanDays: 0, now: new Date(now), actor: "human-ui" });
+      assert.deepEqual(
+        eventLog.read({ kind: "dispatch.break-glass" }).map((event) => event.phase),
+        ["minted", "expired"],
+      );
+    }
+  }
+});
+
+test("new break-glass mint supersedes the prior active token and doctor GC reaps old tombstones", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  let now = Date.parse("2026-08-01T10:00:00.000Z");
+  stubFastForwardMerge(setup);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog,
+    breakGlassNow: () => now,
+  });
+  const mint = () => dispatcher.mintBreakGlass(seeded.id, {
+    action: "merge",
+    targetSha: seeded.branchHead,
+    forcedBy: "operator sk-abcdefghijklmnopq",
+    reason: "token: hunter2-hunter2-hunter2",
+    dispositionRef: "review/secret",
+    actor: "human-ui",
+  });
+  const first = await mint();
+  const second = await mint();
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: first.token,
+      actor: "human-ui",
+    }),
+    /authorization was superseded/,
+  );
+  const stores = (await readdir(join(setup.state, "break-glass"))).sort();
+  assert.equal(stores.length, 2);
+  const stored = await Promise.all(stores.map(async (name) =>
+    JSON.parse(await readFile(join(setup.state, "break-glass", name), "utf8"))));
+  assert.deepEqual(stored.map((entry) => entry.status).sort(), ["pending", "superseded"]);
+  assert.doesNotMatch(JSON.stringify(stored), /sk-abcdefghijklmnopq|hunter2/);
+  assert.deepEqual(
+    eventLog.read({ kind: "dispatch.break-glass" }).map((event) => event.phase),
+    ["minted", "superseded", "minted"],
+  );
+
+  now += 10 * 60 * 1_000 + 1;
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: second.token,
+      actor: "human-ui",
+    }),
+    /authorization expired/,
+  );
+  const dryRun = await dispatcher.gc({
+    dryRun: true,
+    olderThanDays: 7,
+    now: new Date(now + 8 * 24 * 60 * 60 * 1_000),
+  });
+  assert.equal(dryRun.breakGlassAuthorizations.length, 2);
+  assert.equal((await readdir(join(setup.state, "break-glass"))).length, 2);
+  const collected = await dispatcher.gc({
+    olderThanDays: 7,
+    now: new Date(now + 8 * 24 * 60 * 60 * 1_000),
+  });
+  assert.equal(collected.breakGlassAuthorizations.length, 2);
+  assert.deepEqual(await readdir(join(setup.state, "break-glass")), []);
+});
+
+test("break-glass consume is durable before any merge git movement", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  const calls = [];
+  let branchReads = 0;
+  _setRunFile(async (_file, args) => {
+    calls.push(args);
+    if (args[2] === "rev-parse" && args[3] === "--verify") {
+      branchReads += 1;
+      if (branchReads === 3) throw new Error("simulated crash after consume");
+      return "validated-head\n";
+    }
+    return "";
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const authorization = await dispatcher.mintBreakGlass(seeded.id, {
+    action: "merge",
+    targetSha: seeded.branchHead,
+    ...FORCE_AUDIT,
+    actor: "human-ui",
+  });
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: authorization.token,
+      actor: "human-ui",
+    }),
+    /simulated crash after consume/,
+  );
+  const [storeName] = await readdir(join(setup.state, "break-glass"));
+  const stored = JSON.parse(await readFile(join(setup.state, "break-glass", storeName), "utf8"));
+  assert.match(stored.consumedAt, /^2026-/);
+  assert.equal(
+    calls.some((args) => ["fetch", "merge", "rebase", "reset"].includes(args[2])),
+    false,
+    "no command capable of moving git state ran after the durable consume",
+  );
 });
 
 test("a pending durable merge intent retries reconciliation inline and blocks if still unresolved", async (t) => {
@@ -6352,6 +6891,80 @@ test("a pending durable merge intent retries reconciliation inline and blocks if
   );
   assert.equal(commands, 1);
   assert.equal(dispatcher.get("dispatch-merge").mergeRecoveryPending, true);
+});
+
+test("a force request recovering a prior landed intent leaves its token pending", async (t) => {
+  const setup = await fixture(t);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog,
+  });
+  const intent = {
+    resultCommit: "result-head",
+    branchHead: "result-head",
+    mainBranch: "main",
+    mainTipBefore: "main-before",
+    startedAt: "2026-08-17T08:00:00.000Z",
+  };
+  const seeded = await seedDispatch(setup, {
+    branchHead: "result-head",
+    result: {
+      commit: "result-head",
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      version: 1,
+      manifest: [],
+    },
+    attestation: { resultCommit: "result-head", resultVersion: 1 },
+    mergeIntent: intent,
+  });
+  _setRunFile(async (_file, args) => {
+    if (args[2] === "rev-parse" && args[3] === "--verify" && args[4] === seeded.branch) {
+      return "result-head\n";
+    }
+    if (args[2] === "rev-parse" && args[3] === "main") return "current-main\n";
+    if (args[2] === "merge-base") return "result-head\n";
+    if (args[2] === "rev-list") return "landed-merge\nlater-main\n";
+    return "";
+  });
+  const authorization = await dispatcher.mintBreakGlass(seeded.id, {
+    action: "merge",
+    targetSha: "result-head",
+    ...FORCE_AUDIT,
+    actor: "human-ui",
+  });
+  const recovered = await dispatcher.merge(seeded.id, {
+    force: true,
+    breakGlassToken: authorization.token,
+    actor: "human-ui",
+  });
+
+  assert.equal(recovered.merged.commit, "landed-merge");
+  const [storeName] = await readdir(join(setup.state, "break-glass"));
+  const stored = JSON.parse(await readFile(join(setup.state, "break-glass", storeName), "utf8"));
+  assert.equal(stored.status, "pending");
+  assert.equal(stored.consumedAt, null);
+  assert.deepEqual(
+    eventLog.read({ kind: "dispatch.break-glass" }).map((event) => event.phase),
+    ["minted"],
+  );
+});
+
+test("logless dispatchers skip merge audit logging without debt or warnings", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const dispatcher = createDispatcherCore({ registry: setup.registry, stateDir: setup.state });
+  const merged = await dispatcher.merge(seeded.id);
+
+  assert.equal(merged.merged.commit, "main-head");
+  assert.equal(merged.mergeEventDebt, undefined);
+  assert.equal(
+    merged.warnings.some((warning) => warning.startsWith("merge audit event pending:")),
+    false,
+  );
 });
 
 test("an idempotent duplicate drains durable ticket-close debt without touching git", async (t) => {
@@ -6477,12 +7090,19 @@ test("a result manifest containing the workspace token refuses even forced merge
   });
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
 
-  for (const options of [{}, { force: true, ...FORCE_AUDIT }]) {
-    await assert.rejects(dispatcher.merge(polluted.id, options), (error) =>
-      error.status === 409 &&
-      /^EATELIER_RESULT_VERIFICATION_MISMATCH: /.test(error.message) &&
-      error.message.includes(".atelier-workspace.json"));
-  }
+  await assert.rejects(dispatcher.merge(polluted.id), (error) =>
+    error.status === 409 &&
+    /^EATELIER_RESULT_VERIFICATION_MISMATCH: /.test(error.message) &&
+    error.message.includes(".atelier-workspace.json"));
+
+  _setRunFile(async (_file, args) => {
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "polluted-head\n";
+    throw new Error("manifest containment must refuse before merge git");
+  });
+  await assert.rejects(forceMerge(dispatcher, polluted.id), (error) =>
+    error.status === 409 &&
+    /^EATELIER_RESULT_VERIFICATION_MISMATCH: /.test(error.message) &&
+    error.message.includes(".atelier-workspace.json"));
 
   stubFastForwardMerge(setup, { branchHead: "clean-head" });
   const merged = await dispatcher.merge(cleaned.id);
@@ -7078,6 +7698,7 @@ test("audited force abandons an unresolved intent and records exactly what it cl
   let recoveryAttempt = true;
   let main = "main-before";
   _setRunFile(async (_file, args) => {
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "result-head\n";
     if (recoveryAttempt) {
       recoveryAttempt = false;
       throw new Error("recovery cannot identify main");
@@ -7091,10 +7712,7 @@ test("audited force abandons an unresolved intent and records exactly what it cl
     return "";
   });
 
-  const forced = await dispatcher.merge("dispatch-merge", {
-    force: true,
-    ...FORCE_AUDIT,
-  });
+  const forced = await forceMerge(dispatcher, "dispatch-merge");
   assert.equal(forced.merged.commit, "forced-merge");
   assert.deepEqual(forced.merged.abandonedMergeIntent, intent);
   assert.match(forced.merged.abandonedMergeIntentAt, /^2026-/);
@@ -7115,7 +7733,8 @@ test("audited force restores an unresolved merge intent when abandonment is not 
   };
   await seedDispatch(setup, { branchHead: "result-head", mergeIntent: intent });
   let commands = 0;
-  _setRunFile(async () => {
+  _setRunFile(async (_file, args) => {
+    if (args[2] === "rev-parse" && args[3] === "--verify") return "result-head\n";
     commands += 1;
     throw new Error("recovery unavailable");
   });
@@ -7135,7 +7754,7 @@ test("audited force restores an unresolved merge intent when abandonment is not 
   _setPersistenceLogger({ error() {} });
 
   await assert.rejects(
-    dispatcher.merge("dispatch-merge", { force: true, ...FORCE_AUDIT }),
+    forceMerge(dispatcher, "dispatch-merge"),
     (error) => error.status === 409 &&
       /persistence degradation gate failed/.test(error.message) &&
       /index\.jsonl/.test(error.message),
@@ -9024,7 +9643,7 @@ test("convoy accepts a not-ready dependent on an earlier convoy member", async (
   assert.deepEqual(convoy.ticketIds, ["fixture-prerequisite", "fixture-dependent"]);
   const first = await waitForState(dispatcher, convoy.currentDispatchId, ["completed"]);
   assert.equal(first.ticketId, "fixture-prerequisite");
-  await dispatcher.merge(first.id, { force: true, ...FORCE_AUDIT });
+  await forceMerge(dispatcher, first.id);
   const advanced = await waitForConvoy(
     dispatcher,
     convoy.id,
@@ -9153,7 +9772,7 @@ test("convoy persists members and advances only after merge", async (t) => {
   assert.equal(first.batchSeq, 1);
   assert.equal(dispatcher.list().some((record) => record.ticketId === "fixture-2"), false);
 
-  await dispatcher.merge(first.id, { force: true, ...FORCE_AUDIT });
+  await forceMerge(dispatcher, first.id);
   const advanced = await waitForConvoy(
     dispatcher,
     created.id,
@@ -9204,7 +9823,7 @@ test("convoy advancement refuses a later member parked while awaiting merge", as
   );
 
   const successor = createDispatcher({ registry: setup.registry, stateDir: setup.state });
-  await successor.merge(first.id, { force: true, ...FORCE_AUDIT });
+  await forceMerge(successor, first.id);
   const paused = await waitForConvoy(
     successor,
     created.id,
@@ -9237,7 +9856,7 @@ test("convoy advancement pauses when member two becomes deferred while member on
 
   issues[1].defer_until = "2099-01-01T00:00:00.000Z";
   readyIssues.splice(0, readyIssues.length, issues[0]);
-  await dispatcher.merge(first.id, { force: true, ...FORCE_AUDIT });
+  await forceMerge(dispatcher, first.id);
   const paused = await waitForConvoy(
     dispatcher,
     created.id,
@@ -9595,9 +10214,9 @@ test("bake-off permits one merge, excludes its sibling, and keeps the shared cla
   });
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
 
-  await dispatcher.merge(first.id, { force: true, ...FORCE_AUDIT });
+  await forceMerge(dispatcher, first.id);
   await assert.rejects(
-    dispatcher.merge(second.id, { force: true, ...FORCE_AUDIT }),
+    forceMerge(dispatcher, second.id),
     (error) =>
       error.status === 409 &&
       error.message === `sibling ${first.id} already merged - dismiss this attempt`,
@@ -11744,6 +12363,21 @@ test("rollup de-duplicates persisted history and sums projects and local days", 
     },
     {
       ...base,
+      id: "alpha-force-merged",
+      project: "alpha",
+      state: "completed",
+      startedAt: localStartedAt(1),
+      turns: 0,
+      costUSD: 0,
+      merged: {
+        commit: "forced",
+        mergedAt: localStartedAt(0),
+        strategy: "ff",
+        forcedBy: "fixture-architect",
+      },
+    },
+    {
+      ...base,
       id: "alpha-rejected",
       project: "alpha",
       state: "rejected",
@@ -11764,10 +12398,11 @@ test("rollup de-duplicates persisted history and sums projects and local days", 
       {
         project: "alpha",
         projectRemoved: true,
-        runs: 2,
-        completed: 1,
+        runs: 3,
+        completed: 2,
         failed: 1,
         merged: 1,
+        forcedMerged: 1,
         turns: 4,
         costUSD: 1.5,
       },
@@ -11778,15 +12413,16 @@ test("rollup de-duplicates persisted history and sums projects and local days", 
         completed: 0,
         failed: 1,
         merged: 0,
+        forcedMerged: 0,
         turns: 4,
         costUSD: 2.5,
       },
     ],
     days: [
-      { day: localDay(1), runs: 1, costUSD: 1.25 },
+      { day: localDay(1), runs: 2, costUSD: 1.25 },
       { day: localDay(0), runs: 2, costUSD: 2.75 },
     ],
-    totals: { runs: 3, turns: 8, costUSD: 4 },
+    totals: { runs: 4, merged: 1, forcedMerged: 1, turns: 8, costUSD: 4 },
   });
 });
 
@@ -15242,7 +15878,7 @@ test("merge and automatic review startup share the target lifecycle reservation"
 
   await reviewStarted;
   await assert.rejects(
-    reviewDispatcher.merge(reviewTarget.id, { force: true, ...FORCE_AUDIT }),
+    forceMerge(reviewDispatcher, reviewTarget.id),
     (error) => error.status === 409 && error.message === "dispatch review is starting",
   );
   releaseReview();
@@ -15302,7 +15938,9 @@ test("merge and automatic review startup share the target lifecycle reservation"
     stateDir: mergeSetup.state,
   });
 
-  const mergePromise = mergeDispatcher.merge(mergeTarget.id, { force: true, ...FORCE_AUDIT });
+  const mergePromise = forceMerge(mergeDispatcher, mergeTarget.id, {
+    targetSha: "merge-wins-head",
+  });
   await mergeStarted;
   await new Promise((resolvePromise) => setImmediate(resolvePromise));
   releaseMerge();
@@ -17938,7 +18576,7 @@ test("a review park landing after force-merge records locally without reopening 
 
   const review = await dispatcher.review(target.id);
   await waitForState(dispatcher, review.id, ["running"]);
-  const merged = await dispatcher.merge(target.id, { force: true, ...FORCE_AUDIT });
+  const merged = await forceMerge(dispatcher, target.id);
   assert.equal(merged.merged.commit, "merged-main");
 
   reviewChild.complete(
@@ -18559,7 +19197,7 @@ test("requireReview preserves flat and mid-upgrade passes for merge and never me
     stateDir: reviewSetup.state,
   });
   await assert.rejects(
-    reviewDispatcher.merge(reviewRecord.id, { force: true, ...FORCE_AUDIT }),
+    forceMerge(reviewDispatcher, reviewRecord.id),
     /review dispatches are read-only audit records/,
   );
   // Negative control: the no-review record above still fails the unforced
@@ -18849,8 +19487,11 @@ test("merge refuses to remove a worktree from under an unproven worker, and forc
     childPid: survivor.child.pid,
     childPidIdentity: processStartIdentity(survivor.child.pid),
   });
+  let forceHeadReads = 0;
   _setRunFile(async (file, args) => {
     if (args[2] === "rev-parse" && args[3] === "--verify") {
+      forceHeadReads += 1;
+      if (forceHeadReads <= 2) return "validated-head\n";
       throw new Error("past-the-fence-gate marker");
     }
     return "";
@@ -18868,7 +19509,7 @@ test("merge refuses to remove a worktree from under an unproven worker, and forc
   // force reaches the ordinary merge machinery, which is how we know the gate
   // itself is what refused above and that force is not silently swallowed.
   await assert.rejects(
-    dispatcher.merge(seeded.id, { force: true, ...FORCE_AUDIT }),
+    forceMerge(dispatcher, seeded.id),
     /past-the-fence-gate marker/,
   );
   assert.equal(survivor.child.exitCode, null);

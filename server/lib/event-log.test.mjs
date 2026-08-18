@@ -52,6 +52,71 @@ test("event log writes the spec event shape, one JSONL line per event", async (t
   assert.deepEqual(lines.map(({ seq }) => seq), [1, 2, 3]);
 });
 
+test("security-critical append is inline, fsyncs, and retains the non-authorizing token id", async (t) => {
+  const root = await logRoot(t, "event-log-durable");
+  let descriptorAppends = 0;
+  let fsyncs = 0;
+  const log = createEventLog({
+    stateDir: root,
+    fileOps: {
+      ...fs,
+      appendFileSync(...args) {
+        descriptorAppends += 1;
+        return fs.appendFileSync(...args);
+      },
+      fsyncSync(...args) {
+        fsyncs += 1;
+        return fs.fsyncSync(...args);
+      },
+    },
+  });
+  const tokenId = "a".repeat(43);
+  const successorTokenId = "b".repeat(43);
+  const event = log.appendDurable("dispatch.break-glass", {
+    dispatchId: "dispatch-1",
+    phase: "superseded",
+    tokenId,
+    supersededByTokenId: successorTokenId,
+  });
+
+  assert.equal(event.tokenId, tokenId);
+  assert.equal(event.supersededByTokenId, successorTokenId);
+  assert.equal(descriptorAppends, 1);
+  assert.ok(fsyncs >= 1);
+  const stored = JSON.parse(await readFile(log.path, "utf8"));
+  assert.equal(stored.tokenId, tokenId);
+  assert.equal(stored.supersededByTokenId, successorTokenId);
+});
+
+test("durable rotation best-effort fsyncs the log directory after renames", async (t) => {
+  const root = await logRoot(t, "event-log-rotation-fsync");
+  const directory = join(root, "logs");
+  const directoryDescriptors = new Set();
+  let directoryFsyncs = 0;
+  const log = createEventLog({
+    stateDir: root,
+    sizeLimit: 256,
+    fileOps: {
+      ...fs,
+      openSync(target, ...args) {
+        const descriptor = fs.openSync(target, ...args);
+        if (target === directory) directoryDescriptors.add(descriptor);
+        return descriptor;
+      },
+      fsyncSync(descriptor) {
+        if (directoryDescriptors.has(descriptor)) directoryFsyncs += 1;
+        return fs.fsyncSync(descriptor);
+      },
+    },
+  });
+  log.appendDurable("dispatch.merge", { dispatchId: "one", detail: "x".repeat(180) });
+  const afterCreation = directoryFsyncs;
+  log.appendDurable("dispatch.merge", { dispatchId: "two", detail: "y".repeat(180) });
+
+  assert.ok(afterCreation >= 1, "first-file creation fsyncs directory metadata");
+  assert.ok(directoryFsyncs > afterCreation, "rotation renames fsync directory metadata");
+});
+
 test("event log redacts secret-shaped keys and credential strings at write time", async (t) => {
   const root = await logRoot(t, "event-log-redact");
   const log = createEventLog({ stateDir: root });

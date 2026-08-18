@@ -158,6 +158,10 @@ export function createCommandClient({
       dispatchId = id;
       return post(`/api/dispatch/${encodeURIComponent(id)}/plan`, body);
     },
+    async merge(id, body) {
+      dispatchId = id;
+      return post(`/api/dispatch/${encodeURIComponent(id)}/merge`, body);
+    },
     get(id) {
       return request(`/api/dispatch/${encodeURIComponent(id)}`);
     },

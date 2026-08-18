@@ -178,10 +178,16 @@ const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 1_500;
 const EVENT_STREAM_GLOBAL_LIMIT = 64;
 const EVENT_STREAM_PER_CREDENTIAL_LIMIT = 8;
 const MCP_RESTRICTED_SETTINGS = new Set([
+  "verifyCommands",
   "requireReview",
   "reviewPolicy",
   "budgetUSDPerDay",
   "unpricedDispatchCapPerDay",
+]);
+const MCP_GATE_CRITICAL_SETTINGS = new Set([
+  "verifyCommands",
+  "requireReview",
+  "reviewPolicy",
 ]);
 const serverResources = new WeakMap();
 
@@ -833,8 +839,10 @@ export function createServer({
       });
       requestAuthContexts.set(request, authContext);
       if (authContext.requestClass === "session-bootstrap") {
-        // Local authentication blocks cross-origin and remote callers, not a
-        // process already running as the same OS user; that boundary is OS policy.
+        // Surface discipline only: any unlabeled same-UID process can bootstrap
+        // this session and is trusted-local by owner decision. ATT-008 must make
+        // the human boundary enforceable by excluding /api/session and
+        // /api/break-glass from sandboxed agents' brokered API access.
         const session = requestAuth.mintSession();
         response.setHeader("Set-Cookie", session.cookie);
         jsonResponse(response, 200, { csrfToken: session.csrfToken });
@@ -894,6 +902,33 @@ export function createServer({
           groups: registry.groups,
           editorConfigured: Boolean(registry.defaults?.editorCommand),
         });
+        return;
+      }
+
+      if (request.method === "POST" && path === "/api/break-glass") {
+        // This actor/credential gate rejects every labeled automation surface.
+        // It is not a same-UID boundary while /api/session is locally reachable;
+        // ATT-008 owns the real sandbox-and-broker exclusion (see REGISTRY.md).
+        if (authContext.actor !== "human-ui" || authContext.credential !== "session") {
+          throw new HttpError(
+            409,
+            "Break-glass authorization requires a human web-session action; API, CLI, and MCP bearers cannot mint it",
+          );
+        }
+        try {
+          jsonResponse(response, 201, await dispatcher.mintBreakGlass(
+            requiredString(postBody, "dispatchId"),
+            dispatchActionContext(request, {
+              action: requiredString(postBody, "action"),
+              targetSha: requiredString(postBody, "targetSha"),
+              forcedBy: requiredString(postBody, "forcedBy"),
+              reason: requiredString(postBody, "reason"),
+              dispositionRef: requiredString(postBody, "dispositionRef"),
+            }),
+          ));
+        } catch (error) {
+          throw dispatchHttpError(error);
+        }
         return;
       }
 
@@ -985,6 +1020,20 @@ export function createServer({
       if (request.method === "POST" && path === "/api/projects") {
         try {
           const registration = { ...postBody };
+          const restricted = Object.keys(registration).filter((key) =>
+            MCP_GATE_CRITICAL_SETTINGS.has(key)
+          );
+          if (requestActor(request) === "mcp" && restricted.length > 0) {
+            throw new HttpError(
+              409,
+              `MCP cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
+            );
+          }
+          if (requestActor(request) === "mcp") {
+            registration.verifyCommands = [];
+            registration.requireReview = false;
+            registration.reviewPolicy = "strict";
+          }
           const trackerLocation = optionalString(registration, "trackerLocation");
           delete registration.trackerLocation;
           let initializeTracker = false;
@@ -1082,8 +1131,8 @@ export function createServer({
         );
         if (requestActor(request) === "mcp" && restricted.length > 0) {
           throw new HttpError(
-            403,
-            `MCP cannot change gate-critical settings (${restricted.join(", ")}); use human/UI authority`,
+            409,
+            `MCP cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
           );
         }
         const before = { ...projectByName(registry, name) };
@@ -1497,6 +1546,7 @@ export function createServer({
             jsonResponse(response, 200, await dispatcher.reply(id, dispatchActionContext(request, {
               text,
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
               ...(postBody.acceptExecutionProfile !== undefined
                 ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
                 : {}),
@@ -1512,6 +1562,7 @@ export function createServer({
               action: requiredString(postBody, "action"),
               text: optionalString(postBody, "text"),
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
               ...(postBody.acceptExecutionProfile !== undefined
                 ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
                 : {}),
@@ -1533,10 +1584,8 @@ export function createServer({
                 id,
                 dispatchActionContext(request, {
                   force: postBody.force,
-                  ...(postBody.forcedBy !== undefined ? { forcedBy: postBody.forcedBy } : {}),
-                  ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
-                  ...(postBody.dispositionRef !== undefined
-                    ? { dispositionRef: postBody.dispositionRef }
+                  ...(postBody.breakGlassToken !== undefined
+                    ? { breakGlassToken: postBody.breakGlassToken }
                     : {}),
                 }),
               ),
@@ -1569,6 +1618,7 @@ export function createServer({
           try {
             jsonResponse(response, 202, await dispatcher.review(id, dispatchActionContext(request, {
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
             })));
           } catch (error) {
             throw dispatchHttpError(error);

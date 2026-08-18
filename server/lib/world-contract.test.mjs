@@ -318,16 +318,28 @@ test("gatesFor distinguishes passed-with-dispositions and carries the force audi
       forcedBy: "maintainer",
       reason: "The open finding is consciously waived.",
       dispositionRef: "ticket-comment-75",
+      targetSha: "abc123",
+      tokenId: "break-glass-75",
+      mintedAt: "2026-08-18T10:00:00.000Z",
+      consumedAt: "2026-08-18T10:01:00.000Z",
+      resultVersion: 3,
+      attestation: { resultCommit: "abc123", resultVersion: 3 },
     },
   };
   assert.deepEqual(
     gatesFor(forced).find((gate) => gate.gate === "merge"),
     {
       gate: "merge",
-      state: "passed",
+      state: "bypassed",
       forcedBy: "maintainer",
       reason: "The open finding is consciously waived.",
       dispositionRef: "ticket-comment-75",
+      targetSha: "abc123",
+      tokenId: "break-glass-75",
+      mintedAt: "2026-08-18T10:00:00.000Z",
+      consumedAt: "2026-08-18T10:01:00.000Z",
+      resultVersion: 3,
+      attestation: { resultCommit: "abc123", resultVersion: 3 },
     },
   );
 });
@@ -436,6 +448,7 @@ test("chronicleFor is chronological, bounded, and derives the scorecard statisti
   });
   assert.deepEqual(result.summary, {
     merges: CHRONICLE_LIMIT + 2,
+    forcedMerges: 0,
     firstPassReviews: (CHRONICLE_LIMIT + 2) / 2,
     reviewedMerges: CHRONICLE_LIMIT + 2,
     reviewPassRate: 0.5,
@@ -628,6 +641,8 @@ test("chronicleFor exposes forced merge provenance without backfilling old merge
     id: "forced-merge",
     project: "atelier",
     title: "Forced with an audit trail",
+    costUSD: 100,
+    review: { rounds: [{ round: 1, verdict: "fail" }] },
     merged: {
       commit: "abc123",
       mergedAt: "2026-07-31T00:00:00.000Z",
@@ -639,10 +654,17 @@ test("chronicleFor exposes forced merge provenance without backfilling old merge
     id: "legacy-merge",
     project: "atelier",
     title: "Older merge",
+    costUSD: 4,
+    review: { rounds: [{ round: 1, verdict: "pass" }] },
     merged: {
       commit: "def456",
       mergedAt: "2026-07-30T00:00:00.000Z",
     },
+  }, {
+    id: "unlanded",
+    project: "atelier",
+    costUSD: 2,
+    merged: null,
   }], "atelier");
   const forced = result.records.find((record) => record.id === "forced-merge");
   assert.equal(forced.forcedBy, "maintainer");
@@ -652,6 +674,11 @@ test("chronicleFor exposes forced merge provenance without backfilling old merge
     Object.hasOwn(result.records.find((record) => record.id === "legacy-merge"), "forcedBy"),
     false,
   );
+  assert.equal(result.summary.merges, 1);
+  assert.equal(result.summary.forcedMerges, 1);
+  assert.equal(result.summary.reviewedMerges, 1);
+  assert.equal(result.summary.firstPassReviews, 1);
+  assert.equal(result.summary.costPerMergeUSD, 6);
 });
 
 test("chronicleFor backfills durable merge history without duplicating recorded commits", () => {
