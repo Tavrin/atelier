@@ -107,14 +107,28 @@ test("escape harness expected-residual: unattested in-place verification stays b
   // R-B deliberately leaves an unattested legacy verification in the writable
   // agent worktree. It is not a closed filesystem case; the passing proof is
   // the separately exercised merge refusal named here, not an isolation claim.
+  // The merge refusal is asserted by the R-B residual regression in
+  // server/lib/dispatch.test.mjs; this case proves the residual is reachable
+  // only on the unattested path.
+  const unattestedPlan = createBwrapBackend({ file: "/operator/bwrap" }).wrap({
+    ...SANDBOXED,
+    file: "/operator/verifier",
+    args: [],
+    cwd: TESTED_TREE,
+    env: {},
+  });
   assert.deepEqual({
-    residual: "unattested-in-place-verification",
-    expectedGate: "EATELIER_RESULT_VERIFICATION_MISMATCH",
-    humanOverrideRequired: true,
+    attestedTestedTree: filesystemGate(
+      verificationMountPlan(),
+      `${TESTED_TREE}/tested/source.mjs`,
+    ),
+    unattestedTestedTree: filesystemGate(
+      unattestedPlan,
+      `${TESTED_TREE}/tested/source.mjs`,
+    ),
   }, {
-    residual: "unattested-in-place-verification",
-    expectedGate: "EATELIER_RESULT_VERIFICATION_MISMATCH",
-    humanOverrideRequired: true,
+    attestedTestedTree: "bwrap-read-only-tested-tree",
+    unattestedTestedTree: "writable",
   });
 });
 
