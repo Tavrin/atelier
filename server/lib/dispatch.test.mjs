@@ -3347,6 +3347,26 @@ test("strict merge binding refuses a missing result, divergent result, and missi
   }
 });
 
+test("R-B residual: a record without a finalized result cannot merge without break-glass force", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup, { result: null, attestation: null });
+  _setRunFile(async (_file, args) =>
+    args[2] === "rev-parse" && args[3] === "--verify" ? "validated-head\n" : "");
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  await assert.rejects(
+    dispatcher.merge(seeded.id),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.equal(
+        error.message,
+        "EATELIER_RESULT_VERIFICATION_MISMATCH: no finalized result is bound to this dispatch",
+      );
+      return true;
+    },
+  );
+});
+
 test("attestation mismatch keeps its verification-head code after result binding passes", async (t) => {
   const setup = await fixture(t);
   const seeded = await seedDispatch(setup, {

@@ -5439,6 +5439,10 @@ export function createDispatcher({
       if (entry.record.state !== "verifying") return;
       Object.assign(entry.record.verify, context);
       persist(entry);
+      // This path verifies in the agent's own worktree with no attested result,
+      // so the tested tree is writable. That is acceptable only because the
+      // merge gate at dispatch.mjs:10950 refuses a record with no
+      // record.result.commit; this is R-B's residual coupling.
       outcome = await runVerifyCommands(entry, commands, stageDeadline, {
         attempt,
         cwd: entry.record.worktreePath,
