@@ -57,6 +57,7 @@ function spawnWithSandbox(
     file,
     args,
     options,
+    operatorBindings: config.operatorBindings,
   });
   return spawnProcess(wrapped.file, wrapped.args, wrapped.options);
 }
@@ -410,7 +411,7 @@ function assertBinaryFiles(files) {
   }
 }
 
-async function runJob(path) {
+async function runJob(path, { spawnAppServer = spawnWithSandbox } = {}) {
   // The detached child, not the launcher, establishes its own fence as its
   // first state mutation. The launcher performs no post-spawn job writes.
   const initial = readJob(path);
@@ -473,12 +474,26 @@ async function runJob(path) {
     };
   });
   let terminalOutcome;
-  const proc = spawnWithSandbox(job.sandbox, job.codexPath, ["app-server", "--stdio"], {
-    cwd: job.workspace,
-    env: process.env,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  let proc;
+  try {
+    proc = spawnAppServer(job.sandbox, job.codexPath, ["app-server", "--stdio"], {
+      cwd: job.workspace,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (error) {
+    const safeError = redactText(error.message);
+    updateJob(path, (current) => ({
+      ...current,
+      status: "failed",
+      errorMessage: safeError,
+      summary: safeError,
+      endedAt: new Date().toISOString(),
+    }));
+    releaseLease(leasePath(dirname(path), job.jobId));
+    return;
+  }
   const client = new JsonRpcClient(proc, (message) => {
     appendStream(job, message);
     const params = message.params ?? {};
@@ -788,5 +803,6 @@ export const _runnerTest = Object.freeze({
   appendStream,
   processStartIdentity,
   printableJob,
+  runJob,
   spawnWithSandbox,
 });

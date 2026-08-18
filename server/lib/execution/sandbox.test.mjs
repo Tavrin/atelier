@@ -1,17 +1,23 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { killTracked, spawnTracked } from "../exec.mjs";
 import {
+  SANDBOX_NETWORK_INCOMPATIBLE,
+  SANDBOX_UNSUPPORTED_PLATFORM,
   SANDBOX_UNAVAILABLE,
+  assertSandboxProviderCompatible,
   createBwrapBackend,
   createPodmanBackend,
+  sandboxArgvDigest,
   sandboxExecutionProfile,
+  sandboxPlatformSupport,
   wrapSandboxSpawn,
 } from "./sandbox.mjs";
 import {
@@ -56,10 +62,67 @@ test("bwrap probe names unprivileged namespace restrictions and wrap is pure", (
   assert.deepEqual(env, { HOME: "/home/operator", ACCESS_TOKEN: "secret", SAFE: "yes" });
   assert.equal(wrapped.file, "/fixture/bwrap");
   assert.equal(wrapped.env.ACCESS_TOKEN, undefined);
-  assert.equal(wrapped.env.HOME, "/nonexistent");
+  assert.equal(wrapped.env.HOME, "/home/operator");
   assert.deepEqual(wrapped.args.slice(-4), ["--", "/usr/bin/provider", "--flag", "value"]);
   assert.ok(wrapped.args.includes("--unshare-all"));
+  assert.ok(wrapped.args.includes("--die-with-parent"));
+  assert.deepEqual(
+    wrapped.args.filter((value, index) => wrapped.args[index - 1] === "--tmpfs"),
+    ["/home/operator", `/run/user/${process.getuid()}`, "/tmp"],
+  );
+  assert.ok(calls[0].args.includes("--proc"), "probe omitted the production /proc construction");
+  assert.ok(calls[0].args.includes("--bind"), "probe omitted the production writable bind");
+  assert.ok(calls[0].args.includes("--tmpfs"), "probe omitted the credential/user-tree masks");
   assert.ok(calls.length >= 2);
+});
+
+test("credential containment masks user trees and restores only operator-owned bindings", () => {
+  const backend = createBwrapBackend({
+    file: "/fixture/bwrap",
+    homePath: "/home/operator",
+    uid: 1234,
+  });
+  const inputEnv = {
+    HOME: "/home/operator",
+    SSH_AUTH_SOCK: "/run/user/1234/agent.sock",
+    GPG_AGENT_INFO: "/tmp/gpg-agent",
+    DB_PASSWD: "secret",
+    MONKEY: "secret",
+    TOKENIZER: "secret",
+    SAFE: "yes",
+  };
+  const wrapped = backend.wrap({
+    confinement: "sandboxed-write",
+    credential: "none",
+    file: "/provider",
+    args: [],
+    cwd: "/workspace",
+    env: inputEnv,
+    operatorBindings: ["/operator/provider-runtime"],
+  });
+  for (const key of ["SSH_AUTH_SOCK", "GPG_AGENT_INFO", "DB_PASSWD", "MONKEY", "TOKENIZER"]) {
+    assert.equal(wrapped.env[key], undefined, key);
+  }
+  assert.equal(wrapped.env.SAFE, "yes");
+  assert.deepEqual(
+    wrapped.args.filter((value, index) => wrapped.args[index - 1] === "--tmpfs"),
+    ["/home/operator", "/run/user/1234", "/tmp"],
+  );
+  const bindingIndex = wrapped.args.indexOf("/operator/provider-runtime");
+  assert.equal(wrapped.args[bindingIndex - 1], "--ro-bind");
+
+  const inSandbox = backend.wrap({
+    confinement: "sandboxed-write",
+    credential: "in-sandbox",
+    file: "/provider",
+    args: [],
+    cwd: "/workspace",
+    env: inputEnv,
+    operatorBindings: ["/operator/credential"],
+  });
+  assert.equal(inSandbox.env.DB_PASSWD, "secret");
+  assert.ok(inSandbox.args.includes("/operator/credential"));
+  assert.ok(inSandbox.args.includes("/home/operator"), "in-sandbox lost the tmpfs default");
 });
 
 test("trusted-local and advisory never claim or construct isolation", () => {
@@ -213,6 +276,96 @@ test("sandbox execution-profile comparison is pinned and legacy guarded", () => 
   assert.equal(executionProfileMismatch(legacy, weakened, { sandbox: true }), null);
 });
 
+test("argvDigest changes for every claimed security control without persisting env values", () => {
+  const base = {
+    file: "/usr/bin/bwrap",
+    args: ["--die-with-parent", "--unshare-all", "--", "/provider", "secret-argument"],
+    env: { SAFE: "not-persisted" },
+    security: {
+      environmentKeys: ["HOME", "SAFE"],
+      processGroupPosture: "atelier-reaped-process-group",
+      writableRoots: ["/worktree/a"],
+      readOnlyRoots: [],
+    },
+  };
+  const digest = sandboxArgvDigest(base);
+  for (const weakened of [
+    { ...base, args: ["--unshare-all", "--", "/provider"] },
+    { ...base, security: { ...base.security, environmentKeys: [...base.security.environmentKeys, "ACCESS_TOKEN"] } },
+    { ...base, security: { ...base.security, processGroupPosture: "untracked" } },
+    { ...base, security: { ...base.security, writableRoots: ["/worktree/b"] } },
+  ]) {
+    assert.notEqual(sandboxArgvDigest(weakened), digest);
+  }
+  assert.equal(JSON.stringify(base).includes("not-persisted"), true);
+  assert.equal(JSON.stringify({ digest }).includes("not-persisted"), false);
+});
+
+test("network-dependent providers and unsupported platforms refuse with distinct named errors", () => {
+  assert.throws(
+    () => assertSandboxProviderCompatible({
+      trustProfile: sandboxedWrite,
+      providerId: "claude",
+      networkAccess: "required",
+    }),
+    (error) => error.code === "EATELIER_SANDBOX_NETWORK_INCOMPATIBLE" &&
+      error.message.startsWith(SANDBOX_NETWORK_INCOMPATIBLE),
+  );
+  assert.deepEqual(sandboxPlatformSupport("darwin"), {
+    supported: false,
+    platform: "darwin",
+    reason: "no sandbox backend exists for darwin",
+  });
+  const backend = createBwrapBackend({ platform: "darwin" });
+  assert.throws(
+    () => wrapSandboxSpawn({
+      trustProfile: sandboxedWrite,
+      backend,
+      file: "/provider",
+      options: { cwd: "/workspace", env: {} },
+    }),
+    (error) => error.code === "EATELIER_SANDBOX_UNSUPPORTED_PLATFORM" &&
+      error.message === `${SANDBOX_UNSUPPORTED_PLATFORM}no sandbox backend exists for darwin`,
+  );
+});
+
+test("bounded backend caching never reuses availability at the actual spawn boundary", () => {
+  const state = { available: true, probes: 0, versions: 0 };
+  const backend = {
+    id: "fixture",
+    version() {
+      state.versions += 1;
+      return "fixture 1";
+    },
+    probe() {
+      state.probes += 1;
+      return {
+        available: state.available,
+        reason: state.available ? "fixture ready" : "fixture disappeared",
+        evidence: {},
+      };
+    },
+    wrap(input) {
+      return { file: input.file, args: [...input.args], env: { ...input.env } };
+    },
+  };
+  sandboxExecutionProfile({ trustProfile: sandboxedWrite, backend, cwd: "/workspace", env: {} });
+  sandboxExecutionProfile({ trustProfile: sandboxedWrite, backend, cwd: "/workspace", env: {} });
+  assert.equal(state.probes, 1, "profile construction did not reuse its bounded cache");
+  assert.equal(state.versions, 1, "backend version was synchronously repeated");
+  state.available = false;
+  assert.throws(
+    () => wrapSandboxSpawn({
+      trustProfile: sandboxedWrite,
+      backend,
+      file: "/provider",
+      options: { cwd: "/workspace", env: {} },
+    }),
+    /EATELIER_SANDBOX_UNAVAILABLE: fixture: fixture disappeared/,
+  );
+  assert.equal(state.probes, 2, "spawn reused stale positive availability");
+});
+
 test("bwrap remains the tracked process-group leader reaped by killTracked", async (t) => {
   if (process.platform !== "linux") {
     t.skip("bubblewrap backend is Linux-only");
@@ -230,6 +383,7 @@ test("bwrap remains the tracked process-group leader reaped by killTracked", asy
     file: process.execPath,
     args: ["-e", "setInterval(() => {}, 1000)"],
     options: { cwd: process.cwd(), env: process.env, stdio: "ignore" },
+    operatorBindings: [process.execPath],
   });
   const child = spawnTracked(wrapped.file, wrapped.args, wrapped.options);
   const exited = once(child, "exit");
@@ -256,12 +410,14 @@ test("real bwrap enforcement limits writes to the worktree and makes review work
   }
   const root = await mkdtemp(join(tmpdir(), "atelier-sandbox-enforcement-"));
   const worktree = join(root, "worktree");
+  const scratch = join(root, "scratch");
   const outside = join(root, "outside.txt");
   const inside = join(worktree, "inside.txt");
   await mkdir(worktree);
+  await mkdir(scratch);
   t.after(() => rm(root, { recursive: true, force: true }));
 
-  const run = (confinement, target) => {
+  const run = (confinement, target, sandboxOptions = {}) => {
     const wrapped = wrapSandboxSpawn({
       trustProfile: { confinement, credential: "none" },
       backend,
@@ -272,6 +428,8 @@ test("real bwrap enforcement limits writes to the worktree and makes review work
         target,
       ],
       options: { cwd: worktree, env: process.env },
+      operatorBindings: [process.execPath],
+      ...sandboxOptions,
     });
     return spawnSync(wrapped.file, wrapped.args, {
       ...wrapped.options,
@@ -281,6 +439,19 @@ test("real bwrap enforcement limits writes to the worktree and makes review work
 
   assert.equal(run("sandboxed-write", inside).status, 0);
   assert.equal(await readFile(inside, "utf8"), "written");
-  assert.notEqual(run("sandboxed-write", outside).status, 0);
+  run("sandboxed-write", outside);
+  assert.equal(existsSync(outside), false, "ephemeral /tmp write reached the host");
+  await writeFile(inside, "baseline");
   assert.notEqual(run("sandboxed-review-readonly", inside).status, 0);
+  assert.equal(await readFile(inside, "utf8"), "baseline");
+  assert.notEqual(run("sandboxed-write", inside, {
+    writableRoots: [scratch],
+    readOnlyRoots: [worktree],
+  }).status, 0, "verification made its tested checkout writable");
+  const scratchFile = join(scratch, "cache.txt");
+  assert.equal(run("sandboxed-write", scratchFile, {
+    writableRoots: [scratch],
+    readOnlyRoots: [worktree],
+  }).status, 0, "verification scratch was not writable");
+  assert.equal(await readFile(scratchFile, "utf8"), "written");
 });

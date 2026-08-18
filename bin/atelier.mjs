@@ -31,6 +31,7 @@ import {
   resolveSandboxBackendId,
   resolveTrustProfile,
   sandboxBackend,
+  sandboxPlatformSupport,
   sandboxPostureLabel,
 } from "../server/lib/execution/sandbox.mjs";
 import {
@@ -686,19 +687,28 @@ async function doctor(args) {
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
 
   const backends = createSandboxBackends();
+  const platformSupport = sandboxPlatformSupport();
+  if (!platformSupport.supported) {
+    console.log(
+      `sandbox: unsupported (${platformSupport.platform}; ${platformSupport.reason})`,
+    );
+    process.exitCode = 1;
+  }
   const selectedBackendIds = new Set([
     resolveSandboxBackendId({}, registry.defaults),
     ...registry.projects.map((project) =>
       resolveSandboxBackendId(project, registry.defaults)),
   ]);
-  for (const [index, backendId] of [...selectedBackendIds].entries()) {
+  for (const [index, backendId] of (platformSupport.supported
+    ? [...selectedBackendIds].entries()
+    : [])) {
     const backend = sandboxBackend(backends, backendId);
     const probe = backend.probe();
     const version = backend.version() || "version unavailable";
     const name = index === 0 ? "sandbox" : `sandbox ${backendId}`;
     console.log(
       `${name}: ${probe.available ? "ok" : "unavailable"} ` +
-        `(${backendId}; ${version}; ${probe.reason})`,
+        `(${platformSupport.platform}; ${backendId}; ${version}; ${probe.reason})`,
     );
     if (!probe.available) process.exitCode = 1;
   }

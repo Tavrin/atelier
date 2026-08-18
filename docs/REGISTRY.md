@@ -44,6 +44,24 @@ operator, outside Atelier's authority claims and audit guarantees.
   reserved for the architect session). `effort`: low | medium | high |
   xhigh | max (omit for the CLI default; ignored on the codex lane, whose
   reasoning effort lives in ~/.codex/config.toml).
+- `defaults.trustProfile` - `{confinement, credential}`. Confinement is
+  `trusted-local`, `advisory`, `sandboxed-write`, or
+  `sandboxed-review-readonly`; only the `sandboxed-*` values are enforced
+  isolation. Credential containment is `none`, `brokered`, or `in-sandbox`.
+  Sandboxed verification mounts the tested checkout read-only and provides a
+  separate writable scratch directory for build caches. Until slice 3's escape
+  harness proves the complete boundary, the precise claim is that a verifier
+  cannot durably modify the tested tree, not that no verifier escape class
+  exists.
+- `defaults.sandboxBackend` - sandbox backend id (`bwrap` or `podman`). Podman
+  probing is real but its wrapping remains deliberately fail-closed.
+- `defaults.sandboxBindings` - operator-owned read-only bind paths, keyed by
+  provider id and then credential mode, for example
+  `{"codex":{"in-sandbox":["/operator/credential/path"]}}`. Sandboxed
+  processes otherwise receive empty tmpfs mounts at `$HOME`, `/tmp`, and the
+  user's `/run/user/<uid>`. Bind paths are never inferred from the environment,
+  and `projects[].sandboxBindings` is rejected so a project cannot declare its
+  own exceptions.
 - `defaults.editorCommand` - optional executable name or absolute executable
   path used by the local "Open in editor" actions. Atelier appends the resolved
   project/worktree path as the sole argument. Spaces, arguments, and shell
@@ -188,7 +206,8 @@ operator, outside Atelier's authority claims and audit guarantees.
     ```
 
     Keys must match `/^[A-Z][A-Z0-9_]*$/`. Keys containing `key`, `token`,
-    `secret`, `password`, or `credential` (case-insensitive) are rejected:
+    `secret`, `password`, `passwd`, or `credential` (case-insensitive), plus
+    `SSH_AUTH_SOCK` and `GPG_AGENT_INFO`, are rejected:
     secrets do not belong in the registry. Values must be strings without NUL.
   - `notes` - human context shown in the project header.
 

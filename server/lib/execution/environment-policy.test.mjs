@@ -14,6 +14,7 @@ import {
   minimalChildPath,
   sanitizeChildEnv,
 } from "./environment-policy.mjs";
+import { createBwrapBackend } from "./sandbox.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -52,6 +53,35 @@ test("provider sanitization replaces hostile controls with trusted process basel
   assert.equal(clean.NODE_OPTIONS, undefined);
   assert.equal(clean.http_proxy, undefined);
   assert.equal(clean.MY_APP_FLAG, "enabled");
+});
+
+test("environment policy and sandbox credential filtering share one secret-key classification", () => {
+  const secretKeys = [
+    "DB_PASSWD",
+    "SSH_AUTH_SOCK",
+    "GPG_AGENT_INFO",
+    "MONKEY",
+    "TOKENIZER",
+    "PRIVATE_KEY",
+    "SERVICE_CREDENTIAL",
+  ];
+  const source = Object.fromEntries(secretKeys.map((key) => [key, "secret"]));
+  source.SAFE_FLAG = "kept";
+  const policy = sanitizeChildEnv(source);
+  const sandbox = createBwrapBackend({ homePath: "/home/operator", uid: 1234 }).wrap({
+    confinement: "sandboxed-write",
+    credential: "none",
+    file: "/provider",
+    args: [],
+    cwd: "/workspace",
+    env: source,
+  }).env;
+  for (const key of secretKeys) {
+    assert.equal(policy[key], undefined, `environment policy kept ${key}`);
+    assert.equal(sandbox[key], undefined, `sandbox kept ${key}`);
+  }
+  assert.equal(policy.SAFE_FLAG, "kept");
+  assert.equal(sandbox.SAFE_FLAG, "kept");
 });
 
 test("trusted parent PATH resolves a provider stub and survives provider, editor and git envs", async (t) => {

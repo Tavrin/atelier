@@ -40,6 +40,7 @@ function warnLegacy(entry) {
 export const codexAgent = Object.freeze({
   id: "codex",
   displayName: "Codex",
+  networkAccess: "required",
   capabilities: codexAppServerAgent.capabilities,
   options: (...args) => codexAppServerAgent.options(...args),
   resolveModel: (...args) => companionAgent.resolveModel(...args),

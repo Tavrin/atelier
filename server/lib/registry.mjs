@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { configDir } from "./paths.mjs";
 import { readFileNoFollowSync, writeFileAtomic } from "./fs-integrity.mjs";
 import { agents } from "./agents/index.mjs";
-import { SECRET_ENV_KEY } from "./exec.mjs";
+import { isSecretEnvKey } from "./execution/secret-environment.mjs";
 import { assertAllowedDispatchEnvKey } from "./execution/environment-policy.mjs";
 import {
   BUILT_IN_TRUST_PROFILE,
@@ -106,7 +106,7 @@ function validateDispatchEnv(dispatchEnv, prefix) {
     if (!DISPATCH_ENV_KEY.test(key)) {
       problems.push(`${prefix}.${key} key must match ${DISPATCH_ENV_KEY}`);
     }
-    if (SECRET_ENV_KEY.test(key)) {
+    if (isSecretEnvKey(key)) {
       problems.push(`${prefix}.${key} is secret-shaped; secrets do not belong in the registry`);
     }
     try {
@@ -198,6 +198,44 @@ function validateSandboxBackend(value, prefix) {
     : [`${prefix} must be one of: ${SANDBOX_BACKEND_IDS.join(", ")}`];
 }
 
+function validateSandboxBindings(value, prefix = "defaults.sandboxBindings") {
+  if (value === undefined) return [];
+  if (!isObject(value)) return [`${prefix} must be an object keyed by provider id`];
+  const problems = [];
+  for (const [providerId, byCredential] of Object.entries(value)) {
+    if (!agents.has(providerId)) {
+      problems.push(`${prefix}.${providerId} must name a registered agent id`);
+      continue;
+    }
+    if (!isObject(byCredential)) {
+      problems.push(`${prefix}.${providerId} must be an object keyed by credential mode`);
+      continue;
+    }
+    for (const credential of Object.keys(byCredential)) {
+      if (!CREDENTIAL_CONTAINMENTS.includes(credential)) {
+        problems.push(
+          `${prefix}.${providerId}.${credential} must be one of: ${CREDENTIAL_CONTAINMENTS.join(", ")}`,
+        );
+        continue;
+      }
+      const paths = byCredential[credential];
+      if (!Array.isArray(paths)) {
+        problems.push(`${prefix}.${providerId}.${credential} must be an array of absolute paths`);
+        continue;
+      }
+      for (let index = 0; index < paths.length; index += 1) {
+        const path = paths[index];
+        if (typeof path !== "string" || !isAbsolute(path) || path.includes("\0")) {
+          problems.push(
+            `${prefix}.${providerId}.${credential}[${index}] must be an absolute path without NUL`,
+          );
+        }
+      }
+    }
+  }
+  return problems;
+}
+
 function validateEditorCommand(editorCommand) {
   if (editorCommand === undefined) return [];
   if (typeof editorCommand !== "string" || !editorCommand) {
@@ -219,6 +257,12 @@ export function validateProject(project, index = 0) {
 
   if (!isObject(project)) {
     return [`${prefix} must be an object`];
+  }
+
+  if (project.sandboxBindings !== undefined) {
+    problems.push(
+      `${prefix}.sandboxBindings is forbidden; sandbox bindings are operator-owned defaults`,
+    );
   }
 
   if (typeof project.name !== "string" || !PROJECT_NAME.test(project.name)) {
@@ -499,6 +543,7 @@ export function validateRegistry(registry) {
   problems.push(...validateDispatchProfile(defaultDispatchProfile, "defaults.dispatchProfile"));
   problems.push(...validateTrustProfile(registry.defaults?.trustProfile, "defaults.trustProfile"));
   problems.push(...validateSandboxBackend(registry.defaults?.sandboxBackend, "defaults.sandboxBackend"));
+  problems.push(...validateSandboxBindings(registry.defaults?.sandboxBindings));
   if (isObject(registry.defaults)) {
     const defaultTrust = resolveTrustProfile({}, registry.defaults);
     problems.push(...validateTrustProfile(defaultTrust, "defaults.trustProfile", { resolved: true }));

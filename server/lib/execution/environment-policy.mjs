@@ -2,6 +2,9 @@ import { homedir } from "node:os";
 import { delimiter, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
+export { SECRET_ENV_KEY } from "./secret-environment.mjs";
+import { isSecretEnvKey } from "./secret-environment.mjs";
+
 const DENIED_EXACT = new Set([
   "PATH",
   "HOME",
@@ -40,7 +43,6 @@ const DENIED_PREFIXES = [
   "CODEX_",
 ];
 
-export const SECRET_ENV_KEY = /key|token|secret|password|credential/i;
 const TRUSTED_BASELINE_CLASSES = new Set(["git", "provider", "editor", "tracker"]);
 let gitConfigCountProbe = spawnSync;
 let cachedGitConfigCountSupport;
@@ -88,7 +90,7 @@ function sanitizedChildEnv(
   const clean = {};
   for (const [key, value] of Object.entries(env || {})) {
     const normalized = key.toUpperCase();
-    if (SECRET_ENV_KEY.test(key) && !safePolicyKeyNames.has(normalized)) continue;
+    if (isSecretEnvKey(key) && !safePolicyKeyNames.has(normalized)) continue;
     if (controlsExecution(key) && !allowedDeniedKeys.has(normalized)) continue;
     clean[key] = value;
   }

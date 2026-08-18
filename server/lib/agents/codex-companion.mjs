@@ -1007,6 +1007,7 @@ async function stop({ entry, commandRunner }) {
 export const codexAgent = Object.freeze({
   id: "codex",
   displayName: "Codex",
+  networkAccess: "required",
   capabilities: Object.freeze({
     liveStream: true,
     liveInput: false,

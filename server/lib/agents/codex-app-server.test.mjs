@@ -3,7 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -71,6 +71,69 @@ test("detached runner direct spawns route through backend-neutral sandbox wrappi
     args: ["boundary", "--", "/provider", "app-server", "--stdio"],
     options: { cwd: "/workspace", env: { SAFE: "yes" } },
   });
+});
+
+test("late sandbox refusal makes the runner terminal and releases its attachment lease", async (t) => {
+  const fixture = await fixtureExecutable(t);
+  const state = join(fixture.root, "jobs");
+  await mkdir(state);
+  const jobId = "a".repeat(24);
+  const jobPath = join(state, `${jobId}.json`);
+  const leasePath = join(state, `${jobId}.attach.json`);
+  const streamFile = join(state, `${jobId}.stream.jsonl`);
+  const promptPath = join(fixture.root, "prompt.txt");
+  await writeFile(promptPath, "fixture prompt\n");
+  await writeFile(streamFile, "");
+  const identity = lstatSync(fixture.path);
+  await writeFile(jobPath, `${JSON.stringify({
+    version: 1,
+    jobId,
+    status: "queued",
+    pid: null,
+    pidStartIdentity: null,
+    codexPath: fixture.path,
+    binaryFiles: [{
+      path: fixture.path,
+      dev: String(identity.dev),
+      ino: String(identity.ino),
+    }],
+    workspace: fixture.root,
+    promptPath,
+    streamFile,
+    write: true,
+    createdAt: new Date().toISOString(),
+    summary: "",
+    rawOutput: "",
+    errorMessage: null,
+    testStub: true,
+    sandbox: {
+      trustProfile: { confinement: "sandboxed-write", credential: "none" },
+      backendId: "bwrap",
+    },
+  }, null, 2)}\n`);
+  await writeFile(leasePath, "{}\n");
+  const previousGuard = process.env.ATELIER_TEST_NO_REAL_PROVIDER;
+  process.env.ATELIER_TEST_NO_REAL_PROVIDER = "1";
+  t.after(() => {
+    if (previousGuard === undefined) delete process.env.ATELIER_TEST_NO_REAL_PROVIDER;
+    else process.env.ATELIER_TEST_NO_REAL_PROVIDER = previousGuard;
+  });
+
+  await _runnerTest.runJob(jobPath, {
+    spawnAppServer() {
+      const error = new Error(
+        "EATELIER_SANDBOX_UNAVAILABLE: bwrap: backend disappeared after admission",
+      );
+      error.code = "EATELIER_SANDBOX_UNAVAILABLE";
+      throw error;
+    },
+  });
+
+  const terminal = JSON.parse(await readFile(jobPath, "utf8"));
+  assert.equal(terminal.status, "failed");
+  assert.match(terminal.errorMessage, /^EATELIER_SANDBOX_UNAVAILABLE:/);
+  assert.equal(typeof terminal.endedAt, "string");
+  assert.equal(existsSync(leasePath), false);
 });
 
 test("app-server capability probe uses its supplied sandbox spawner", async () => {

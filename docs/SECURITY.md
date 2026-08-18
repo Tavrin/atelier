@@ -63,8 +63,10 @@ observed formats to `REDACT_TEXT_PATTERNS` in `server/lib/stream.mjs`.
 ### Environment hygiene
 
 `envHygiene()` is a denylist, not an allowlist or sandbox. It removes inherited
-environment keys matching `key|token|secret|password|credential`
-(case-insensitive), including `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, so a
+environment keys containing `key`, `token`, `secret`, `password`, `passwd`, or
+`credential` (case-insensitive), plus `SSH_AUTH_SOCK` and `GPG_AGENT_INFO`.
+The environment policy and sandbox use this one shared classifier, including
+for `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, so a
 stray exported key cannot silently switch an agent from subscription billing to
 API billing. Other inherited environment variables remain available to the
 child process. Registry validation uses the same secret-shaped key pattern for

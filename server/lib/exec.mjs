@@ -8,6 +8,7 @@ import {
   sanitizeChildEnv,
   SECRET_ENV_KEY,
 } from "./execution/environment-policy.mjs";
+import { isSecretEnvKey } from "./execution/secret-environment.mjs";
 
 const COMMAND_TIMEOUT_MS = 15_000;
 export const GIT_TIMEOUT_MS = 60_000;
@@ -94,7 +95,7 @@ export function _setExecFileRunner(nextRunner = execFile) {
 export function envHygiene(env) {
   const clean = { ...env };
   for (const key of Object.keys(clean)) {
-    if (SECRET_ENV_KEY.test(key)) delete clean[key];
+    if (isSecretEnvKey(key)) delete clean[key];
   }
   return clean;
 }

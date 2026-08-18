@@ -28,7 +28,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -41,6 +41,7 @@ import {
   createExecutionProfile,
   resolveExecutable,
 } from "./execution/execution-profile.mjs";
+import { sandboxExecutionProfile } from "./execution/sandbox.mjs";
 import { createEventLog } from "./event-log.mjs";
 import { acquireInstanceLock } from "./instance-lock.mjs";
 import { stateDir } from "./paths.mjs";
@@ -24817,14 +24818,13 @@ test("stop preempts a SIGTERM-immune verification re-run and a later re-run is a
   );
 });
 
-test("sandbox-unavailable launch is a named prepare refusal and never reaches the spawner", async (t) => {
+test("network-dependent provider is refused by name at admission before backend probe or spawn", async (t) => {
   const setup = await fixture(t, {
     trustProfile: { confinement: "sandboxed-write", credential: "none" },
     sandboxBackend: "bwrap",
   });
   stubPreparation();
   const sandbox = recordingSandboxBackend();
-  sandbox.state.available = false;
   let spawns = 0;
   _setSpawner(() => {
     spawns += 1;
@@ -24838,18 +24838,61 @@ test("sandbox-unavailable launch is a named prepare refusal and never reaches th
   const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "must refuse" });
   const refused = await waitForState(dispatcher, id, ["prepare_failed"]);
   assert.equal(spawns, 0);
-  assert.match(refused.exitSummary, /^EATELIER_SANDBOX_UNAVAILABLE: bwrap:/);
-  assert.equal(refused.sandboxRefusal.operation, "execution profile resolution");
-  assert.match(refused.sandboxRefusal.detail, /recording namespace disappeared/);
+  assert.match(refused.exitSummary, /^EATELIER_SANDBOX_NETWORK_INCOMPATIBLE:/);
+  assert.equal(refused.sandboxRefusal.operation, "provider admission");
+  assert.match(refused.sandboxRefusal.detail, /claude requires provider network access/);
+  assert.equal(sandbox.state.wraps.length, 0);
 });
 
-test("sandbox disappearance refuses resume before a second provider spawn", async (t) => {
+test("legacy Codex companion is refused by name under a sandboxed profile", async (t) => {
+  const setup = await fixture(t, {
+    legacyCodexCompanion: true,
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+  });
+  setup.project.dispatchProfile.lane = "codex";
+  let spawns = 0;
+  _setSpawner(() => {
+    spawns += 1;
+    return successfulChild();
+  });
+  const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "must refuse legacy" });
+  const refused = await waitForState(dispatcher, id, ["prepare_failed"]);
+  assert.equal(spawns, 0);
+  assert.match(refused.exitSummary, /^EATELIER_SANDBOX_LEGACY_COMPANION_INCOMPATIBLE:/);
+  assert.equal(refused.sandboxRefusal.operation, "provider admission");
+});
+
+function seededSandboxProfile(setup, sandbox, worktreePath) {
+  const { env, profile } = profileFixture(setup);
+  return {
+    ...profile,
+    sandbox: sandboxExecutionProfile({
+      trustProfile: setup.project.trustProfile,
+      backend: sandbox.backend,
+      cwd: worktreePath,
+      env,
+    }),
+  };
+}
+
+test("network-dependent provider is also refused before a seeded resume spawn", async (t) => {
   const setup = await fixture(t, {
     trustProfile: { confinement: "sandboxed-write", credential: "none" },
     sandboxBackend: "bwrap",
   });
   stubPreparation();
   const sandbox = recordingSandboxBackend();
+  const id = "sandbox-resume";
+  const worktreePath = join(setup.state, "worktrees", "fixture", id);
+  const executionProfile = seededSandboxProfile(setup, sandbox, worktreePath);
+  await seedRerunnable(setup, {
+    id,
+    worktreePath,
+    sessionId: "fixture-session",
+    executionProfile,
+  });
   let spawns = 0;
   _setSpawner(() => {
     spawns += 1;
@@ -24860,32 +24903,15 @@ test("sandbox disappearance refuses resume before a second provider spawn", asyn
     stateDir: setup.state,
     sandboxBackends: sandbox.backends,
   });
-  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "launch once" });
-  const completed = await waitForState(dispatcher, id, ["completed"]);
-  assert.equal(completed.executionProfile.sandbox.backendId, "bwrap");
-  assert.equal(
-    completed.sandboxPosture,
-    "sandboxed-write (isolated by bwrap; credential none)",
-  );
-  assert.equal(spawns, 1);
-
-  setup.project.trustProfile = { confinement: "trusted-local", credential: "none" };
-  await assert.rejects(
-    dispatcher.reply(id, { text: "do not weaken confinement" }),
-    /EATELIER_EXECUTION_PROFILE_MISMATCH: .*sandbox\.confinement/,
-  );
-  assert.equal(spawns, 1);
-  setup.project.trustProfile = { confinement: "sandboxed-write", credential: "none" };
-  sandbox.state.available = false;
   await assert.rejects(
     dispatcher.reply(id, { text: "do not spawn unconfined" }),
-    /EATELIER_SANDBOX_UNAVAILABLE: bwrap: recording namespace disappeared/,
+    /EATELIER_SANDBOX_NETWORK_INCOMPATIBLE:/,
   );
-  assert.equal(spawns, 1);
-  assert.equal(dispatcher.get(id).sandboxRefusal.operation, "execution profile resolution");
+  assert.equal(spawns, 0);
+  assert.equal(dispatcher.get(id).sandboxRefusal.operation, "agent resume");
 });
 
-test("sandbox disappearance at verify-step spawn fails the gate without an unconfined verifier", async (t) => {
+test("detached verification receives a read-only tested tree, writable scratch, and named write refusal", async (t) => {
   const setup = await fixture(t, {
     trustProfile: { confinement: "sandboxed-write", credential: "none" },
     sandboxBackend: "bwrap",
@@ -24893,29 +24919,79 @@ test("sandbox disappearance at verify-step spawn fails the gate without an uncon
   });
   stubPreparation();
   const sandbox = recordingSandboxBackend();
-  const provider = heldChild();
+  const id = "sandbox-verify-readonly";
+  const worktreePath = join(setup.state, "worktrees", "fixture", id);
+  const executionProfile = seededSandboxProfile(setup, sandbox, worktreePath);
+  await seedRerunnable(setup, {
+    id,
+    worktreePath,
+    executionProfile,
+    result: {
+      commit: FIXTURE_BASE_COMMIT,
+      tree: FIXTURE_RESULT_TREE,
+      base: FIXTURE_BASE_COMMIT,
+      manifest: [],
+      version: 1,
+    },
+  });
   let spawns = 0;
   _setSpawner(() => {
     spawns += 1;
-    return provider;
+    return verifyChild({ stderr: ["EROFS: read-only file system"], code: 1 });
   });
   const dispatcher = createDispatcher({
     registry: setup.registry,
     stateDir: setup.state,
     sandboxBackends: sandbox.backends,
   });
-  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "verify safely" });
-  await waitForState(dispatcher, id, ["running"]);
-  sandbox.state.available = false;
-  provider.complete("provider completed");
+  await dispatcher.rerunVerification(id);
   const completed = await waitForState(dispatcher, id, ["completed"]);
   assert.equal(spawns, 1);
+  assert.equal(completed.verify.state, "failed");
+  assert.match(completed.verify.steps[0].tail, /EATELIER_VERIFICATION_READONLY_TREE:/);
+  const verifierWrap = sandbox.state.wraps.find((input) => input.file === "node");
+  assert.ok(verifierWrap, "verification did not route through the sandbox wrapper");
+  assert.deepEqual(verifierWrap.readOnlyRoots, [verifierWrap.cwd]);
+  assert.equal(verifierWrap.writableRoots.length, 1);
+  assert.equal(verifierWrap.writableRoots[0].startsWith(`${verifierWrap.cwd}${sep}`), false);
+  assert.equal(verifierWrap.env.PYTHONDONTWRITEBYTECODE, "1");
+  assert.equal(verifierWrap.env.CARGO_TARGET_DIR.startsWith(verifierWrap.writableRoots[0]), true);
+  assert.equal(verifierWrap.env.npm_config_cache.startsWith(verifierWrap.writableRoots[0]), true);
+  assert.equal(existsSync(verifierWrap.writableRoots[0]), false, "verification scratch leaked");
+});
+
+test("sandbox disappearance at verify spawn fails the gate without an unconfined verifier", async (t) => {
+  const setup = await fixture(t, {
+    trustProfile: { confinement: "sandboxed-write", credential: "none" },
+    sandboxBackend: "bwrap",
+    verifyCommands: ["node --test"],
+  });
+  stubPreparation();
+  const sandbox = recordingSandboxBackend();
+  const id = "sandbox-verify-disappeared";
+  const worktreePath = join(setup.state, "worktrees", "fixture", id);
+  const executionProfile = seededSandboxProfile(setup, sandbox, worktreePath);
+  await seedRerunnable(setup, { id, worktreePath, executionProfile });
+  let spawns = 0;
+  _setSpawner(() => {
+    spawns += 1;
+    return verifyChild();
+  });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    sandboxBackends: sandbox.backends,
+  });
+  sandbox.state.available = false;
+  await dispatcher.rerunVerification(id);
+  const completed = await waitForState(dispatcher, id, ["completed"]);
+  assert.equal(spawns, 0);
   assert.equal(completed.verify.state, "failed");
   assert.equal(completed.sandboxRefusal.operation, "verify step");
-  assert.match(completed.verify.steps[0].tail, /EATELIER_SANDBOX_UNAVAILABLE/);
+  assert.match(completed.verify.steps.at(-1).tail, /EATELIER_SANDBOX_UNAVAILABLE/);
 });
 
-test("sandbox downgrade between launch and verify is a profile mismatch and never runs unconfined", async (t) => {
+test("sandbox downgrade before a verification re-run is a profile mismatch", async (t) => {
   const setup = await fixture(t, {
     trustProfile: { confinement: "sandboxed-write", credential: "none" },
     sandboxBackend: "bwrap",
@@ -24923,24 +24999,24 @@ test("sandbox downgrade between launch and verify is a profile mismatch and neve
   });
   stubPreparation();
   const sandbox = recordingSandboxBackend();
-  const provider = heldChild();
+  const id = "sandbox-verify-downgrade";
+  const worktreePath = join(setup.state, "worktrees", "fixture", id);
+  const executionProfile = seededSandboxProfile(setup, sandbox, worktreePath);
+  await seedRerunnable(setup, { id, worktreePath, executionProfile });
   let spawns = 0;
   _setSpawner(() => {
     spawns += 1;
-    return provider;
+    return verifyChild();
   });
   const dispatcher = createDispatcher({
     registry: setup.registry,
     stateDir: setup.state,
     sandboxBackends: sandbox.backends,
   });
-  const { id } = await dispatcher.dispatch({ project: "fixture", prompt: "keep verify confined" });
-  await waitForState(dispatcher, id, ["running"]);
   setup.project.trustProfile = { confinement: "trusted-local", credential: "none" };
-  provider.complete("provider completed");
-  const completed = await waitForState(dispatcher, id, ["completed"]);
-  assert.equal(spawns, 1);
-  assert.equal(completed.verify.state, "failed");
-  assert.match(completed.verify.steps[0].tail, /EATELIER_EXECUTION_PROFILE_MISMATCH/);
-  assert.equal(completed.executionProfileRefusal.operation, "verify step");
+  await assert.rejects(
+    dispatcher.rerunVerification(id),
+    /EATELIER_EXECUTION_PROFILE_MISMATCH: .*sandbox\.confinement/,
+  );
+  assert.equal(spawns, 0);
 });

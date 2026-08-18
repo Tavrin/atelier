@@ -67,8 +67,11 @@ import {
 import { gitConfigCountSupported } from "./execution/environment-policy.mjs";
 import {
   SANDBOX_UNAVAILABLE,
+  VERIFICATION_READONLY_TREE,
+  assertSandboxProviderCompatible,
   createSandboxBackends,
   resolveSandboxBackendId,
+  resolveSandboxBindings,
   resolveTrustProfile,
   sandboxBackend,
   sandboxEnforcesIsolation,
@@ -4785,6 +4788,9 @@ export function createDispatcher({
     onSpawn,
     onSettle,
     interruptionDetail,
+    writableRoots,
+    readOnlyRoots,
+    readOnlyTestedTree = false,
   } = {}) {
     return new Promise((resolvePromise) => {
       // Registry verifyCommands are whitespace-split argv strings. Shell
@@ -4841,6 +4847,16 @@ export function createDispatcher({
         } else if (interruptionDetail?.()) {
           appendDiagnostic(interruptionDetail());
         }
+        if (
+          readOnlyTestedTree &&
+          Number.isInteger(code) &&
+          code !== 0 &&
+          /\bEROFS\b|read-only file system/i.test(capturedOutput())
+        ) {
+          appendDiagnostic(
+            `${VERIFICATION_READONLY_TREE}the verifier attempted to write inside the read-only tested tree; the operator-owned side-effect allowlist is not implemented until slice 3`,
+          );
+        }
         const exitCode = timedOut ? null : Number.isInteger(code) ? code : null;
         if (entry[childKey] === child) entry[childKey] = undefined;
         try {
@@ -4877,7 +4893,10 @@ export function createDispatcher({
           (candidate) => candidate.name === entry.record.project,
         );
         if (!project) throw new Error(`Project removed: ${entry.record.project}`);
-        child = entrySpawner(entry, project, `${eventType} step`)(file, args, {
+        child = entrySpawner(entry, project, `${eventType} step`, {
+          writableRoots,
+          readOnlyRoots,
+        })(file, args, {
           cwd,
           env,
         });
@@ -5349,11 +5368,26 @@ export function createDispatcher({
     return redactText(`EATELIER_VERIFICATION_MUTATED_WORKTREE: ${changes.join("; ")}`);
   }
 
-  async function runVerifyCommands(entry, commands, stageDeadline, { attempt, cwd }) {
+  function verificationSandboxEnv(env, scratch) {
+    return {
+      ...(env || {}),
+      PYTHONDONTWRITEBYTECODE: "1",
+      CARGO_TARGET_DIR: join(scratch, "cargo-target"),
+      npm_config_cache: join(scratch, "npm-cache"),
+    };
+  }
+
+  async function runVerifyCommands(entry, commands, stageDeadline, { attempt, cwd, scratch }) {
     for (let index = 0; index < commands.length; index += 1) {
       if (entry.record.state !== "verifying") return { interrupted: true };
       const result = await runVerifyStep(entry, commands[index], index, stageDeadline, {
         cwd,
+        ...(scratch ? {
+          env: verificationSandboxEnv(entry.workloadEnv ?? entry.env, scratch),
+          writableRoots: [scratch],
+          readOnlyRoots: [cwd],
+          readOnlyTestedTree: true,
+        } : {}),
         eventFields: { attempt },
         // BOTH verify spawn paths are this one line: a first run reaches here
         // from finish(), an explicit re-run from rerunVerification(), and the
@@ -5412,8 +5446,10 @@ export function createDispatcher({
     } else {
       const verifyRoot = join(stateDir, "verify-worktrees", project.name);
       const worktree = join(verifyRoot, randomBytes(8).toString("hex"));
+      const scratch = `${worktree}.scratch`;
       try {
         mkdirSync(verifyRoot, { recursive: true });
+        mkdirSync(scratch, { recursive: true });
         entry.record.verify.worktreePath = worktree;
         persist(entry);
         outcome = await withDetachedCheckout({
@@ -5464,7 +5500,7 @@ export function createDispatcher({
             entry,
             commands,
             stageDeadline,
-            { attempt, cwd: worktree },
+            { attempt, cwd: worktree, scratch },
           );
           if (commandsOutcome.interrupted) return commandsOutcome;
           let post;
@@ -5514,6 +5550,8 @@ export function createDispatcher({
           state: "failed",
           detail: `verification checkout failed: ${redactText(String(error?.message ?? error))}`,
         };
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
       }
     }
     if (entry.record.state !== "verifying" || outcome?.interrupted) return;
@@ -5671,6 +5709,7 @@ export function createDispatcher({
     const commands = project.verifyCommands;
     const verifyRoot = join(stateDir, "post-merge-worktrees", project.name);
     const worktree = join(verifyRoot, randomBytes(8).toString("hex"));
+    const scratch = `${worktree}.scratch`;
     const stageDeadline = Date.now() + VERIFY_STAGE_TIMEOUT_MS;
     if (shuttingDown) {
       throw new Error("server shutdown interrupted queued post-merge verification");
@@ -5691,9 +5730,11 @@ export function createDispatcher({
     }
     // Post-merge verification is workload code, not a provider child. Preserve
     // the pre-profile looser env and never leak Codex's companion IPC variable.
+    entry.env = postMergeEnvironments.providerEnv;
     entry.workloadEnv = postMergeEnvironments.workloadEnv;
     applyExecutionProfile(entry, postMergeReconciliation);
     postMergeFileOps.mkdirSync(verifyRoot, { recursive: true });
+    postMergeFileOps.mkdirSync(scratch, { recursive: true });
     entry.record.postMerge = {
       ...entry.record.postMerge,
       state: "running",
@@ -5709,7 +5750,8 @@ export function createDispatcher({
       mergeCommit,
       startedAt: entry.record.postMerge.startedAt,
     });
-    await withDetachedCheckout({
+    try {
+      await withDetachedCheckout({
       entry,
       project,
       commit,
@@ -5749,6 +5791,10 @@ export function createDispatcher({
       for (let index = 0; index < commands.length; index += 1) {
         const result = await runVerifyStep(entry, commands[index], index, stageDeadline, {
           cwd: worktree,
+          env: verificationSandboxEnv(entry.workloadEnv ?? entry.env, scratch),
+          writableRoots: [scratch],
+          readOnlyRoots: [worktree],
+          readOnlyTestedTree: true,
           eventType: "post-merge-verify",
           outputEventType: "post-merge-output",
           eventFields: { commit, mergeCommit },
@@ -5802,7 +5848,10 @@ export function createDispatcher({
           testedTree: entry.record.postMerge.testedTree,
         });
       }
-    });
+      });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   }
 
   function resolvePostMergeFailures(passingEntry, project, passingCommit, resolvedAt) {
@@ -6303,6 +6352,18 @@ export function createDispatcher({
   async function prepare(entry, project, opts, slug, agent) {
     try {
       transition(entry, "preparing");
+      const sandboxPolicy = resolvedSandboxPolicy(project);
+      try {
+        assertSandboxProviderCompatible({
+          trustProfile: sandboxPolicy.trustProfile,
+          providerId: agent.id,
+          networkAccess: agent.networkAccess,
+          legacyCompanion: entry.record.codexAdapter === "legacy-companion",
+        });
+      } catch (error) {
+        recordSandboxRefusal(entry, error, "provider admission");
+        throw error;
+      }
       const capabilities = await capabilityProbe(project);
       if (entry.record.state !== "preparing") {
         await abandonPreparation(entry, project);
@@ -6496,7 +6557,7 @@ export function createDispatcher({
   }
 
   function recordSandboxRefusal(entry, error, operation) {
-    if (error?.code !== "EATELIER_SANDBOX_UNAVAILABLE") return;
+    if (!String(error?.code || "").startsWith("EATELIER_SANDBOX_")) return;
     const detail = redactText(String(error.message));
     entry.record.sandboxRefusal = {
       operation,
@@ -6520,12 +6581,18 @@ export function createDispatcher({
 
   function currentSandboxProfile(entry, project, env, cwd = entry.record.worktreePath) {
     const policy = resolvedSandboxPolicy(project);
+    const operatorBindings = resolveSandboxBindings(
+      registry.defaults,
+      entry.record.lane,
+      policy.trustProfile.credential,
+    );
     try {
       return sandboxExecutionProfile({
         trustProfile: policy.trustProfile,
         backend: policy.backend,
         cwd,
         env,
+        operatorBindings,
       });
     } catch (error) {
       recordSandboxRefusal(entry, error, "execution profile resolution");
@@ -6533,10 +6600,27 @@ export function createDispatcher({
     }
   }
 
-  function entrySpawner(entry, project, operation) {
+  function entrySpawner(entry, project, operation, {
+    writableRoots,
+    readOnlyRoots,
+  } = {}) {
     const policy = resolvedSandboxPolicy(project);
+    const operatorBindings = resolveSandboxBindings(
+      registry.defaults,
+      entry.record.lane,
+      policy.trustProfile.credential,
+    );
     const wrappedSpawner = (file, args, options = {}) => {
       try {
+        if (["agent launch", "agent resume", "plan continuation"].includes(operation)) {
+          const agent = getAgent(entry.record.lane);
+          assertSandboxProviderCompatible({
+            trustProfile: policy.trustProfile,
+            providerId: agent.id,
+            networkAccess: agent.networkAccess,
+            legacyCompanion: entry.record.codexAdapter === "legacy-companion",
+          });
+        }
         const spawnOptions = sandboxEnforcesIsolation(policy.trustProfile.confinement) && !options.cwd
           ? { ...options, cwd: entry.record.worktreePath }
           : options;
@@ -6544,7 +6628,7 @@ export function createDispatcher({
           // Resolve against the original worktree bind, not a later verifier's
           // checkout. This compares trust policy and backend identity without
           // making a legitimate post-merge cwd change look like a downgrade.
-          const sandbox = currentSandboxProfile(entry, project, spawnOptions.env);
+          const sandbox = currentSandboxProfile(entry, project, entry.env);
           const mismatch = executionProfileMismatch(
             entry.record.executionProfile,
             { ...entry.record.executionProfile, sandbox },
@@ -6560,6 +6644,9 @@ export function createDispatcher({
           file,
           args,
           options: spawnOptions,
+          operatorBindings,
+          writableRoots,
+          readOnlyRoots,
         });
         return spawner(wrapped.file, wrapped.args, wrapped.options);
       } catch (error) {
@@ -6576,6 +6663,7 @@ export function createDispatcher({
       wrappedSpawner.sandboxConfig = {
         trustProfile: { ...policy.trustProfile },
         backendId: policy.backendId,
+        operatorBindings: [...operatorBindings],
       };
     }
     return wrappedSpawner;
@@ -8669,6 +8757,7 @@ ${diff}`;
       entry.inert = false;
       restoreReviewToolClamp(entry);
       entry.releaseVerifyRerun = releaseLifecycle;
+      entry.env = verifyEnvironments.providerEnv;
       entry.workloadEnv = verifyEnvironments.workloadEnv;
       applyExecutionProfile(entry, profile, { actor });
       const settled = runVerification(entry, project, record.exitSummary, { rerun: true });

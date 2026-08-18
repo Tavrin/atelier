@@ -289,6 +289,7 @@ async function preLaunchChecks() {}
 export const claudeAgent = Object.freeze({
   id: "claude",
   displayName: "Claude",
+  networkAccess: "required",
   capabilities: CAPABILITIES,
   options,
   resolveModel,

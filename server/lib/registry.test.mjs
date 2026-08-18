@@ -79,6 +79,35 @@ test("registry rejects unknown trust values, unknown backends, and incoherent cr
   );
 });
 
+test("sandbox bind paths are validated only in operator-owned registry defaults", async (t) => {
+  const { projectPath } = await fixture(t);
+  const base = {
+    version: 1,
+    defaults: {
+      sandboxBindings: {
+        codex: {
+          "in-sandbox": ["/operator/codex-credential"],
+          none: ["/operator/provider-runtime"],
+        },
+      },
+    },
+    groups: [],
+    projects: [validProject(projectPath)],
+  };
+  assert.deepEqual(validateRegistry(base), []);
+  assert.ok(validateRegistry({
+    ...base,
+    projects: [{
+      ...base.projects[0],
+      sandboxBindings: { codex: { none: ["/project/declared"] } },
+    }],
+  }).some((problem) => /sandboxBindings is forbidden;.*operator-owned defaults/.test(problem)));
+  assert.ok(validateRegistry({
+    ...base,
+    defaults: { sandboxBindings: { codex: { none: ["relative/path"] } } },
+  }).some((problem) => /must be an absolute path/.test(problem)));
+});
+
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "atelier-registry-"));
   const projectPath = join(root, "project");

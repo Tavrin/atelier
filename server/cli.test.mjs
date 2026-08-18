@@ -85,7 +85,7 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   assert.match(stdout, /claude: ok/);
   assert.match(
     stdout,
-    /sandbox: ok \(bwrap; bubblewrap 0\.10\.0; bubblewrap unprivileged namespace probe succeeded\)/,
+    /sandbox: ok \(linux; bwrap; bubblewrap 0\.10\.0; bubblewrap unprivileged namespace probe succeeded\)/,
   );
   assert.match(stdout, /codex: (?:guarded|not installed)/);
 
@@ -341,7 +341,7 @@ test("atelier doctor reports the selected backend's specific unavailable reason"
       assert.equal(error.code, 1);
       assert.match(
         error.stdout,
-        /sandbox: unavailable \(podman; podman version 4\.9\.3; rootless podman probe failed: AppArmor denied the rootless user namespace\)/,
+        /sandbox: unavailable \(linux; podman; podman version 4\.9\.3; rootless podman probe failed: AppArmor denied the rootless user namespace\)/,
       );
       return true;
     },
