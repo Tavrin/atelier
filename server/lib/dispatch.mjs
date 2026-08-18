@@ -10152,6 +10152,8 @@ ${diff}`;
     for (const { override } of breakGlassOverrides()) {
       if (!override.consumedAt || override.consumedEventAt) continue;
       recoveries.push(Promise.resolve().then(() => {
+        // K3 dedupe scans only the latest 1,000 matching events; this assumes
+        // the consumed event remains within that bounded retention window.
         const recordedEvents = securityEventLog().read?.({
           kind: "dispatch.break-glass",
           dispatchId: override.dispatchId,

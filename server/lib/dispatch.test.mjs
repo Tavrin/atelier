@@ -6598,7 +6598,8 @@ test("boot recovers a consumed break-glass event debt from the durable token sto
   const storePath = join(setup.state, "break-glass", storeName);
   assert.equal(JSON.parse(await readFile(storePath, "utf8")).consumedEventAt, null);
 
-  createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  const recovered = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => recovered.shutdown({ graceMs: 0 }));
   await waitForCondition(
     () => Boolean(JSON.parse(readFileSync(storePath, "utf8")).consumedEventAt),
     "boot did not settle consumed-event debt",
@@ -6649,9 +6650,11 @@ test("consumed-event marker debt never fails a merge or duplicates its durable e
     1,
   );
 
-  createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  const firstRecovery = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => firstRecovery.shutdown({ graceMs: 0 }));
   await waitForCondition(() => markerFailures >= 2, "first marker recovery did not run");
-  createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  const secondRecovery = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => secondRecovery.shutdown({ graceMs: 0 }));
   await waitForCondition(() => markerFailures >= 3, "second marker recovery did not run");
   assert.equal(
     eventLog.read({ kind: "dispatch.break-glass" }).filter((event) => event.phase === "consumed").length,
@@ -6660,7 +6663,8 @@ test("consumed-event marker debt never fails a merge or duplicates its durable e
   );
 
   failMarkers = false;
-  createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  const finalRecovery = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => finalRecovery.shutdown({ graceMs: 0 }));
   await waitForCondition(
     () => Boolean(JSON.parse(readFileSync(storePath, "utf8")).consumedEventAt),
     "marker debt did not settle after persistence recovered",
@@ -6703,6 +6707,7 @@ test("merge audit append debt never retroactively fails a landed merge and drain
   assert.equal(duplicate.mergeEventDebt.attempts, 2, "later operation retried without failing");
 
   const restarted = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  t.after(() => restarted.shutdown({ graceMs: 0 }));
   await waitForCondition(
     () => restarted.get(seeded.id)?.mergeEventDebt === undefined,
     "boot did not drain merge event debt",
@@ -6727,6 +6732,7 @@ test("expiry terminal events cover supersede discovery and doctor GC tombstones"
       eventLog,
       breakGlassNow: () => now,
     });
+    t.after(() => dispatcher.shutdown({ graceMs: 0 }));
     _setRunFile(async (_file, args) =>
       args[2] === "rev-parse" && args[3] === "--verify" ? "validated-head\n" : ""
     );

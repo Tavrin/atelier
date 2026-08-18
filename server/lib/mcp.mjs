@@ -187,11 +187,6 @@ const projectRegistrationSchema = objectSchema({
     exclusiveMinimum: 0,
     description: "Positive daily USD budget.",
   },
-  unpricedDispatchCapPerDay: {
-    type: "integer",
-    minimum: 1,
-    description: "Daily dispatch-count ceiling for lanes without reported cost.",
-  },
 }, [
   "name",
   "archetype",

@@ -2088,6 +2088,8 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
     ["verifyCommands", ["node --test"]],
     ["requireReview", true],
     ["reviewPolicy", "tiered"],
+    ["budgetUSDPerDay", 10],
+    ["unpricedDispatchCapPerDay", 3],
   ];
 
   for (const [field, value] of gateFields) {
@@ -2109,18 +2111,12 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
   const benign = await send(port, {
     method: "PATCH",
     path: "/api/projects/tracked",
-    body: JSON.stringify({
-      notes: "Updated through MCP",
-      budgetUSDPerDay: 10,
-      unpricedDispatchCapPerDay: 3,
-    }),
+    body: JSON.stringify({ notes: "Updated through MCP" }),
     contentType: "application/json",
     credential: "mcp",
   });
   assert.equal(benign.status, 200);
   assert.equal(registry.projects[0].notes, "Updated through MCP");
-  assert.equal(registry.projects[0].budgetUSDPerDay, 10);
-  assert.equal(registry.projects[0].unpricedDispatchCapPerDay, 3);
 });
 
 test("MCP onboarding cannot set gate policy and accepted onboarding receives safe defaults", async (t) => {
