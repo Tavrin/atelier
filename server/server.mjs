@@ -178,6 +178,7 @@ const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 1_500;
 const EVENT_STREAM_GLOBAL_LIMIT = 64;
 const EVENT_STREAM_PER_CREDENTIAL_LIMIT = 8;
 const MCP_RESTRICTED_SETTINGS = new Set([
+  "verifyCommands",
   "requireReview",
   "reviewPolicy",
   "budgetUSDPerDay",
@@ -897,6 +898,30 @@ export function createServer({
         return;
       }
 
+      if (request.method === "POST" && path === "/api/break-glass") {
+        if (authContext.actor !== "human-ui" || authContext.credential !== "session") {
+          throw new HttpError(
+            409,
+            "Break-glass authorization requires a fresh human web session action; API, CLI, and MCP bearers cannot mint it",
+          );
+        }
+        try {
+          jsonResponse(response, 201, await dispatcher.mintBreakGlass(
+            requiredString(postBody, "dispatchId"),
+            dispatchActionContext(request, {
+              action: requiredString(postBody, "action"),
+              targetSha: requiredString(postBody, "targetSha"),
+              forcedBy: requiredString(postBody, "forcedBy"),
+              reason: requiredString(postBody, "reason"),
+              dispositionRef: requiredString(postBody, "dispositionRef"),
+            }),
+          ));
+        } catch (error) {
+          throw dispatchHttpError(error);
+        }
+        return;
+      }
+
       if (request.method === "GET" && path === "/api/logs") {
         // Bounded by construction: normalizeLogQuery rejects a limit above
         // MAX_LOG_LIMIT and defaults to 200, so no filter combination can ask
@@ -1082,8 +1107,8 @@ export function createServer({
         );
         if (requestActor(request) === "mcp" && restricted.length > 0) {
           throw new HttpError(
-            403,
-            `MCP cannot change gate-critical settings (${restricted.join(", ")}); use human/UI authority`,
+            409,
+            `MCP cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
           );
         }
         const before = { ...projectByName(registry, name) };
@@ -1497,6 +1522,7 @@ export function createServer({
             jsonResponse(response, 200, await dispatcher.reply(id, dispatchActionContext(request, {
               text,
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
               ...(postBody.acceptExecutionProfile !== undefined
                 ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
                 : {}),
@@ -1512,6 +1538,7 @@ export function createServer({
               action: requiredString(postBody, "action"),
               text: optionalString(postBody, "text"),
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
               ...(postBody.acceptExecutionProfile !== undefined
                 ? { acceptExecutionProfile: postBody.acceptExecutionProfile }
                 : {}),
@@ -1533,10 +1560,8 @@ export function createServer({
                 id,
                 dispatchActionContext(request, {
                   force: postBody.force,
-                  ...(postBody.forcedBy !== undefined ? { forcedBy: postBody.forcedBy } : {}),
-                  ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
-                  ...(postBody.dispositionRef !== undefined
-                    ? { dispositionRef: postBody.dispositionRef }
+                  ...(postBody.breakGlassToken !== undefined
+                    ? { breakGlassToken: postBody.breakGlassToken }
                     : {}),
                 }),
               ),
@@ -1569,6 +1594,7 @@ export function createServer({
           try {
             jsonResponse(response, 202, await dispatcher.review(id, dispatchActionContext(request, {
               ...(postBody.force !== undefined ? { force: postBody.force } : {}),
+              ...(postBody.reason !== undefined ? { reason: postBody.reason } : {}),
             })));
           } catch (error) {
             throw dispatchHttpError(error);

@@ -3965,7 +3965,12 @@ function renderDispatchRows(
         badge(`bake-off ${String(record.batchId).replace(/^bakeoff-/, "").slice(0, 8)}`, "bakeoff"),
       );
     }
-    if (record.merged) stateCell.append(badge("merged", "merged"));
+    if (record.merged) {
+      stateCell.append(badge(
+        record.merged.forcedBy ? "force-merged" : "merged",
+        record.merged.forcedBy ? "force-merged" : "merged",
+      ));
+    }
     if (record.dismissed) stateCell.append(badge("dismissed", "dismissed"));
     if (record.reviewOf) stateCell.append(badge("read-only review", "review-audit"));
     const current = currentReview(record.review);
@@ -4817,7 +4822,11 @@ function renderMergedStatus(container, record) {
   if (!record.merged) return;
   const card = element("section", "summary-card merged-card");
   const heading = element("div", "merged-heading");
-  heading.append(element("h2", "", "Merged"), badge("merged", "merged"));
+  const forced = Boolean(record.merged.forcedBy);
+  heading.append(
+    element("h2", "", forced ? "Force merged" : "Merged"),
+    badge(forced ? "force-merged" : "merged", forced ? "force-merged" : "merged"),
+  );
   const facts = element("div", "merged-facts");
   facts.append(
     element("code", "merged-commit", record.merged.commit || "unknown commit"),
@@ -4862,6 +4871,14 @@ function openForceMergeConfirmation(record, reasons, onConfirm) {
   const list = element("ul", "warning-list force-merge-gates");
   for (const reason of reasons) list.append(element("li", "", reason));
   body.append(list);
+  const targetSha = String(record.branchHead || record.result?.commit || "");
+  const target = element(
+    "p",
+    "detail-copy force-merge-target",
+    `Authorizing exact target ${targetSha ? targetSha.slice(0, 12) : "unavailable"}.`,
+  );
+  target.title = targetSha;
+  body.append(target);
   const forcedBy = document.createElement("input");
   forcedBy.type = "text";
   forcedBy.required = true;
@@ -4886,26 +4903,38 @@ function openForceMergeConfirmation(record, reasons, onConfirm) {
     ),
   );
   const actions = element("div", "modal-actions");
+  const failure = element("p", "form-error");
+  failure.hidden = true;
   const cancel = button("Cancel");
   const confirm = button("Force merge", "button danger");
   const updateConfirm = () => {
-    confirm.disabled = !forcedBy.value.trim() || !reason.value.trim() || !dispositionRef.value.trim();
+    confirm.disabled = !targetSha || !forcedBy.value.trim() || !reason.value.trim() ||
+      !dispositionRef.value.trim();
   };
   for (const control of [forcedBy, reason, dispositionRef]) {
     control.addEventListener("input", updateConfirm);
   }
   updateConfirm();
   cancel.addEventListener("click", closeModal);
-  confirm.addEventListener("click", () => {
-    closeModal();
-    void onConfirm({
-      forcedBy: forcedBy.value.trim(),
-      reason: reason.value.trim(),
-      dispositionRef: dispositionRef.value.trim(),
-    });
+  confirm.addEventListener("click", async () => {
+    confirm.disabled = true;
+    failure.hidden = true;
+    try {
+      await onConfirm({
+        targetSha,
+        forcedBy: forcedBy.value.trim(),
+        reason: reason.value.trim(),
+        dispositionRef: dispositionRef.value.trim(),
+      });
+      closeModal();
+    } catch (error) {
+      failure.textContent = error.message;
+      failure.hidden = false;
+      updateConfirm();
+    }
   });
   actions.append(cancel, confirm);
-  body.append(actions);
+  body.append(failure, actions);
 }
 
 function openDismissConfirmation(record, onConfirm) {
@@ -5056,7 +5085,10 @@ async function renderDispatch(route, token) {
   const verdict = badge("verify pending", "verification-verdict");
   const reviewBadge = badge("review pending", "review-verdict");
   const reviewAuditBadge = badge("read-only review", "review-audit");
-  const mergedBadge = badge("merged", "merged");
+  const mergedBadge = badge(
+    record.merged?.forcedBy ? "force-merged" : "merged",
+    record.merged?.forcedBy ? "force-merged" : "merged",
+  );
   const dismissedBadge = badge("dismissed", "dismissed");
   const projectRemovedBadge = badge("project removed", "project-removed");
   const convoyBadge = badge(`convoy ${record.batchSeq || ""}`.trim(), "convoy");
@@ -5353,6 +5385,8 @@ async function renderDispatch(route, token) {
       ? `Sibling ${bakeoffWinner.id} already merged - dismiss this attempt.`
       : "";
     mergedBadge.hidden = !record.merged;
+    mergedBadge.textContent = record.merged?.forcedBy ? "force-merged" : "merged";
+    mergedBadge.className = `badge ${record.merged?.forcedBy ? "force-merged" : "merged"}`;
     dismissedBadge.hidden = !record.dismissed;
     projectRemovedBadge.hidden = !record.projectRemoved;
     const dismissAction = dismissAvailability(record);
@@ -5471,16 +5505,27 @@ async function renderDispatch(route, token) {
     mergeInFlight = true;
     renderMergeControls();
     try {
+      let breakGlassToken;
+      if (force) {
+        const authorization = await api("/api/break-glass", {
+          method: "POST",
+          body: {
+            dispatchId: record.id,
+            action: "merge",
+            targetSha: forceAudit.targetSha ?? record.branchHead ?? record.result?.commit,
+            ...forceAudit,
+          },
+        });
+        breakGlassToken = authorization.token;
+      }
       record = await api(`/api/dispatch/${encoded(route.id)}/merge`, {
         method: "POST",
-        body: { force, ...forceAudit },
+        body: { force, ...(breakGlassToken ? { breakGlassToken } : {}) },
       });
       const existing = state.dispatches.find((candidate) => candidate.id === record.id);
       if (existing) Object.assign(existing, record);
       else state.dispatches.unshift(record);
       showToast(`merged ${(record.merged?.commit || "unknown").slice(0, 7)}`, "success");
-    } catch (error) {
-      showToast(error.message);
     } finally {
       mergeInFlight = false;
       updateRecordDisplay();
@@ -5705,7 +5750,9 @@ async function renderDispatch(route, token) {
   transcriptTab.addEventListener("click", () => selectTab("transcript"));
   diffTab.addEventListener("click", () => selectTab("diff"));
 
-  approveMerge.addEventListener("click", () => void mergeRecord(false));
+  approveMerge.addEventListener("click", () => {
+    void mergeRecord(false).catch((error) => showToast(error.message));
+  });
   forceMerge.addEventListener("click", () => {
     const project = state.projects.find((candidate) => candidate.name === record.project);
     openForceMergeConfirmation(

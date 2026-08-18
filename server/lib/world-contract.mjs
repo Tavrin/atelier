@@ -205,7 +205,7 @@ function changesGate(record) {
   if (changes !== undefined && changes !== null) return "unknown";
   if (record?.state === "completed_empty") return "empty";
   if (record?.readOnly === true || record?.reviewOf) return "skipped";
-  if (record?.merged) return "passed";
+  if (record?.merged && !record.merged.forcedBy) return "passed";
   const verify = verifyVerdict(record);
   if (verify && verify !== "skipped") return "passed";
   if (CHANGES_PENDING_STATES.has(record?.state)) return "pending";
@@ -222,7 +222,7 @@ function verifyGate(record) {
   if (record?.verifyRequested === false || record?.readOnly === true || record?.reviewOf) {
     return "skipped";
   }
-  if (record?.merged) return "skipped";
+  if (record?.merged && !record.merged.forcedBy) return "skipped";
   return "not-run";
 }
 
@@ -231,6 +231,7 @@ function reviewGate(record) {
 }
 
 function mergeGate(record) {
+  if (record?.merged?.forcedBy) return "bypassed";
   if (record?.merged) return "passed";
   if (record?.dismissed) return "skipped";
   if (record?.state === "completed" && !record?.reviewOf && record?.readOnly !== true) {
@@ -257,7 +258,7 @@ function mainGate(record) {
 
 // The one five-gate projection used by every public record. Each gate reports
 // its own observed verdict; a forced merge can therefore show failed verify or
-// review gates alongside a passed merge gate without rewriting history.
+// review gates alongside a bypassed merge gate without rewriting history.
 export function gatesFor(record) {
   const mergeAudit = record?.merged &&
     typeof record.merged.forcedBy === "string" &&
@@ -267,6 +268,10 @@ export function gatesFor(record) {
         forcedBy: record.merged.forcedBy,
         reason: record.merged.reason,
         dispositionRef: record.merged.dispositionRef,
+        targetSha: record.merged.targetSha,
+        tokenId: record.merged.tokenId,
+        mintedAt: record.merged.mintedAt,
+        consumedAt: record.merged.consumedAt,
       }
     : undefined;
   return [

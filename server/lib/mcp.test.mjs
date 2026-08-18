@@ -196,7 +196,7 @@ test("atelier_settings_patch round-trips queueFailureLimit (atelier-def: schema 
   assert.match(responses[3].error.message, /fields\.queueFailureLimit must be at least 1/);
 });
 
-test("atelier_settings_patch exposes and validates the per-project review policy", async () => {
+test("atelier_settings_patch excludes gate-critical policy fields from automation", async () => {
   const requests = [];
   const responses = await exchange(handshake(
     toolCall(2, "atelier_settings_patch", {
@@ -205,7 +205,11 @@ test("atelier_settings_patch exposes and validates the per-project review policy
     }),
     toolCall(3, "atelier_settings_patch", {
       project: "atelier",
-      fields: { reviewPolicy: "permissive" },
+      fields: { requireReview: false },
+    }),
+    toolCall(4, "atelier_settings_patch", {
+      project: "atelier",
+      fields: { verifyCommands: ["node --test"] },
     }),
   ), async (url, options) => {
     requests.push({ url, options });
@@ -215,11 +219,11 @@ test("atelier_settings_patch exposes and validates the per-project review policy
     });
   });
 
-  assert.equal(requests.length, 1);
-  assert.deepEqual(JSON.parse(requests[0].options.body), { reviewPolicy: "tiered" });
-  assert.equal(responses[1].result.isError, false);
-  assert.equal(responses[2].error.code, -32602);
-  assert.match(responses[2].error.message, /fields\.reviewPolicy must be one of/);
+  assert.equal(requests.length, 0);
+  for (const response of responses.slice(1)) {
+    assert.equal(response.error.code, -32602);
+    assert.match(response.error.message, /Unknown argument field: fields\.(?:reviewPolicy|requireReview|verifyCommands)/);
+  }
 });
 
 test("parity tools proxy chronicle, ticket action, bake-off, main-health, agents, and diff routes", async () => {

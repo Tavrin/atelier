@@ -1628,6 +1628,12 @@ select:focus {
   color: var(--success);
 }
 
+.badge.force-merged {
+  border-color: color-mix(in srgb, var(--warning), var(--line) 38%);
+  background: color-mix(in srgb, var(--warning), transparent 84%);
+  color: var(--warning);
+}
+
 .badge.dismissed {
   border-color: color-mix(in srgb, var(--muted), var(--line) 45%);
   background: color-mix(in srgb, var(--muted), transparent 92%);

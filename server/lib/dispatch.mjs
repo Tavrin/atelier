@@ -67,6 +67,11 @@ import {
 import { gitConfigCountSupported } from "./execution/environment-policy.mjs";
 import { acquireInstanceLock, liveInstanceOwner } from "./instance-lock.mjs";
 import {
+  BREAK_GLASS_TTL_MS,
+  createBreakGlassTokenAuthority,
+} from "./auth.mjs";
+import { createEventLog } from "./event-log.mjs";
+import {
   normalizeLine,
   questionShapedText,
   questionTail,
@@ -1578,6 +1583,8 @@ export function createDispatcher({
   // built without one behaves identically, which is what makes "logging on" vs
   // "logging off" a testable equivalence rather than a hope.
   eventLog,
+  breakGlassNow = Date.now,
+  breakGlassTtlMs = BREAK_GLASS_TTL_MS,
   postMergeShutdownGraceMs = POST_MERGE_SHUTDOWN_GRACE_MS,
   codexReapEscalationMs = CODEX_REAP_ESCALATION_MS,
   sweepCodexProcessesAtBoot = true,
@@ -1615,6 +1622,7 @@ export function createDispatcher({
   const indexPath = join(dispatchDir, "index.jsonl");
   const queuePath = join(stateDir, "queue.json");
   const convoysPath = join(stateDir, "convoys.json");
+  const breakGlassDir = join(stateDir, "break-glass");
   const queuePersistenceFailures = new Set();
   const convoyPersistenceFailures = new Set();
   let queueWritePending = false;
@@ -1622,6 +1630,19 @@ export function createDispatcher({
   const pendingRecordEntries = new Set();
   const pendingEventWrites = new Map();
   const malformedTailWarnings = new Set();
+  let breakGlassAuthority;
+  let fallbackSecurityEventLog;
+
+  function tokenAuthority() {
+    breakGlassAuthority ??= createBreakGlassTokenAuthority({ directory: stateDir });
+    return breakGlassAuthority;
+  }
+
+  function securityEventLog() {
+    if (typeof eventLog?.appendDurable === "function") return eventLog;
+    fallbackSecurityEventLog ??= createEventLog({ stateDir });
+    return fallbackSecurityEventLog;
+  }
 
   function preserveCorruptState(path, raw, target, failures) {
     const timestamp = new Date().toISOString().replaceAll(":", "-");
@@ -6045,6 +6066,11 @@ export function createDispatcher({
         finalizedAt: new Date().toISOString(),
         version: previousVersion,
       };
+      // The break-glass UI must name the exact commit it offers to authorize,
+      // including when verification later fails. Result finalization has just
+      // derived this HEAD from the live dispatch worktree; mint re-derives it
+      // again and rejects any movement after this snapshot.
+      entry.record.branchHead = finalized.resultCommit;
       persist(entry);
     } catch (error) {
       if (TERMINAL_STATES.has(entry.record.state)) return;
@@ -7710,8 +7736,17 @@ export function createDispatcher({
     };
   }
 
-  async function review(id, { force = false, actor } = {}, orchestration = {}) {
+  function validatedOverrideReason(force, reason) {
+    if (reason !== undefined && force !== true) {
+      throw dispatcherError(400, "reason requires force=true");
+    }
+    if (reason === undefined) return null;
+    return redactText(boundedRequiredText(reason, "reason", REVIEW_DISPOSITION_NOTE_LIMIT));
+  }
+
+  async function review(id, { force = false, reason, actor } = {}, orchestration = {}) {
     if (typeof force !== "boolean") throw dispatcherError(400, "force must be a boolean");
+    const forceReason = validatedOverrideReason(force, reason);
     const previous = reviewCreationTails.get(id) ?? Promise.resolve();
     const run = previous.then(async () => {
       const releaseLifecycle = reserveDispatchLifecycle(id, "review");
@@ -7720,7 +7755,7 @@ export function createDispatcher({
         const target = entries.get(id);
         if (!target) throw dispatcherError(404, `Unknown dispatch: ${id}`);
         if (orchestration.queueDrain && !(await automaticReviewEligible(target))) return undefined;
-        return await reviewUnlocked(id, { force, actor }, orchestration);
+        return await reviewUnlocked(id, { force, forceReason, actor }, orchestration);
       } finally {
         releaseLifecycle();
       }
@@ -7737,7 +7772,11 @@ export function createDispatcher({
     }
   }
 
-  async function reviewUnlocked(id, { force = false, actor } = {}, orchestration = {}) {
+  async function reviewUnlocked(
+    id,
+    { force = false, forceReason = null, actor } = {},
+    orchestration = {},
+  ) {
     if (typeof force !== "boolean") throw dispatcherError(400, "force must be a boolean");
     mergePersistedEntries();
     const target = entries.get(id);
@@ -7862,6 +7901,16 @@ ${diff}`;
       }
       throw error;
     }
+    logEvent("dispatch.review", {
+      actor: actionActor(actor),
+      project: currentRecord.project,
+      dispatchId: currentRecord.id,
+      ticketId: currentRecord.ticketId ?? null,
+      reviewDispatchId: created.id,
+      phase: "started",
+      forced: force === true,
+      ...(force === true ? { reason: forceReason } : {}),
+    });
     return exposedRecord(entries.get(created.id).record);
   }
 
@@ -8480,7 +8529,7 @@ ${diff}`;
     }
   }
 
-  async function reply(id, { text, force, acceptExecutionProfile, actor } = {}) {
+  async function reply(id, { text, force, reason, acceptExecutionProfile, actor } = {}) {
     if (typeof text !== "string" || !text.trim()) {
       throw dispatcherError(400, "text must be a non-empty string");
     }
@@ -8491,12 +8540,16 @@ ${diff}`;
     if (force !== undefined && typeof force !== "boolean") {
       throw dispatcherError(400, "force must be a boolean");
     }
+    const forceReason = validatedOverrideReason(force === true, reason);
     if (acceptExecutionProfile !== undefined && typeof acceptExecutionProfile !== "boolean") {
       throw dispatcherError(400, "acceptExecutionProfile must be a boolean");
     }
     const releaseLifecycle = reserveDispatchLifecycle(id, "reply");
     try {
-      return await replyUnlocked(id, { replyText, force, acceptExecutionProfile, actor });
+      return await replyUnlocked(
+        id,
+        { replyText, force, forceReason, acceptExecutionProfile, actor },
+      );
     } finally {
       releaseLifecycle();
     }
@@ -8504,7 +8557,7 @@ ${diff}`;
 
   async function replyUnlocked(
     id,
-    { replyText, force, acceptExecutionProfile, actor } = {},
+    { replyText, force, forceReason, acceptExecutionProfile, actor } = {},
   ) {
     mergePersistedEntries();
     let entry = entries.get(id);
@@ -8621,6 +8674,7 @@ ${diff}`;
         ticketId: entry.record.ticketId ?? null,
         mode: "live",
         forced: force === true,
+        ...(force === true ? { reason: forceReason } : {}),
       });
       return exposedRecord(entry.record);
     }
@@ -8765,6 +8819,7 @@ ${diff}`;
         ticketId: entry.record.ticketId ?? null,
         mode: "resume",
         forced: force === true,
+        ...(force === true ? { reason: forceReason } : {}),
       });
       if (entry.record.state !== "resuming") {
         // Hijacked by a concurrent stop/dismiss, or transition() redirected
@@ -8819,7 +8874,7 @@ ${diff}`;
     }
   }
 
-  async function plan(id, { action, text, force, acceptExecutionProfile, actor } = {}) {
+  async function plan(id, { action, text, force, reason, acceptExecutionProfile, actor } = {}) {
     if (!new Set(["approve", "revise"]).has(action)) {
       throw dispatcherError(400, "action must be approve or revise");
     }
@@ -8835,6 +8890,7 @@ ${diff}`;
     if (force !== undefined && typeof force !== "boolean") {
       throw dispatcherError(400, "force must be a boolean");
     }
+    const forceReason = validatedOverrideReason(force === true, reason);
     if (acceptExecutionProfile !== undefined && typeof acceptExecutionProfile !== "boolean") {
       throw dispatcherError(400, "acceptExecutionProfile must be a boolean");
     }
@@ -8943,6 +8999,7 @@ ${diff}`;
         ticketId: entry.record.ticketId ?? null,
         action,
         forced: force === true,
+        ...(force === true ? { reason: forceReason } : {}),
       });
       if (entry.record.state !== "resuming") {
         // transition() redirected this to "failed" because a drain lease
@@ -9916,33 +9973,264 @@ ${diff}`;
     return result;
   }
 
-  async function merge(id, {
-    force = false,
-    actor,
+  function breakGlassStorePath(tokenId) {
+    return join(breakGlassDir, `${tokenId}.json`);
+  }
+
+  function durableBreakGlassEvent(payload) {
+    try {
+      return securityEventLog().appendDurable("dispatch.break-glass", payload);
+    } catch (error) {
+      throw dispatcherError(
+        503,
+        `break-glass audit event could not be persisted: ${error?.message ?? error}`,
+      );
+    }
+  }
+
+  function assertForceMergeEligible(entry, project, { allowMerged = false } = {}) {
+    const { record } = entry;
+    if (movingTrackers.has(project.name)) {
+      throw dispatcherError(409, `Project ${project.name} tracker is moving`);
+    }
+    if (record.dismissed) {
+      throw dispatcherError(409, "dismiss gate failed: dispatch is already dismissed");
+    }
+    if (record.state === "resuming") throw dispatcherError(409, "dispatch is resuming");
+    if (record.state !== "completed") {
+      throw dispatcherError(409, "state gate failed: dispatch must be completed");
+    }
+    if (record.merged && !allowMerged) {
+      throw dispatcherError(409, "merge gate failed: dispatch is already merged");
+    }
+    if (project.archetype === "tracker-only") {
+      throw dispatcherError(409, "Merge unavailable: tracker-only project");
+    }
+    if (record.reviewOf) {
+      throw dispatcherError(409, "review dispatches are read-only audit records and cannot be merged");
+    }
+    if (!project.mainBranch) {
+      throw dispatcherError(409, "main branch gate failed: project.mainBranch is not configured");
+    }
+    if (!record.branch) throw dispatcherError(409, "branch gate failed: dispatch has no branch");
+    assertWorkspaceIdentityExcluded(record.result?.manifest);
+    if (record.batchKind === "bakeoff") {
+      const winner = [...entries.values()].find(
+        (candidate) =>
+          candidate.record.id !== record.id &&
+          candidate.record.batchKind === "bakeoff" &&
+          candidate.record.batchId === record.batchId &&
+          candidate.record.merged,
+      );
+      if (winner) {
+        throw dispatcherError(
+          409,
+          `sibling ${winner.record.id} already merged - dismiss this attempt`,
+        );
+      }
+    }
+    retryPendingPersistence();
+    if (persistenceDegraded(entry)) {
+      throw dispatcherError(
+        409,
+        `persistence degradation gate failed: ${persistenceFailureTargets(entry).join(", ")}`,
+      );
+    }
+  }
+
+  async function deriveBranchHead(entry, project) {
+    let branchHead;
+    try {
+      branchHead = (
+        await commandRunner("git", [
+          "-C",
+          project.path,
+          "rev-parse",
+          "--verify",
+          entry.record.branch,
+        ])
+      ).trim();
+    } catch (error) {
+      throw dispatcherError(409, `branch gate failed: ${error.message}`);
+    }
+    if (entry.record.branchHead !== branchHead) {
+      entry.record.branchHead = branchHead;
+      if (!persist(entry)) {
+        throw dispatcherError(503, "fresh branch HEAD could not be persisted");
+      }
+    }
+    return branchHead;
+  }
+
+  async function mintBreakGlass(id, {
+    action,
+    targetSha,
     forcedBy,
     reason,
     dispositionRef,
+    actor,
+  } = {}) {
+    if (actor !== "human-ui") {
+      throw dispatcherError(
+        409,
+        "Break-glass authorization requires a fresh human web session action; bearer actors cannot mint it",
+      );
+    }
+    if (dispatchLifecycleReservations.has(id)) {
+      // Reuse the lifecycle gate's exact refusal vocabulary without creating
+      // a second reservation. reserveDispatchLifecycle throws while occupied.
+      reserveDispatchLifecycle(id, "merge");
+    }
+    if (action !== "merge") throw dispatcherError(400, "action must be merge");
+    const authorizedTarget = boundedRequiredText(targetSha, "targetSha", 64);
+    const audit = {
+      forcedBy: redactText(
+        boundedRequiredText(forcedBy, "forcedBy", REVIEW_DISPOSITION_ACTOR_LIMIT),
+      ),
+      reason: redactText(
+        boundedRequiredText(reason, "reason", REVIEW_DISPOSITION_NOTE_LIMIT),
+      ),
+      dispositionRef: redactText(
+        boundedRequiredText(
+          dispositionRef,
+          "dispositionRef",
+          REVIEW_DISPOSITION_REF_LIMIT,
+        ),
+      ),
+    };
+    mergePersistedEntries();
+    const entry = entries.get(id);
+    if (!entry) throw dispatcherError(404, `Unknown dispatch: ${id}`);
+    const project = registry.projects.find(
+      (candidate) => candidate.name === entry.record.project,
+    );
+    if (!project) throw dispatcherError(404, `Project removed: ${entry.record.project}`);
+    assertForceMergeEligible(entry, project);
+    const branchHead = await deriveBranchHead(entry, project);
+    if (authorizedTarget !== branchHead) {
+      throw dispatcherError(
+        409,
+        `EATELIER_BREAK_GLASS_INVALID: target SHA mismatch (requested ${authorizedTarget}, current ${branchHead})`,
+      );
+    }
+
+    const { token, tokenId } = tokenAuthority().mint();
+    const mintedAtMs = breakGlassNow();
+    const mintedAt = new Date(mintedAtMs).toISOString();
+    const expiresAt = new Date(mintedAtMs + breakGlassTtlMs).toISOString();
+    const override = {
+      tokenId,
+      dispatchId: id,
+      action,
+      targetSha: branchHead,
+      ...audit,
+      mintedAt,
+      expiresAt,
+      consumedAt: null,
+    };
+    try {
+      mkdirSync(breakGlassDir, { recursive: true });
+      writeFileAtomic(breakGlassStorePath(tokenId), `${JSON.stringify(override)}\n`, {
+        mode: 0o600,
+        fileOps: persistenceFileOps,
+      });
+    } catch (error) {
+      throw dispatcherError(
+        503,
+        `break-glass authorization could not be persisted: ${error?.message ?? error}`,
+      );
+    }
+    durableBreakGlassEvent({
+      actor,
+      project: entry.record.project,
+      ticketId: entry.record.ticketId ?? null,
+      phase: "minted",
+      ...override,
+    });
+    return { token, expiresAt };
+  }
+
+  function invalidBreakGlass(cause) {
+    return dispatcherError(409, `EATELIER_BREAK_GLASS_INVALID: ${cause}`);
+  }
+
+  async function consumeBreakGlass(entry, project, token, actor) {
+    const tokenId = tokenAuthority().verify(token);
+    if (!tokenId) throw invalidBreakGlass("signature is invalid");
+    let override;
+    try {
+      override = JSON.parse(readFileNoFollowSync(breakGlassStorePath(tokenId), "utf8", {
+        fileOps: persistenceFileOps,
+      }));
+    } catch (error) {
+      if (error?.code === "ENOENT") throw invalidBreakGlass("authorization is unknown");
+      throw invalidBreakGlass(`authorization store is unreadable: ${error?.message ?? error}`);
+    }
+    if (override?.tokenId !== tokenId) throw invalidBreakGlass("token identifier does not match");
+    if (override.dispatchId !== entry.record.id) {
+      throw invalidBreakGlass("authorization is bound to a different dispatch");
+    }
+    if (override.action !== "merge") {
+      throw invalidBreakGlass("authorization is bound to a different action");
+    }
+    if (override.consumedAt !== null) throw invalidBreakGlass("authorization was already consumed");
+    const expiresAtMs = Date.parse(override.expiresAt);
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= breakGlassNow()) {
+      throw invalidBreakGlass("authorization expired");
+    }
+    const branchHead = await deriveBranchHead(entry, project);
+    if (override.targetSha !== branchHead) {
+      throw invalidBreakGlass(
+        `branch moved (authorized ${override.targetSha}, current ${branchHead})`,
+      );
+    }
+    const consumedAt = new Date(breakGlassNow()).toISOString();
+    const consumed = { ...override, consumedAt };
+    try {
+      writeFileAtomic(breakGlassStorePath(tokenId), `${JSON.stringify(consumed)}\n`, {
+        mode: 0o600,
+        fileOps: persistenceFileOps,
+      });
+    } catch (error) {
+      throw dispatcherError(
+        503,
+        `break-glass consumption could not be persisted: ${error?.message ?? error}`,
+      );
+    }
+    durableBreakGlassEvent({
+      actor: actionActor(actor),
+      project: entry.record.project,
+      ticketId: entry.record.ticketId ?? null,
+      phase: "consumed",
+      ...consumed,
+    });
+    return {
+      forcedBy: consumed.forcedBy,
+      reason: consumed.reason,
+      dispositionRef: consumed.dispositionRef,
+      targetSha: consumed.targetSha,
+      tokenId: consumed.tokenId,
+      mintedAt: consumed.mintedAt,
+      consumedAt,
+    };
+  }
+
+  async function merge(id, {
+    force = false,
+    actor,
+    breakGlassToken,
   } = {}) {
     if (typeof force !== "boolean") {
       throw dispatcherError(400, "force must be a boolean");
     }
-    let forceAudit;
-    if (force) {
-      forceAudit = {
-        forcedBy: redactText(
-          boundedRequiredText(forcedBy, "forcedBy", REVIEW_DISPOSITION_ACTOR_LIMIT),
-        ),
-        reason: redactText(boundedRequiredText(reason, "reason", REVIEW_DISPOSITION_NOTE_LIMIT)),
-        dispositionRef: redactText(
-          boundedRequiredText(
-            dispositionRef,
-            "dispositionRef",
-            REVIEW_DISPOSITION_REF_LIMIT,
-          ),
-        ),
-      };
-    } else if ([forcedBy, reason, dispositionRef].some((value) => value !== undefined)) {
-      throw dispatcherError(400, "forcedBy, reason, and dispositionRef require force=true");
+    if (force && (typeof breakGlassToken !== "string" || !breakGlassToken)) {
+      throw dispatcherError(
+        409,
+        "EATELIER_BREAK_GLASS_REQUIRED: force merge requires a token minted by POST /api/break-glass in the web UI",
+      );
+    }
+    if (!force && breakGlassToken !== undefined) {
+      throw dispatcherError(400, "breakGlassToken requires force=true");
     }
     mergePersistedEntries();
     const entry = entries.get(id);
@@ -9969,6 +10257,21 @@ ${diff}`;
       }
       if (reservedEntry.record.state !== "completed") {
         throw dispatcherError(409, "state gate failed: dispatch must be completed");
+      }
+      let forceAudit;
+      if (force) {
+        // Let token validation see an already-consumed authorization before the
+        // ordinary duplicate-merge gate. This keeps replay refusal explicit.
+        assertForceMergeEligible(reservedEntry, project, { allowMerged: true });
+        forceAudit = await consumeBreakGlass(
+          reservedEntry,
+          project,
+          breakGlassToken,
+          reservedEntry.actionActor,
+        );
+        if (reservedEntry.record.merged) {
+          throw invalidBreakGlass("dispatch is already merged");
+        }
       }
       // A persisted terminal record becomes live as soon as merge owns its
       // lifecycle. Background history refreshes must not replace the object
@@ -10144,6 +10447,11 @@ ${diff}`;
     if (record.branchHead !== branchHead) {
       record.branchHead = branchHead;
       persist(entry);
+    }
+    if (force && forceAudit?.targetSha !== branchHead) {
+      throw invalidBreakGlass(
+        `branch moved after consumption (authorized ${forceAudit?.targetSha || "missing"}, current ${branchHead})`,
+      );
     }
     if (!force && !record.result?.commit) {
       throw dispatcherError(
@@ -10801,7 +11109,7 @@ ${diff}`;
       detail: `merged ${commit.slice(0, 7)}`,
       ...(recovered ? { recovered: true } : {}),
     });
-    logEvent("dispatch.merge", {
+    const mergeEvent = {
       actor: actionActor(actor),
       project: record.project,
       dispatchId: record.id,
@@ -10816,10 +11124,22 @@ ${diff}`;
             forcedBy: record.merged.forcedBy,
             reason: record.merged.reason,
             dispositionRef: record.merged.dispositionRef,
+            targetSha: record.merged.targetSha,
+            tokenId: record.merged.tokenId,
+            mintedAt: record.merged.mintedAt,
+            consumedAt: record.merged.consumedAt,
           }
         : {}),
       ...(recovered ? { recovered: true } : {}),
-    });
+    };
+    try {
+      securityEventLog().appendDurable("dispatch.merge", mergeEvent);
+    } catch (error) {
+      throw dispatcherError(
+        503,
+        `merge audit event could not be persisted: ${error?.message ?? error}`,
+      );
+    }
   }
 
   async function reconcileMergeIntent(entry, project) {
@@ -12238,7 +12558,10 @@ ${diff}`;
           new Promise((resolvePromise) => setTimeout(resolvePromise, remainingMs)),
         ]);
       }
-    })().finally(() => ownedInstanceLock?.release());
+    })().finally(() => {
+      fallbackSecurityEventLog?.shutdown();
+      ownedInstanceLock?.release();
+    });
     return shutdownPromise;
   }
 
@@ -12279,6 +12602,7 @@ ${diff}`;
     stop,
     dismiss,
     gc,
+    mintBreakGlass,
     merge,
     getMainHealth,
     acknowledgePostMergeFailure,

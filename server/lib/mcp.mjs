@@ -18,14 +18,11 @@ const PACKAGE_JSON = JSON.parse(
 );
 export const MUTABLE_SETTINGS = [
   "notes",
-  "verifyCommands",
   "warn",
   "dispatchProfile",
   "defaultAgent",
   "autoCommitTracker",
   "autoCloseOnMerge",
-  "requireReview",
-  "reviewPolicy",
   "maxFixRounds",
   "budgetUSDPerDay",
   "queueFailureLimit",
@@ -88,18 +85,11 @@ const nullablePositiveBudget = {
 const settingsFieldsSchema = {
   ...objectSchema({
     notes: { type: "string", description: "Human project context." },
-    verifyCommands: stringArrayProperty("Verification commands."),
     warn: { type: "string", description: "Agent warning text." },
     dispatchProfile: dispatchProfileSchema,
     defaultAgent: stringProperty("Registered default agent lane."),
     autoCommitTracker: booleanProperty("Auto-commit Atelier tracker mutations."),
     autoCloseOnMerge: booleanProperty("Close the tracker ticket after merge."),
-    requireReview: booleanProperty("Require a passing linked review before merge."),
-    reviewPolicy: {
-      type: "string",
-      enum: ["strict", "tiered", "advisory"],
-      description: "Review finding merge policy; strict is the default.",
-    },
     maxFixRounds: {
       type: ["integer", "null"],
       minimum: 1,

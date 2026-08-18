@@ -393,6 +393,12 @@
   border-color: var(--cv-ink);
 }
 
+.cv-gate[data-state="bypassed"] {
+  border-style: double;
+  border-color: var(--cv-lamp);
+  background: color-mix(in srgb, var(--cv-lamp), transparent 84%);
+}
+
 .cv-gate[data-state="pending"]::after {
   content: "";
   position: absolute;

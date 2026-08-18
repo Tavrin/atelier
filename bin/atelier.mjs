@@ -46,6 +46,7 @@ function usage() {
     "  atelier dispatch <project> (<ticketId>|--prompt \"...\") [--model X] [--effort low|medium|high|xhigh|max] [--lane codex] [--follow]",
     "  atelier reply <dispatchId> <text...> [--follow] [--accept-execution-profile]",
     "  atelier plan <dispatchId> (--approve | --revise \"text\") [--accept-execution-profile]",
+    "  atelier merge <dispatchId> [--force]",
     "  atelier logs [--follow] [--kind K[,K]] [--project NAME] [--dispatch ID] [--ticket ID] [--actor A] [--since ISO] [--limit N]",
     "  atelier doctor [--install-service | --gc [--older-than-days N] [--offline-maintenance] | --safe-restart [--port N]] [--dry-run]",
   ].join("\n");
@@ -411,6 +412,15 @@ async function plan(args) {
   console.log(JSON.stringify(await dispatcher.plan(dispatchId, body)));
 }
 
+async function merge(args) {
+  const { values, positionals } = parseOptions(args, new Set(), new Set(["force"]));
+  if (positionals.length !== 1) throw new Error("merge requires exactly one dispatch id");
+  const record = await serverDispatcher().merge(positionals[0], {
+    ...(values.force ? { force: true } : {}),
+  });
+  console.log(JSON.stringify(record));
+}
+
 const LOG_FOLLOW_INTERVAL_MS = 500;
 
 function printLogEvent(event) {
@@ -710,6 +720,7 @@ async function main() {
   if (command === "dispatch") return dispatch(args);
   if (command === "reply") return reply(args);
   if (command === "plan") return plan(args);
+  if (command === "merge") return merge(args);
   if (command === "logs") return logs(args);
   if (command === "doctor") return doctor(args);
   throw new Error(`Unknown command: ${command}\n${usage()}`);

@@ -41,6 +41,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { appendDurable as appendFileDurable } from "./fs-integrity.mjs";
 import { redactValue } from "./stream.mjs";
 
 export const EVENT_LOG_SCHEMA_VERSION = 1;
@@ -555,6 +556,55 @@ export function createEventLog({
   }
 
   /**
+   * Append one security-critical event synchronously and fsync the exact file
+   * descriptor that received it. Unlike `append`, this method deliberately
+   * throws: callers use it only where execution must fail closed if the audit
+   * record cannot be made durable.
+   */
+  function appendDurable(kind, payload = {}, options = {}) {
+    if (closed) throw new Error("Atelier event log is closed");
+    if (!flush()) throw new Error("Atelier event log is degraded");
+    const boundedPayload = bounded(payload ?? {});
+    const safePayload =
+      boundedPayload && typeof boundedPayload === "object" && !Array.isArray(boundedPayload)
+        ? redactValue(boundedPayload)
+        : {};
+    // The break-glass token id is an audit correlation handle, not the signed
+    // bearer token. Preserve that exact non-authorizing handle even though the
+    // general redactor conservatively treats every token-shaped key as secret.
+    if (
+      ["dispatch.break-glass", "dispatch.merge"].includes(kind) &&
+      typeof boundedPayload?.tokenId === "string" &&
+      /^[A-Za-z0-9_-]{43}$/.test(boundedPayload.tokenId)
+    ) {
+      safePayload.tokenId = boundedPayload.tokenId;
+    }
+    for (const field of RESERVED_FIELDS) delete safePayload[field];
+    const serialized = serialize({
+      v: EVENT_LOG_SCHEMA_VERSION,
+      ts: new Date(now()).toISOString(),
+      seq: (seq += 1),
+      source: normalizeSource(options.source),
+      kind: String(kind),
+      ...safePayload,
+    });
+    ensureDirectory();
+    rotate(Buffer.byteLength(serialized.line));
+    appendFileDurable(path, serialized.line, {
+      fileOps: {
+        ...fileOps,
+        // event-log's established injection seam names this operation for its
+        // ordinary path; fs-integrity names the descriptor-level equivalent.
+        appendDescriptorSync: fileOps.appendFileSync,
+      },
+    });
+    repairBoundary = false;
+    warned = false;
+    notify([serialized.event]);
+    return serialized.event;
+  }
+
+  /**
    * Read the newest matching events with scan metadata. A byte cap bounds sparse
    * filters across retention; `truncated` tells callers the search did not reach
    * the oldest retained byte.
@@ -782,6 +832,7 @@ export function createEventLog({
   return Object.freeze({
     _flush: flush,
     append,
+    appendDurable,
     directory,
     onEvent,
     path,

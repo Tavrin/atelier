@@ -89,6 +89,7 @@ function dispatcherStub() {
   const reviews = [];
   const reviewDispositions = [];
   const merges = [];
+  const breakGlassMints = [];
   const verifyReruns = [];
   const verifyRerunOptions = [];
   const resumedQueueTickets = [];
@@ -119,6 +120,7 @@ function dispatcherStub() {
     _reviews: reviews,
     _reviewDispositions: reviewDispositions,
     _merges: merges,
+    _breakGlassMints: breakGlassMints,
     _verifyReruns: verifyReruns,
     _verifyRerunOptions: verifyRerunOptions,
     _resumedQueueTickets: resumedQueueTickets,
@@ -137,12 +139,13 @@ function dispatcherStub() {
       return { id: records[0].id };
     },
     stop: async () => ({ ...records[0], state: "stopped" }),
-    reply: async (id, { text, force, acceptExecutionProfile }) => {
+    reply: async (id, { text, force, reason, acceptExecutionProfile }) => {
       const record = records.find((candidate) => candidate.id === id);
       replies.push({
         id,
         text,
         ...(force !== undefined ? { force } : {}),
+        ...(reason !== undefined ? { reason } : {}),
         ...(acceptExecutionProfile !== undefined ? { acceptExecutionProfile } : {}),
       });
       return { ...record, state: "running", replyText: text };
@@ -211,6 +214,10 @@ function dispatcherStub() {
       const record = records.find((candidate) => candidate.id === id);
       record.dismissed = { at: "2026-07-21T12:30:00.000Z" };
       return record;
+    },
+    mintBreakGlass: async (id, options) => {
+      breakGlassMints.push({ id, ...options });
+      return { token: "minted-break-glass-token", expiresAt: "2026-07-21T12:10:00.000Z" };
     },
     merge: async (id, options) => {
       merges.push({ id, ...options });
@@ -613,6 +620,62 @@ test("MCP bearer cannot exercise server-side force authority", async (t) => {
   assert.match(JSON.parse(response.text).error, /human break-glass policy/);
   assert.doesNotMatch(JSON.parse(response.text).error, /accept-execution-profile/);
   assert.deepEqual(dispatcher._merges, []);
+});
+
+test("break-glass mint requires a browser session plus CSRF and rejects every bearer", async (t) => {
+  const { port, dispatcher } = await serverFixture(t);
+  const body = JSON.stringify({
+    dispatchId: "dispatch-1",
+    action: "merge",
+    targetSha: "validated-head",
+    forcedBy: "maintainer",
+    reason: "Emergency adjudication.",
+    dispositionRef: "ticket-comment-75",
+  });
+  for (const credential of ["api", "cli", "mcp"]) {
+    const rejected = await send(port, {
+      method: "POST",
+      path: "/api/break-glass",
+      body,
+      contentType: "application/json",
+      credential,
+    });
+    assert.equal(rejected.status, 409, credential);
+    assert.match(JSON.parse(rejected.text).error, /fresh human web session action/);
+  }
+
+  const session = await browserSession(port);
+  const noCsrf = await send(port, {
+    method: "POST",
+    path: "/api/break-glass",
+    body,
+    contentType: "application/json",
+    authenticated: false,
+    cookie: session.cookie,
+  });
+  assert.equal(noCsrf.status, 401);
+
+  const minted = await send(port, {
+    method: "POST",
+    path: "/api/break-glass",
+    body,
+    contentType: "application/json",
+    authenticated: false,
+    cookie: session.cookie,
+    csrf: session.csrf,
+    headers: { Origin: `http://127.0.0.1:${port}` },
+  });
+  assert.equal(minted.status, 201);
+  assert.equal(JSON.parse(minted.text).token, "minted-break-glass-token");
+  assert.deepEqual(dispatcher._breakGlassMints, [{
+    id: "dispatch-1",
+    action: "merge",
+    targetSha: "validated-head",
+    forcedBy: "maintainer",
+    reason: "Emergency adjudication.",
+    dispositionRef: "ticket-comment-75",
+    actor: "human-ui",
+  }]);
 });
 
 test("MCP bearer cannot exercise execution-profile acceptance", async (t) => {
@@ -2014,6 +2077,7 @@ test("project PATCH atomically updates only mutable settings and mutates the liv
 test("MCP credentials cannot change gate-critical settings but retain benign settings", async (t) => {
   const { port, registry } = await serverFixture(t);
   const gateFields = [
+    ["verifyCommands", ["node --test"]],
     ["requireReview", true],
     ["reviewPolicy", "tiered"],
     ["budgetUSDPerDay", 10],
@@ -2021,6 +2085,8 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
   ];
 
   for (const [field, value] of gateFields) {
+    const ownedBefore = Object.hasOwn(registry.projects[0], field);
+    const valueBefore = structuredClone(registry.projects[0][field]);
     const response = await send(port, {
       method: "PATCH",
       path: "/api/projects/tracked",
@@ -2028,9 +2094,10 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
       contentType: "application/json",
       credential: "mcp",
     });
-    assert.equal(response.status, 403, field);
-    assert.match(JSON.parse(response.text).error, /human\/UI authority/);
-    assert.equal(Object.hasOwn(registry.projects[0], field), false);
+    assert.equal(response.status, 409, field);
+    assert.match(JSON.parse(response.text).error, /human break-glass policy/);
+    assert.equal(Object.hasOwn(registry.projects[0], field), ownedBefore);
+    assert.deepEqual(registry.projects[0][field], valueBefore);
   }
 
   const benign = await send(port, {
@@ -2496,15 +2563,10 @@ test("unpriced dispatch cap errors preserve count metadata in 409 JSON", async (
 
 test("merge route forwards the optional force flag and returns the updated record", async (t) => {
   const { port, dispatcher } = await serverFixture(t);
-  const audit = {
-    forcedBy: "maintainer",
-    reason: "Human authority accepts the open finding.",
-    dispositionRef: "ticket-comment-75",
-  };
   const response = await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/merge",
-    body: JSON.stringify({ force: true, ...audit }),
+    body: JSON.stringify({ force: true, breakGlassToken: "minted-break-glass-token" }),
     contentType: "application/json",
   });
 
@@ -2515,7 +2577,7 @@ test("merge route forwards the optional force flag and returns the updated recor
   assert.deepEqual(dispatcher._merges, [{
     id: "dispatch-1",
     force: true,
-    ...audit,
+    breakGlassToken: "minted-break-glass-token",
     actor: "api",
   }]);
 });
@@ -2553,7 +2615,7 @@ test("review route creates a linked read-only dispatch and forwards force", asyn
   const response = await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/review",
-    body: JSON.stringify({ force: true }),
+    body: JSON.stringify({ force: true, reason: "review budget override" }),
     contentType: "application/json",
   });
 
@@ -2565,7 +2627,12 @@ test("review route creates a linked read-only dispatch and forwards force", asyn
     reviewOf: "dispatch-1",
     readOnly: true,
   });
-  assert.deepEqual(dispatcher._reviews, [{ id: "dispatch-1", force: true, actor: "api" }]);
+  assert.deepEqual(dispatcher._reviews, [{
+    id: "dispatch-1",
+    force: true,
+    reason: "review budget override",
+    actor: "api",
+  }]);
 });
 
 test("review disposition records only the authenticated credential identity", async (t) => {
@@ -2773,13 +2840,18 @@ test("reply route validates its text cap and delegates to the dispatcher", async
   await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/reply",
-    body: JSON.stringify({ text: "override budget", force: true }),
+    body: JSON.stringify({
+      text: "override budget",
+      force: true,
+      reason: "resume budget override",
+    }),
     contentType: "application/json",
   });
   assert.deepEqual(dispatcher._replies.at(-1), {
     id: "dispatch-1",
     text: "override budget",
     force: true,
+    reason: "resume budget override",
   });
 
   await send(port, {
@@ -2823,7 +2895,11 @@ test("plan route delegates approve and revise actions through the resume endpoin
   const forcedApprove = await send(port, {
     method: "POST",
     path: "/api/dispatch/dispatch-1/plan",
-    body: JSON.stringify({ action: "approve", force: true }),
+    body: JSON.stringify({
+      action: "approve",
+      force: true,
+      reason: "plan budget override",
+    }),
     contentType: "application/json",
   });
   const acceptedApprove = await send(port, {
@@ -2842,7 +2918,14 @@ test("plan route delegates approve and revise actions through the resume endpoin
   assert.deepEqual(dispatcher._plans, [
     { id: "dispatch-1", action: "approve", text: undefined, actor: "api" },
     { id: "dispatch-1", action: "revise", text: "cover rollback", actor: "api" },
-    { id: "dispatch-1", action: "approve", text: undefined, force: true, actor: "api" },
+    {
+      id: "dispatch-1",
+      action: "approve",
+      text: undefined,
+      force: true,
+      reason: "plan budget override",
+      actor: "api",
+    },
     {
       id: "dispatch-1",
       action: "approve",
@@ -3743,10 +3826,12 @@ test("dispatch UI gates normal merges and confirms force merges in-app", async (
   assert.match(availability.text, /a prior worker could not be confirmed dead/);
   assert.match(app.text, /openForceMergeConfirmation/);
   assert.match(app.text, /modalFrame\("Override merge gates"/);
-  assert.match(app.text, /body: \{ force, \.\.\.forceAudit \}/);
+  assert.match(app.text, /api\("\/api\/break-glass"/);
+  assert.match(app.text, /targetSha: forceAudit\.targetSha/);
+  assert.match(app.text, /body: \{ force, \.\.\.\(breakGlassToken/);
   assert.match(app.text, /forcedBy: forcedBy\.value\.trim\(\)/);
   assert.match(app.text, /dispositionRef: dispositionRef\.value\.trim\(\)/);
-  assert.match(app.text, /badge\("merged", "merged"\)/);
+  assert.match(app.text, /force-merged/);
   assert.match(app.text, /badge\("dismissed", "dismissed"\)/);
   assert.match(app.text, /openDismissConfirmation/);
   assert.match(app.text, /modalFrame\("Dispatch cleanup"/);

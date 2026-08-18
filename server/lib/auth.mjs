@@ -20,6 +20,7 @@ import { stateDir } from "./paths.mjs";
 export const AUTH_SECRET_FILE = "auth-secret";
 export const SESSION_COOKIE = "atelier_session";
 export const SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
+export const BREAK_GLASS_TTL_MS = 10 * 60 * 1_000;
 
 const TOKEN_PREFIX = "atelier-v1";
 const CLIENT_LABELS = new Set(["api", "cli", "mcp"]);
@@ -147,6 +148,33 @@ function verifySignedValue(secret, purpose, value) {
   return constantTimeEqual(supplied, signature(secret, purpose, payload))
     ? payload
     : undefined;
+}
+
+export function mintBreakGlassToken(secret) {
+  const tokenId = randomBytes(32).toString("base64url");
+  return {
+    tokenId,
+    token: signedValue(secret, "break-glass", tokenId),
+  };
+}
+
+export function verifyBreakGlassToken(secret, token) {
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/.test(token)) {
+    return undefined;
+  }
+  return verifySignedValue(secret, "break-glass", token);
+}
+
+export function createBreakGlassTokenAuthority({ directory } = {}) {
+  const secret = ensureAuthSecret(directory);
+  return Object.freeze({
+    mint() {
+      return mintBreakGlassToken(secret);
+    },
+    verify(token) {
+      return verifyBreakGlassToken(secret, token);
+    },
+  });
 }
 
 function hostValue(request) {

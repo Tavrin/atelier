@@ -4,7 +4,11 @@ import test from "node:test";
 import { _reviewMergeAssessment } from "../server/lib/dispatch.mjs";
 import { gatesFor } from "../server/lib/world-contract.mjs";
 import { mergeGateReasons as dashboardMergeGateReasons } from "../ui/reply-availability.mjs";
-import { mergeGateReasons as villageMergeGateReasons } from "../themes/cozy-village/state/gates.mjs";
+import {
+  mergeGateReasons as villageMergeGateReasons,
+  portGatesFor,
+} from "../themes/cozy-village/state/gates.mjs";
+import { gatesFor as fixtureGatesFor } from "../themes/cozy-village/state/server-gates.mjs";
 import { assessReview } from "./review-assessment.mjs";
 
 const PROJECT = Object.freeze({
@@ -98,6 +102,32 @@ function overflowRecord(severity, { disposeOverflow = false } = {}) {
     findingOverflowText: `[${severity.toUpperCase()}] overflow.mjs:99 - Late finding.`,
   }, reviewDispositions);
 }
+
+test("forced merge is bypassed in all gate mirrors without rewriting failed verification", () => {
+  const record = {
+    id: "forced-fixture",
+    state: "completed",
+    branchHead: "authorized-head",
+    outcome: { changes: "unknown" },
+    verify: { state: "failed" },
+    merged: {
+      commit: "authorized-head",
+      forcedBy: "operator",
+      reason: "known verification failure",
+      dispositionRef: "incident:42",
+      targetSha: "authorized-head",
+      tokenId: "token-id",
+      mintedAt: "2026-08-18T10:00:00.000Z",
+      consumedAt: "2026-08-18T10:01:00.000Z",
+    },
+  };
+  const expected = gatesFor(record);
+  assert.deepEqual(fixtureGatesFor(record), expected);
+  assert.deepEqual(portGatesFor(record), expected);
+  assert.equal(expected.find(({ gate }) => gate === "merge")?.state, "bypassed");
+  assert.equal(expected.find(({ gate }) => gate === "verify")?.state, "failed");
+  assert.equal(expected.find(({ gate }) => gate === "changes")?.state, "unknown");
+});
 
 test("dashboard and cozy-village mirror the persistence degradation merge reason", () => {
   const record = reviewedRecord({

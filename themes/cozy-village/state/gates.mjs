@@ -60,6 +60,7 @@ export const GATE_GEOMETRY = {
     says: "passed with human dispositions",
   },
   failed: { mark: "broken", says: "failed" },
+  bypassed: { mark: "split-broken", says: "bypassed by break-glass authority — not passed" },
   pending: { mark: "sweep", says: "in progress" },
   skipped: { mark: "dashed", says: "skipped — not passed" },
   "not-run": { mark: "hollow", says: "not run" },
@@ -230,6 +231,7 @@ function portReview(r) {
 }
 
 function portMerge(r) {
+  if (r.merged?.forcedBy) return "bypassed";
   if (r.merged) return "passed";
   if (r.dismissed) return "skipped";
   return "pending";
@@ -273,6 +275,10 @@ export function portGatesFor(record, project = {}) {
         forcedBy: record.merged.forcedBy,
         reason: record.merged.reason,
         dispositionRef: record.merged.dispositionRef,
+        targetSha: record.merged.targetSha,
+        tokenId: record.merged.tokenId,
+        mintedAt: record.merged.mintedAt,
+        consumedAt: record.merged.consumedAt,
       }
     : {};
   return [

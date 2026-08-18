@@ -4,6 +4,16 @@ Location: `~/.config/atelier/projects.json` (override: ATELIER_CONFIG_DIR).
 Validated on load by server/lib/registry.mjs; `atelier doctor` reports all
 problems at once.
 
+MCP automation may read project settings and patch ordinary workflow fields,
+but it cannot change the gate-critical `verifyCommands`, `requireReview`, or
+`reviewPolicy` fields. Those three remain mutable through the human UI, CLI,
+and API bearer surfaces; they do not require a break-glass token. This keeps
+automation from pre-loosening a merge gate while preserving normal operator
+configuration workflows. A break-glass token authorizes only one force merge
+and is minted only by a fresh web-session action; bearer credentials cannot
+mint one. Consequently, `atelier merge <dispatchId> --force` refuses with
+instructions to mint in the web UI; there is intentionally no CLI mint path.
+
 ## Schema (version 1)
 
 - `defaults.concurrentDispatchCap` - running+preparing dispatches across all

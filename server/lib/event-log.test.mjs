@@ -52,6 +52,37 @@ test("event log writes the spec event shape, one JSONL line per event", async (t
   assert.deepEqual(lines.map(({ seq }) => seq), [1, 2, 3]);
 });
 
+test("security-critical append is inline, fsyncs, and retains the non-authorizing token id", async (t) => {
+  const root = await logRoot(t, "event-log-durable");
+  let descriptorAppends = 0;
+  let fsyncs = 0;
+  const log = createEventLog({
+    stateDir: root,
+    fileOps: {
+      ...fs,
+      appendFileSync(...args) {
+        descriptorAppends += 1;
+        return fs.appendFileSync(...args);
+      },
+      fsyncSync(...args) {
+        fsyncs += 1;
+        return fs.fsyncSync(...args);
+      },
+    },
+  });
+  const tokenId = "a".repeat(43);
+  const event = log.appendDurable("dispatch.break-glass", {
+    dispatchId: "dispatch-1",
+    phase: "minted",
+    tokenId,
+  });
+
+  assert.equal(event.tokenId, tokenId);
+  assert.equal(descriptorAppends, 1);
+  assert.ok(fsyncs >= 1);
+  assert.equal(JSON.parse(await readFile(log.path, "utf8")).tokenId, tokenId);
+});
+
 test("event log redacts secret-shaped keys and credential strings at write time", async (t) => {
   const root = await logRoot(t, "event-log-redact");
   const log = createEventLog({ stateDir: root });

@@ -73,6 +73,50 @@ test("golden production path onboards, dispatches, verifies, and merges fake-age
   assert.equal(await readFile(join(harness.projectPath, "implemented.txt"), "utf8"), "implemented\n");
 });
 
+test("golden human session mints and consumes one break-glass merge authorization", async (t) => {
+  const harness = await createGoldenHarness(t, {
+    scenario: committedScenario("break-glass.txt", "authorized\n"),
+    verifyCommands: ["node -e process.exit(17)"],
+  });
+  const admitted = await harness.dispatch({ prompt: "exercise the production break-glass path" });
+  const completed = await harness.waitRecord(admitted.id);
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.verify.state, "failed");
+
+  const audit = {
+    forcedBy: "golden operator",
+    reason: "golden verification failure is intentional",
+    dispositionRef: "golden:break-glass",
+  };
+  const authorization = await harness.humanApi("/api/break-glass", {
+    method: "POST",
+    body: {
+      dispatchId: admitted.id,
+      action: "merge",
+      targetSha: completed.branchHead,
+      ...audit,
+    },
+  });
+  assert.match(authorization.token, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+
+  const merged = await harness.humanApi(`/api/dispatch/${admitted.id}/merge`, {
+    method: "POST",
+    body: { force: true, breakGlassToken: authorization.token },
+  });
+  assert.equal(merged.merged.targetSha, completed.branchHead);
+  assert.ok(merged.merged.tokenId);
+  assert.equal(merged.merged.forcedBy, audit.forcedBy);
+  assert.equal(merged.gates.find(({ gate }) => gate === "merge")?.state, "bypassed");
+  assert.equal(merged.gates.find(({ gate }) => gate === "verify")?.state, "failed");
+
+  const log = await harness.api(
+    `/api/logs?kind=dispatch.break-glass&dispatchId=${encodeURIComponent(admitted.id)}`,
+  );
+  assert.deepEqual(log.events.map(({ phase }) => phase), ["minted", "consumed"]);
+  assert.ok(log.events.every((event) => event.targetSha === completed.branchHead));
+  assert.equal(log.events[0].tokenId, merged.merged.tokenId);
+});
+
 test("F1 kill switch poisons real providers and dispatch helper cannot override fake", async (t) => {
   const shimRoot = await mkdtemp(join(tmpdir(), "atelier-real-provider-shim-"));
   t.after(() => rm(shimRoot, { recursive: true, force: true }));
