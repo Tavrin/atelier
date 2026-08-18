@@ -1,4 +1,5 @@
 import {
+  _setAppServerProber as setAppServerProber,
   _setModelFileOps as setAppServerModelFileOps,
   _setPollIntervalMs as setAppServerPollIntervalMs,
   codexAppServerAgent,
@@ -13,9 +14,17 @@ const LEGACY_WARNING =
   "deprecated Codex companion adapter selected; migrate this project to the supported Codex app-server adapter";
 
 function legacy(entry) {
-  // Records written before ATT-009 have no discriminator and must retain their
-  // original companion lifecycle. Every new record persists an explicit choice.
-  return entry?.record?.codexAdapter !== "app-server";
+  const record = entry?.record ?? {};
+  if (record.codexAdapter === "legacy-companion") return true;
+  if (record.codexAdapter === "app-server") return false;
+  // Owner ruling C1: an undiscriminated record is legacy only when it carries
+  // durable companion evidence. The companion must then come from its recorded
+  // profile; this branch never authorizes a fresh plugin-cache glob.
+  return Boolean(
+    record.codexJobId ||
+    record.codexWorkspace ||
+    record.executionProfile?.companionPath,
+  );
 }
 
 function selected(entry) {
@@ -35,10 +44,11 @@ export const codexAgent = Object.freeze({
   options: (...args) => codexAppServerAgent.options(...args),
   resolveModel: (...args) => companionAgent.resolveModel(...args),
   validate: (...args) => codexAppServerAgent.validate(...args),
-  executionEnv(env, { project } = {}) {
-    return project?.legacyCodexCompanion
-      ? companionAgent.executionEnv(env)
-      : codexAppServerAgent.executionEnv(env);
+  executionEnv(env, { project, entry } = {}) {
+    const useLegacy = entry
+      ? legacy(entry)
+      : project?.legacyCodexCompanion === true;
+    return useLegacy ? companionAgent.executionEnv(env) : codexAppServerAgent.executionEnv(env);
   },
   executionProfile(options) {
     return selected(options.entry).executionProfile(options);
@@ -80,6 +90,10 @@ export {
 export function _setModelFileOps(nextFileOps) {
   setAppServerModelFileOps(nextFileOps);
   setCompanionModelFileOps(nextFileOps);
+}
+
+export function _setAppServerProber(nextProber) {
+  setAppServerProber(nextProber);
 }
 
 export const _legacyCodexWarning = LEGACY_WARNING;

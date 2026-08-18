@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import {
   close,
   open,
@@ -23,11 +22,9 @@ import {
   executableDigest,
   pinnedCompanionPath,
   pinnedExecutable,
-  resolveExecutable,
 } from "../execution/execution-profile.mjs";
 import { stateDir } from "../paths.mjs";
 import { retrievedFinalOutput, unavailableFinalOutput } from "../stream.mjs";
-import { SUPPORTED_CODEX_VERSION } from "./codex-app-server.mjs";
 
 const POLL_INTERVAL_MS = 30_000;
 // Ordinary polling already treats transient command failures as retryable. A
@@ -40,6 +37,8 @@ const EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh", "max"]);
 const NO_USAGE_WARNING = "codex lane reports no usage data";
 const CODEX_GIT_WARNING =
   "Atelier cannot write the worktree gitdir - automatic Codex commit may fail";
+const LEGACY_BINARY_WARNING =
+  "deprecated Codex companion adapter cannot pin the codex binary because the companion searches PATH internally";
 const PROMPT_FILE_INSTRUCTION =
   "Before doing anything else, read and follow the complete task prompt in this UTF-8 file:";
 const MAX_PENDING_COMMAND_LINES = 100;
@@ -518,32 +517,18 @@ function executionProfile({
   hooksSupported,
   resolveCurrent = false,
 }) {
-  const companionPath = resolveCurrent
-    ? companionResolver() ?? null
-    : entry.companionPath ?? companionResolver() ?? null;
-  const pinnedLegacy = entry.record.codexAdapter === "legacy-companion";
-  const command = pinnedLegacy ? "codex" : "node";
-  const resolvedPath = resolveExecutable(command, env);
-  let executableVersion = null;
-  if (pinnedLegacy && resolvedPath) {
-    try {
-      executableVersion = execFileSync(resolvedPath, ["--version"], {
-        env,
-        encoding: "utf8",
-        timeout: 10_000,
-        windowsHide: true,
-      }).trim() || null;
-    } catch {
-      // Admission requirements turn the missing version into a refusal.
-    }
-  }
+  const explicitLegacy = entry.record.codexAdapter === "legacy-companion";
+  const recordedPath = pinnedCompanionPath(entry);
+  const companionPath = explicitLegacy
+    ? (resolveCurrent ? companionResolver() ?? null : entry.companionPath ?? companionResolver() ?? null)
+    : entry.companionPath ?? recordedPath;
   return createExecutionProfile({
     agentLane: entry.record.lane,
-    command,
+    command: process.execPath,
+    executableResolvedPath: process.execPath,
     companionPath,
-    companionDigest: pinnedLegacy ? executableDigest(companionPath) : null,
-    executableVersion,
-    executableContentDigest: pinnedLegacy ? executableDigest(resolvedPath) : null,
+    companionDigest: executableDigest(companionPath),
+    binaryPinned: false,
     env,
     controlledKeys,
     hooksSupported,
@@ -551,9 +536,7 @@ function executionProfile({
 }
 
 function companionCommand(entry) {
-  return entry.record.codexAdapter === "legacy-companion"
-    ? process.execPath
-    : pinnedExecutable(entry, "node");
+  return pinnedExecutable(entry, process.execPath);
 }
 
 function pinnedCodexEnv(entry, env) {
@@ -600,7 +583,9 @@ function companionSummaryMessage(payload) {
 }
 
 function attachCompanion(entry) {
-  const companionPath = entry.companionPath ?? pinnedCompanionPath(entry) ?? companionResolver();
+  const companionPath = entry.companionPath ??
+    pinnedCompanionPath(entry) ??
+    (entry.record.codexAdapter === "legacy-companion" ? companionResolver() : null);
   if (!companionPath) {
     throw new Error("Codex lane unavailable: codex-companion.mjs was not found");
   }
@@ -609,20 +594,7 @@ function attachCompanion(entry) {
 
 async function preLaunchChecks({ entry, worktreePath, env, commandRunner }) {
   attachCompanion(entry);
-  if (entry.record.codexAdapter === "legacy-companion") {
-    const pinned = executionProfile({
-      entry,
-      env: env ?? entry.env ?? process.env,
-      controlledKeys: [],
-      hooksSupported: true,
-    });
-    if (pinned.executable.version !== SUPPORTED_CODEX_VERSION) {
-      throw new Error(
-        `Codex lane unavailable: unsupported ${pinned.executable.version ?? "version"}; ` +
-        `expected ${SUPPORTED_CODEX_VERSION}`,
-      );
-    }
-  }
+  addWarningOnce(entry, LEGACY_BINARY_WARNING);
   if (entry.record.effort) {
     entry.record.warnings.push(
       "effort is ignored on the codex lane (reasoning effort is set in ~/.codex/config.toml)",
@@ -719,7 +691,11 @@ async function poll(
       // not assume it is DEAD either. The verdict is three-way, decided by the
       // dispatcher's single classifier.
       if (failOnFirstError) {
-        const verdict = callbacks.classifyReportedWorker?.(entry, workerPid) ?? "alive";
+        const verdict = callbacks.classifyReportedWorker?.(
+          entry,
+          workerPid,
+          snapshot.job?.pidStartIdentity ?? snapshot.pidStartIdentity,
+        ) ?? "alive";
         if (verdict !== "alive") {
           // Not provably ours-and-running. Resolve the fence: if the worker is
           // proven gone the turn fails and the claim goes back as before; if it

@@ -1,2 +1,4 @@
 {"type":"system","subtype":"init","model":"fake","session_id":"fake-captured-session"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Inspecting the fixture."},{"type":"tool_use","id":"tool-fixture","name":"Read","input":{"file_path":"fixture.txt"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-fixture","content":"fixture contents"}]}}
 {"type":"result","subtype":"success","is_error":false,"result":"fake-agent scenario completed","num_turns":1,"total_cost_usd":0}

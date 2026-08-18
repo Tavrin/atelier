@@ -303,7 +303,7 @@ test("atelier doctor validates the configured Codex binary with initialize only"
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 if (process.argv[2] === "--version") {
-  console.log("codex-cli 0.147.0");
+  console.log("warning line\\ncodex-cli 9.9.9\\nignored trailer");
   process.exit(0);
 }
 if (process.argv[2] !== "app-server") process.exit(2);
@@ -312,7 +312,13 @@ lines.on("line", (line) => {
   const message = JSON.parse(line);
   appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify(message) + "\\n");
   if (message.method === "initialize") {
-    console.log(JSON.stringify({ id: message.id, result: { serverInfo: { name: "fake-codex" } } }));
+    console.log(JSON.stringify({ id: message.id, result: {
+      ...(process.env.FAKE_CODEX_BAD_INIT === "1" ? {} : {
+        userAgent: "fake-codex/9.9.9",
+        platformFamily: "unix",
+        platformOs: "linux"
+      })
+    } }));
   }
 });
 `);
@@ -352,6 +358,7 @@ lines.on("line", (line) => {
       env: {
         ...process.env,
         ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "0",
         FAKE_CODEX_LOG: protocolLog,
         PATH: `${binPath}:${process.env.PATH}`,
       },
@@ -360,12 +367,48 @@ lines.on("line", (line) => {
 
   assert.ok(stdout.includes(`codex binary: ${codexPath} (sha256 `));
   assert.match(stdout, /sha256 [a-f0-9]{12}\)/);
-  assert.match(stdout, /codex: ok \(codex-cli 0\.147\.0, app-server ok\)/);
+  assert.match(stdout, /codex: ok \(codex-cli 9\.9\.9, app-server ok\)/);
   const methods = (await readFile(protocolLog, "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line).method);
   assert.deepEqual(methods, ["initialize", "initialized"]);
+
+  const guarded = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor"],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+        FAKE_CODEX_LOG: protocolLog,
+        PATH: `${binPath}:${process.env.PATH}`,
+      },
+    },
+  );
+  assert.match(guarded.stdout, /codex: guarded \(codex-cli 9\.9\.9; app-server probe disabled/);
+  assert.equal((await readFile(protocolLog, "utf8")).trim().split("\n").length, 2);
+
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [resolve("bin", "atelier.mjs"), "doctor"],
+      {
+        cwd: resolve("."),
+        env: {
+          ...process.env,
+          ATELIER_CONFIG_DIR: root,
+          ATELIER_TEST_NO_REAL_PROVIDER: "0",
+          FAKE_CODEX_BAD_INIT: "1",
+          FAKE_CODEX_LOG: protocolLog,
+          PATH: `${binPath}:${process.env.PATH}`,
+        },
+      },
+    ),
+    (error) => /initialize omitted userAgent server identity/.test(error.stderr),
+  );
 });
 
 test("atelier doctor prints degraded persistence targets", async (t) => {

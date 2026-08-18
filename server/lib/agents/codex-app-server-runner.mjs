@@ -1,18 +1,23 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import {
-  appendFileSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
-  renameSync,
-  writeFileSync,
+  statSync,
+  unlinkSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-import { redactValue } from "../stream.mjs";
+import {
+  appendDurable,
+  readFileNoFollowSync,
+  writeFileAtomic,
+  writeFileExclusiveDurable,
+} from "../fs-integrity.mjs";
+import { redactText, redactValue } from "../stream.mjs";
 
 const CLIENT_INFO = Object.freeze({
   name: "atelier",
@@ -20,6 +25,20 @@ const CLIENT_INFO = Object.freeze({
   version: "0.3.0",
 });
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+const REQUEST_TIMEOUT_MS = 10_000;
+const TERMINATION_GRACE_MS = 2_000;
+const STREAM_BYTE_LIMIT = 1024 * 1024;
+const STREAM_TRUNCATION = `${JSON.stringify({
+  method: "atelier/streamTruncated",
+  params: { reason: `protocol stream exceeded ${STREAM_BYTE_LIMIT} bytes` },
+})}\n`;
+const truncatedStreams = new Set();
+
+function testTunable(name, fallback) {
+  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER !== "1") return fallback;
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
 
 function parseArgs(args) {
   const values = { _: [] };
@@ -30,7 +49,7 @@ function parseArgs(args) {
       continue;
     }
     const key = value.slice(2);
-    if (["background", "json", "write"].includes(key)) {
+    if (["background", "json", "write", "test-stub", "break-dead"].includes(key)) {
       values[key] = true;
       continue;
     }
@@ -60,9 +79,7 @@ function readJob(path) {
 
 function writeJob(path, job) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
+  writeFileAtomic(path, `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
 }
 
 function updateJob(path, update) {
@@ -77,13 +94,86 @@ function jobPath(root, id) {
   return join(resolve(root), `${id}.json`);
 }
 
+function leasePath(root, id) {
+  jobPath(root, id);
+  return join(resolve(root), `${id}.attach.json`);
+}
+
+function readLease(path) {
+  return JSON.parse(readFileNoFollowSync(path, "utf8"));
+}
+
+function leaseValue(values) {
+  const dispatcherPid = Number(values["dispatcher-pid"]);
+  if (!values["dispatcher-id"] || !Number.isInteger(dispatcherPid) || dispatcherPid <= 0) {
+    throw new Error("dispatcher attachment identity is required");
+  }
+  return {
+    dispatcherInstanceId: values["dispatcher-id"],
+    attachedAt: new Date().toISOString(),
+    dispatcherPid,
+    dispatcherPidIdentity: values["dispatcher-pid-identity"] ?? null,
+  };
+}
+
+function takeLease(path, values, { breakDead = false } = {}) {
+  const next = leaseValue(values);
+  try {
+    writeFileExclusiveDurable(path, `${JSON.stringify(next, null, 2)}\n`);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const current = readLease(path);
+    const liveness = processLiveness(current.dispatcherPid, current.dispatcherPidIdentity);
+    if (!breakDead || liveness.alive) {
+      const detail = liveness.warning ? `; ${liveness.warning}` : "";
+      throw new Error(
+        `Codex job attachment refused: lease held by dispatcher ${current.dispatcherInstanceId}${detail}`,
+      );
+    }
+    unlinkSync(path);
+    writeFileExclusiveDurable(path, `${JSON.stringify(next, null, 2)}\n`);
+  }
+  const liveness = processLiveness(next.dispatcherPid, next.dispatcherPidIdentity);
+  return {
+    attached: true,
+    attachLease: next,
+    ...(liveness.warning ? { warning: liveness.warning } : {}),
+  };
+}
+
+function signalZeroAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function processLiveness(pid, identity) {
+  if (!Number.isInteger(pid) || pid <= 0) return { alive: false, corroboration: "absent" };
+  if (!signalZeroAlive(pid)) return { alive: false, corroboration: "absent" };
+  if (process.platform !== "linux") {
+    return {
+      alive: true,
+      corroboration: "signal-0",
+      warning: "Codex runner liveness uses weaker signal-0 corroboration on this platform",
+    };
+  }
+  const current = processStartIdentity(pid);
+  if (identity && current === identity) return { alive: true, corroboration: "pid-start-identity" };
+  if (identity && current && current !== identity) return { alive: false, corroboration: "recycled" };
+  return { alive: true, corroboration: "unresolved" };
+}
+
 function liveWorker(job) {
-  if (!Number.isInteger(job.pid) || job.pid <= 0 || !job.pidStartIdentity) return false;
-  return processStartIdentity(job.pid) === job.pidStartIdentity;
+  const liveness = processLiveness(job.pid, job.pidStartIdentity);
+  return liveness.alive && liveness.corroboration !== "unresolved";
 }
 
 function printableJob(job) {
-  const alive = liveWorker(job);
+  const liveness = processLiveness(job.pid, job.pidStartIdentity);
+  const alive = liveness.alive && liveness.corroboration !== "unresolved";
   if (!TERMINAL.has(job.status) && !alive) {
     return {
       ...job,
@@ -92,25 +182,33 @@ function printableJob(job) {
       errorMessage: "Atelier Codex app-server runner is not alive under its recorded pid identity",
     };
   }
-  if (TERMINAL.has(job.status) && alive) {
-    return { ...job, status: "running", terminalStatus: job.status, pid: job.pid };
-  }
-  return { ...job, pid: alive ? job.pid : null };
+  return {
+    ...job,
+    pid: alive ? job.pid : null,
+    ...(liveness.warning ? { warning: liveness.warning } : {}),
+  };
 }
 
 function appendStream(job, message) {
-  appendFileSync(job.streamFile, `${JSON.stringify(redactValue(message))}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  if (truncatedStreams.has(job.streamFile)) return;
+  const line = `${JSON.stringify(redactValue(message))}\n`;
+  let size = 0;
+  try { size = statSync(job.streamFile).size; } catch { /* append creates it */ }
+  if (size + Buffer.byteLength(line) > STREAM_BYTE_LIMIT - Buffer.byteLength(STREAM_TRUNCATION)) {
+    appendDurable(job.streamFile, STREAM_TRUNCATION);
+    truncatedStreams.add(job.streamFile);
+    return;
+  }
+  appendDurable(job.streamFile, line);
 }
 
 class JsonRpcClient {
-  constructor(proc, onNotification) {
+  constructor(proc, onNotification, onProtocolFailure = () => {}) {
     this.proc = proc;
     this.pending = new Map();
     this.nextId = 1;
     this.onNotification = onNotification;
+    this.onProtocolFailure = onProtocolFailure;
     this.stderr = "";
     proc.stderr.setEncoding("utf8");
     proc.stderr.on("data", (chunk) => {
@@ -118,12 +216,17 @@ class JsonRpcClient {
     });
     const lines = createInterface({ input: proc.stdout });
     lines.on("line", (line) => this.handleLine(line));
-    proc.once("error", (error) => this.fail(error));
+    proc.once("error", (error) => {
+      this.fail(error);
+      this.onProtocolFailure(error);
+    });
     proc.once("close", (code, signal) => {
-      this.fail(new Error(
+      const error = new Error(
         `codex app-server exited (${signal ? `signal ${signal}` : `code ${code}`})` +
         `${this.stderr.trim() ? `: ${this.stderr.trim()}` : ""}`,
-      ));
+      );
+      this.fail(error);
+      this.onProtocolFailure(error);
     });
   }
 
@@ -134,10 +237,30 @@ class JsonRpcClient {
     return undefined;
   }
 
-  request(method, params = {}) {
+  request(method, params = {}, {
+    timeoutMs = testTunable("ATELIER_TEST_CODEX_REQUEST_TIMEOUT_MS", REQUEST_TIMEOUT_MS),
+  } = {}) {
     const id = this.nextId++;
     return new Promise((resolvePromise, rejectPromise) => {
-      this.pending.set(id, { method, resolve: resolvePromise, reject: rejectPromise });
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        const error = new Error(`codex app-server ${method} request timed out`);
+        pending.reject(error);
+        this.onProtocolFailure(error);
+      }, timeoutMs);
+      this.pending.set(id, {
+        method,
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolvePromise(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          rejectPromise(error);
+        },
+      });
       this.send({ id, method, params });
     });
   }
@@ -151,7 +274,9 @@ class JsonRpcClient {
     try {
       message = JSON.parse(line);
     } catch (error) {
-      this.fail(new Error(`invalid codex app-server JSONL: ${error.message}`));
+      const protocolError = new Error(`invalid codex app-server JSONL: ${error.message}`);
+      this.fail(protocolError);
+      this.onProtocolFailure(protocolError);
       return;
     }
     if (message.id !== undefined && message.method) {
@@ -183,7 +308,50 @@ class JsonRpcClient {
   }
 }
 
+function waitForClose(proc, timeoutMs) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (closed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      proc.off("close", onClose);
+      resolvePromise(closed);
+    };
+    const onClose = () => finish(true);
+    proc.once("close", onClose);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function terminateAppServer(
+  proc,
+  graceMs = testTunable("ATELIER_TEST_CODEX_TERMINATION_GRACE_MS", TERMINATION_GRACE_MS),
+) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  proc.kill("SIGTERM");
+  if (await waitForClose(proc, graceMs)) return;
+  proc.kill("SIGKILL");
+  await waitForClose(proc, graceMs);
+}
+
+function assertBinaryFiles(files) {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error("Codex binary identity capture is missing");
+  }
+  for (const pin of files) {
+    const details = lstatSync(pin.path);
+    if (!details.isFile() || details.isSymbolicLink() ||
+        String(details.dev) !== String(pin.dev) || String(details.ino) !== String(pin.ino)) {
+      throw new Error(`Codex binary identity diverged before spawn: ${pin.path}`);
+    }
+  }
+}
+
 async function runJob(path) {
+  // The detached child, not the launcher, establishes its own fence as its
+  // first state mutation. The launcher performs no post-spawn job writes.
   let job = updateJob(path, (current) => ({
     ...current,
     status: "running",
@@ -193,7 +361,34 @@ async function runJob(path) {
   }));
   let finalMessage = "";
   let terminalResolve;
-  const terminal = new Promise((resolvePromise) => { terminalResolve = resolvePromise; });
+  let terminalReject;
+  let turnStarted = false;
+  let terminalSettled = false;
+  const terminal = new Promise((resolvePromise, rejectPromise) => {
+    terminalResolve = () => {
+      if (terminalSettled) return;
+      terminalSettled = true;
+      resolvePromise();
+    };
+    terminalReject = (error) => {
+      if (terminalSettled) return;
+      terminalSettled = true;
+      rejectPromise(error);
+    };
+  });
+  try {
+    assertBinaryFiles(job.binaryFiles);
+  } catch (error) {
+    const safeError = redactText(error.message);
+    updateJob(path, (current) => ({
+      ...current,
+      status: "failed",
+      errorMessage: safeError,
+      summary: safeError,
+      endedAt: new Date().toISOString(),
+    }));
+    return;
+  }
   const proc = spawn(job.codexPath, ["app-server", "--stdio"], {
     cwd: job.workspace,
     env: process.env,
@@ -223,13 +418,15 @@ async function runJob(path) {
       job = updateJob(path, (current) => ({
         ...current,
         status: success ? "completed" : "failed",
-        rawOutput: finalMessage,
-        summary: errorMessage ?? finalMessage,
-        errorMessage,
+        rawOutput: redactText(finalMessage),
+        summary: redactText(errorMessage ?? finalMessage),
+        errorMessage: errorMessage ? redactText(errorMessage) : null,
         endedAt: new Date().toISOString(),
       }));
       terminalResolve();
     }
+  }, (error) => {
+    if (turnStarted) terminalReject(error);
   });
 
   const stop = async () => {
@@ -257,6 +454,11 @@ async function runJob(path) {
       clientInfo: CLIENT_INFO,
       capabilities: { experimentalApi: false, requestAttestation: false },
     });
+    if (typeof initialized.userAgent !== "string" || !initialized.userAgent.trim() ||
+        typeof initialized.platformFamily !== "string" || !initialized.platformFamily.trim() ||
+        typeof initialized.platformOs !== "string" || !initialized.platformOs.trim()) {
+      throw new Error("codex app-server initialize omitted required identity/capability fields");
+    }
     appendStream(job, { id: 1, result: initialized });
     client.notify("initialized", {});
     let threadId = job.resumeThreadId;
@@ -273,6 +475,7 @@ async function runJob(path) {
     }
     if (typeof threadId !== "string" || !threadId) throw new Error("thread lifecycle returned no id");
     job = updateJob(path, (current) => ({ ...current, threadId }));
+    turnStarted = true;
     const turn = await client.request("turn/start", {
       threadId,
       input: [{ type: "text", text: readFileSync(job.promptPath, "utf8") }],
@@ -288,33 +491,47 @@ async function runJob(path) {
     }));
     await terminal;
   } catch (error) {
+    const safeError = redactText(error.message);
     job = updateJob(path, (current) => ({
       ...current,
       status: current.status === "cancelled" ? "cancelled" : "failed",
-      errorMessage: error.message,
-      summary: current.summary || error.message,
-      rawOutput: current.rawOutput ?? finalMessage,
+      errorMessage: safeError,
+      summary: redactText(current.summary || safeError),
+      rawOutput: redactText(current.rawOutput ?? finalMessage),
       endedAt: new Date().toISOString(),
     }));
   } finally {
-    if (proc.exitCode === null && !proc.killed) proc.kill("SIGTERM");
+    await terminateAppServer(proc);
   }
 }
 
-function task(values) {
-  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER === "1") {
+async function task(values) {
+  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER === "1" && values["test-stub"] !== true) {
     throw new Error(
       "EATELIER_REAL_PROVIDER_DISABLED: Codex app-server launch is disabled by ATELIER_TEST_NO_REAL_PROVIDER=1",
     );
   }
-  for (const key of ["codex", "state-dir", "workspace", "prompt-file"]) {
+  for (const key of [
+    "job-id",
+    "codex",
+    "binary-files-json",
+    "dispatcher-id",
+    "dispatcher-pid",
+    "state-dir",
+    "workspace",
+    "prompt-file",
+  ]) {
     if (!values[key]) throw new Error(`--${key} is required`);
   }
-  const id = randomBytes(12).toString("hex");
+  const id = values["job-id"];
   const path = jobPath(values["state-dir"], id);
   const streamFile = join(resolve(values["state-dir"]), `${id}.stream.jsonl`);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(streamFile, "", { mode: 0o600 });
+  writeFileAtomic(streamFile, "", { mode: 0o600 });
+  const binaryFiles = JSON.parse(values["binary-files-json"]);
+  if (!Array.isArray(binaryFiles) || binaryFiles.length === 0) {
+    throw new Error("--binary-files-json must carry at least one pinned file");
+  }
   const job = {
     version: 1,
     jobId: id,
@@ -322,6 +539,7 @@ function task(values) {
     pid: null,
     pidStartIdentity: null,
     codexPath: resolve(values.codex),
+    binaryFiles,
     workspace: resolve(values.workspace),
     promptPath: resolve(values["prompt-file"]),
     streamFile,
@@ -334,6 +552,7 @@ function task(values) {
     errorMessage: null,
   };
   writeJob(path, job);
+  const attachment = takeLease(leasePath(values["state-dir"], id), values);
   const child = spawn(process.execPath, [resolve(process.argv[1]), "run", "--job", path], {
     cwd: job.workspace,
     env: process.env,
@@ -342,16 +561,19 @@ function task(values) {
     windowsHide: true,
   });
   child.unref();
-  updateJob(path, (current) => ({
-    ...current,
-    pid: child.pid,
-    pidStartIdentity: processStartIdentity(child.pid),
-  }));
+  let owned = readJob(path);
+  const deadline = Date.now() + 2_000;
+  while (owned.pid !== child.pid && Date.now() < deadline) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    owned = readJob(path);
+  }
+  if (owned.pid !== child.pid) throw new Error("detached Codex runner did not establish its pid identity");
   return {
     jobId: id,
     logFile: streamFile,
-    pid: child.pid,
-    pidStartIdentity: processStartIdentity(child.pid),
+    pid: owned.pid,
+    pidStartIdentity: owned.pidStartIdentity,
+    ...(attachment.warning ? { warning: attachment.warning } : {}),
   };
 }
 
@@ -399,20 +621,32 @@ async function main() {
   const values = parseArgs(rest);
   if (command === "run") return runJob(resolve(values.job));
   if (command === "task") {
-    console.log(JSON.stringify(task(values)));
+    console.log(JSON.stringify(await task(values)));
     return;
   }
-  if (!["status", "result", "cancel"].includes(command)) {
-    throw new Error(`usage: ${basename(process.argv[1])} task|status|result|cancel|run`);
+  if (!["status", "result", "cancel", "attach"].includes(command)) {
+    throw new Error(`usage: ${basename(process.argv[1])} task|status|result|cancel|attach|run`);
   }
   const id = values._[0];
   if (!values["state-dir"] || !id) throw new Error(`${command} requires JOB_ID and --state-dir`);
   const path = jobPath(values["state-dir"], id);
+  if (command === "attach") {
+    readJob(path);
+    console.log(JSON.stringify(takeLease(
+      leasePath(values["state-dir"], id),
+      values,
+      { breakDead: values["break-dead"] === true },
+    )));
+    return;
+  }
   if (command === "cancel") {
     console.log(JSON.stringify(await cancel(path)));
     return;
   }
-  const job = printableJob(readJob(path));
+  const job = {
+    ...printableJob(readJob(path)),
+    attachLease: readLease(leasePath(values["state-dir"], id)),
+  };
   console.log(JSON.stringify(command === "result" ? { ...job, result: job } : job));
 }
 
@@ -425,6 +659,8 @@ if (process.argv[1] && resolve(process.argv[1]) === new URL(import.meta.url).pat
 
 export const _runnerTest = Object.freeze({
   CLIENT_INFO,
+  STREAM_BYTE_LIMIT,
+  appendStream,
   processStartIdentity,
   printableJob,
 });

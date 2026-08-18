@@ -13,7 +13,6 @@ import { createDispatcher } from "../server/lib/dispatch.mjs";
 import {
   inspectCodexBinary,
   probeCodexAppServer,
-  SUPPORTED_CODEX_VERSION,
 } from "../server/lib/agents/codex-app-server.mjs";
 import { createEventLog } from "../server/lib/event-log.mjs";
 import { resolveBrExecutable, runFile } from "../server/lib/exec.mjs";
@@ -675,9 +674,10 @@ async function doctor(args) {
     process.exitCode = 1;
     return;
   }
-  if (binary.version !== SUPPORTED_CODEX_VERSION) {
-    console.error(`codex: failed (unsupported ${binary.version}; expected ${SUPPORTED_CODEX_VERSION})`);
-    process.exitCode = 1;
+  if (process.env.ATELIER_TEST_NO_REAL_PROVIDER === "1") {
+    console.log(
+      `codex: guarded (${binary.version}; app-server probe disabled by ATELIER_TEST_NO_REAL_PROVIDER=1)`,
+    );
     return;
   }
   try {

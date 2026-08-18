@@ -1,22 +1,24 @@
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  lstatSync,
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import { sanitizeChildEnv } from "../execution/environment-policy.mjs";
 import {
   EXECUTION_PROFILE_MISMATCH,
   createExecutionProfile,
-  executableDigest,
   pinnedExecutable,
   resolveExecutable,
 } from "../execution/execution-profile.mjs";
@@ -24,8 +26,9 @@ import { stateDir } from "../paths.mjs";
 import { retrievedFinalOutput } from "../stream.mjs";
 
 const RUNNER_PATH = new URL("./codex-app-server-runner.mjs", import.meta.url).pathname;
-export const SUPPORTED_CODEX_VERSION = "codex-cli 0.147.0";
 const POLL_INTERVAL_MS = 2_000;
+const STATUS_FAILURE_RETRY_LIMIT = 3;
+const STREAM_READ_CHUNK_BYTES = 64 * 1024;
 const KNOWN_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
 const EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh", "max"]);
 const CODEX_GIT_WARNING =
@@ -34,29 +37,152 @@ const PROMPT_FILE_INSTRUCTION =
   "Before doing anything else, read and follow the complete task prompt in this UTF-8 file:";
 let pollIntervalMs = POLL_INTERVAL_MS;
 let modelFileOps = { readFileSync };
+let appServerProber = probeCodexAppServer;
+
+const PLATFORM_TARGET = Object.freeze({
+  "linux:x64": ["@openai/codex-linux-x64", "x86_64-unknown-linux-musl"],
+  "linux:arm64": ["@openai/codex-linux-arm64", "aarch64-unknown-linux-musl"],
+  "darwin:x64": ["@openai/codex-darwin-x64", "x86_64-apple-darwin"],
+  "darwin:arm64": ["@openai/codex-darwin-arm64", "aarch64-apple-darwin"],
+  "win32:x64": ["@openai/codex-win32-x64", "x86_64-pc-windows-msvc"],
+  "win32:arm64": ["@openai/codex-win32-arm64", "aarch64-pc-windows-msvc"],
+});
+
+function versionToken(stdout) {
+  const match = /(?:^|\s)codex-cli\s+(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)/m.exec(
+    String(stdout ?? ""),
+  );
+  return match ? `codex-cli ${match[1]}` : null;
+}
+
+function launcherScript(path) {
+  if (basename(path) === "codex.js") return path;
+  try {
+    const source = readFileSync(path, "utf8");
+    if (source.includes("PLATFORM_PACKAGE_BY_TARGET") && source.includes("@openai/codex-")) {
+      return path;
+    }
+  } catch {
+    // Native and test executables are valid single-file Codex launchers.
+  }
+  if (process.platform !== "win32") return null;
+  const candidate = join(dirname(path), "node_modules", "@openai", "codex", "bin", "codex.js");
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function nativePayload(launcherPath) {
+  const script = launcherScript(launcherPath);
+  if (!script) return null;
+  const target = PLATFORM_TARGET[`${process.platform}:${process.arch}`];
+  if (!target) return null;
+  const [platformPackage, targetTriple] = target;
+  let vendorRoot;
+  try {
+    const require = createRequire(script);
+    vendorRoot = join(dirname(require.resolve(`${platformPackage}/package.json`)), "vendor");
+  } catch {
+    vendorRoot = join(dirname(script), "..", "vendor");
+  }
+  const candidate = join(
+    vendorRoot,
+    targetTriple,
+    "bin",
+    process.platform === "win32" ? "codex.exe" : "codex",
+  );
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function digestFiles(paths) {
+  try {
+    const hash = createHash("sha256");
+    for (const path of paths) {
+      const contentDigest = createHash("sha256").update(readFileSync(path)).digest("hex");
+      hash.update(`${path}\0${contentDigest}\n`);
+    }
+    return hash.digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function filePins(paths) {
+  try {
+    return paths.map((path) => {
+      const details = lstatSync(path);
+      if (!details.isFile() || details.isSymbolicLink()) throw new Error("not a regular file");
+      return { path, dev: String(details.dev), ino: String(details.ino) };
+    });
+  } catch {
+    return null;
+  }
+}
 
 function probeCodex(path, env) {
-  if (!path) return { version: null, digest: null };
+  if (!path) return { version: null };
   let version = null;
   try {
-    version = execFileSync(path, ["--version"], {
+    version = versionToken(execFileSync(path, ["--version"], {
       env,
       encoding: "utf8",
       timeout: 10_000,
       windowsHide: true,
-    }).trim() || null;
+    }));
   } catch {
     // The profile records the failed probe as null; admission requirements reject it.
   }
-  return { version, digest: executableDigest(path) };
+  return { version };
 }
 
 export function inspectCodexBinary(env = process.env) {
-  const resolvedPath = resolveExecutable("codex", env);
-  return { resolvedPath, ...probeCodex(resolvedPath, env) };
+  const searchedPath = resolveExecutable("codex", env);
+  if (!searchedPath) {
+    return { resolvedPath: null, version: null, digest: null, digestPaths: [], files: [] };
+  }
+  let resolvedPath;
+  try {
+    resolvedPath = realpathSync(searchedPath);
+  } catch {
+    return { resolvedPath: null, version: null, digest: null, digestPaths: [], files: [] };
+  }
+  const payload = nativePayload(resolvedPath);
+  const digestPaths = payload ? [resolvedPath, payload] : [resolvedPath];
+  return {
+    resolvedPath,
+    ...probeCodex(resolvedPath, env),
+    digest: digestFiles(digestPaths),
+    digestPaths,
+    files: filePins(digestPaths),
+  };
+}
+
+function validateInitializeResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("initialize returned no server identity");
+  }
+  if (typeof result.userAgent !== "string" || !result.userAgent.trim()) {
+    throw new Error("initialize omitted userAgent server identity");
+  }
+  if (typeof result.platformFamily !== "string" || !result.platformFamily.trim() ||
+      typeof result.platformOs !== "string" || !result.platformOs.trim()) {
+    throw new Error("initialize omitted platform capability fields");
+  }
+  return result;
 }
 
 export async function probeCodexAppServer(path, env = process.env, { timeoutMs = 10_000 } = {}) {
+  if (env?.ATELIER_TEST_NO_REAL_PROVIDER === "1") {
+    throw new Error(
+      "EATELIER_REAL_PROVIDER_DISABLED: Codex app-server probe is disabled by ATELIER_TEST_NO_REAL_PROVIDER=1",
+    );
+  }
   return new Promise((resolvePromise, rejectPromise) => {
     const proc = spawn(path, ["app-server", "--stdio"], {
       env,
@@ -88,7 +214,11 @@ export async function probeCodexAppServer(path, env = process.env, { timeoutMs =
       }
       proc.stdin.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
       proc.stdin.end();
-      initializeResult = message.result ?? {};
+      try {
+        initializeResult = validateInitializeResult(message.result);
+      } catch (error) {
+        finish(error);
+      }
     });
     proc.once("error", (error) => finish(error));
     proc.once("close", (code) => {
@@ -114,13 +244,19 @@ function executionEnv(env) {
 }
 
 function executionProfile({ entry, env, controlledKeys, hooksSupported }) {
-  const resolvedPath = resolveExecutable("codex", env);
-  const probe = probeCodex(resolvedPath, env);
+  const binary = entry.codexBinaryFromPreLaunch === true
+    ? entry.codexBinary
+    : inspectCodexBinary(env);
+  entry.codexBinaryFromPreLaunch = false;
+  entry.codexBinary = binary;
   const profile = createExecutionProfile({
     agentLane: entry.record.lane,
     command: "codex",
-    executableVersion: probe.version,
-    executableContentDigest: probe.digest,
+    executableResolvedPath: binary.resolvedPath,
+    executableVersion: binary.version,
+    executableContentDigest: binary.digest,
+    executableDigestPaths: binary.digestPaths,
+    binaryPinned: true,
     env,
     controlledKeys,
     hooksSupported,
@@ -157,16 +293,21 @@ function addWarningOnce(entry, warning) {
 }
 
 async function preLaunchChecks({ entry, worktreePath, env, commandRunner }) {
-  const resolvedPath = resolveExecutable("codex", env);
-  if (!resolvedPath) throw new Error("Codex lane unavailable: codex could not be resolved on PATH");
-  const { version, digest } = probeCodex(resolvedPath, env);
-  if (!version) throw new Error(`Codex lane unavailable: ${resolvedPath} --version failed`);
-  if (version !== SUPPORTED_CODEX_VERSION) {
-    throw new Error(
-      `Codex lane unavailable: unsupported ${version}; expected ${SUPPORTED_CODEX_VERSION}`,
-    );
+  const binary = inspectCodexBinary(env);
+  entry.codexBinary = binary;
+  entry.codexBinaryFromPreLaunch = true;
+  if (!binary.resolvedPath) {
+    throw new Error("Codex lane unavailable: codex could not be resolved on PATH");
   }
-  if (!digest) throw new Error(`Codex lane unavailable: ${resolvedPath} could not be digested`);
+  if (!binary.version) throw new Error(`Codex lane unavailable: ${binary.resolvedPath} --version failed`);
+  if (!binary.digest || !binary.files) {
+    throw new Error(`Codex lane unavailable: ${binary.resolvedPath} could not be digested`);
+  }
+  try {
+    await appServerProber(binary.resolvedPath, env);
+  } catch (error) {
+    throw new Error(`Codex lane unavailable: app-server initialize handshake failed: ${error.message}`);
+  }
   if (entry.record.effort) {
     addWarningOnce(entry, "effort is ignored on the codex lane (reasoning effort is set in Codex configuration)");
   }
@@ -207,12 +348,17 @@ function usageEvent(entry, tokenUsage) {
   if (!total || typeof total !== "object") return null;
   return {
     type: "usage",
-    turns: entry.record.turns,
+    turns: (Number(entry.record.turns) || 0) + (entry.codexTurnCounted ? 0 : 1),
     costUSD: entry.record.costUSD,
     inputTokens: Number(total.inputTokens ?? 0),
     outputTokens: Number(total.outputTokens ?? 0),
     totalTokens: Number(total.totalTokens ?? 0),
   };
+}
+
+function eventPreview(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return String(text ?? "").slice(0, 400);
 }
 
 function itemEvent(method, item) {
@@ -223,13 +369,13 @@ function itemEvent(method, item) {
         type: "message",
         kind: "tool_use",
         name: "Bash",
-        inputPreview: JSON.stringify({ command: String(item.command ?? "") }),
+        inputPreview: eventPreview({ command: String(item.command ?? "") }),
       };
     }
     return {
       type: "message",
       kind: "tool_result",
-      preview: String(item.aggregatedOutput ?? `Exit ${item.exitCode ?? "unknown"}`),
+      preview: eventPreview(item.aggregatedOutput ?? `Exit ${item.exitCode ?? "unknown"}`),
       exitCode: item.exitCode ?? null,
     };
   }
@@ -248,12 +394,12 @@ function itemEvent(method, item) {
           type: "message",
           kind: "tool_use",
           name: String(item.tool ?? item.type),
-          inputPreview: JSON.stringify(item.arguments ?? {}),
+          inputPreview: eventPreview(item.arguments ?? {}),
         }
       : {
           type: "message",
           kind: "tool_result",
-          preview: JSON.stringify(item.result ?? item.status ?? "completed"),
+          preview: eventPreview(item.result ?? item.status ?? "completed"),
         };
   }
   return null;
@@ -262,9 +408,12 @@ function itemEvent(method, item) {
 export function normalizeAppServerMessage(message, entry = { record: { turns: 0, costUSD: 0 } }) {
   const params = message?.params ?? {};
   if (message?.method === "item/agentMessage/delta") {
-    return [{ type: "message", kind: "text", text: String(params.delta ?? "") }];
+    return [{ type: "message", kind: "text", text: eventPreview(params.delta ?? "") }];
   }
   if (["item/started", "item/completed"].includes(message?.method)) {
+    if (message.method === "item/completed" && params.item?.type === "agentMessage") {
+      return [{ type: "message", kind: "text", text: eventPreview(params.item.text ?? "") }];
+    }
     const event = itemEvent(message.method, params.item);
     return event ? [event] : [];
   }
@@ -284,18 +433,22 @@ function tailStream(entry, callbacks) {
     if (size < offset) offset = 0;
     if (size === offset) return;
     fd = openSync(entry.codexLogPath, "r");
-    const buffer = Buffer.alloc(size - offset);
-    const bytesRead = readSync(fd, buffer, 0, buffer.length, offset);
-    entry.codexLogOffset = offset + bytesRead;
-    const text = `${entry.codexLogBuffer ?? ""}${buffer.subarray(0, bytesRead).toString("utf8")}`;
-    const lines = text.split("\n");
-    entry.codexLogBuffer = lines.pop();
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let message;
-      try { message = JSON.parse(line); } catch { continue; }
-      captureThread(entry, message.params ?? message.result ?? {}, callbacks);
-      for (const event of normalizeAppServerMessage(message, entry)) callbacks.emit(entry, event);
+    while (offset < size) {
+      const buffer = Buffer.alloc(Math.min(STREAM_READ_CHUNK_BYTES, size - offset));
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, offset);
+      if (bytesRead <= 0) break;
+      offset += bytesRead;
+      entry.codexLogOffset = offset;
+      const text = `${entry.codexLogBuffer ?? ""}${buffer.subarray(0, bytesRead).toString("utf8")}`;
+      const lines = text.split("\n");
+      entry.codexLogBuffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let message;
+        try { message = JSON.parse(line); } catch { continue; }
+        captureThread(entry, message.params ?? message.result ?? {}, callbacks);
+        for (const event of normalizeAppServerMessage(message, entry)) callbacks.emit(entry, event);
+      }
     }
   } catch (error) {
     if (error?.code !== "ENOENT") entry.stderrLines.push(`codex stream tail failed: ${error.message}`);
@@ -337,16 +490,31 @@ async function poll(entry, project, commandRunner, callbacks, { failOnFirstError
     tailStream(entry, callbacks);
     const status = snapshot.status;
     const workerPid = snapshot.pid;
-    if (failOnFirstError && !KNOWN_STATUSES.has(status)) {
+    if (!KNOWN_STATUSES.has(status)) {
+      entry.codexStatusFailures = (entry.codexStatusFailures || 0) + 1;
+      if (!failOnFirstError && entry.codexStatusFailures < STATUS_FAILURE_RETRY_LIMIT) {
+        entry.stderrLines.push(`codex status unrecognized: ${JSON.stringify(status)}`);
+        entry.pollTimer = setTimeout(
+          () => void poll(entry, project, commandRunner, callbacks),
+          pollIntervalMs,
+        );
+        entry.pollTimer.unref?.();
+        return;
+      }
       const gone = callbacks.resolveSnapshotWorker?.(entry, workerPid) ?? true;
       await failTurn(entry, project, callbacks, gone
-        ? `worker reported an unrecognized status after restart: ${JSON.stringify(status)}`
-        : `worker reported an unrecognized status after restart and could not be confirmed dead (pid ${workerPid})`);
+        ? `worker reported an unrecognized status${failOnFirstError ? " after restart" : ""}: ${JSON.stringify(status)}`
+        : `worker reported an unrecognized status${failOnFirstError ? " after restart" : ""} and could not be confirmed dead (pid ${workerPid})`);
       return;
     }
+    entry.codexStatusFailures = 0;
     if (["queued", "running"].includes(status)) {
       if (failOnFirstError) {
-        const verdict = callbacks.classifyReportedWorker?.(entry, workerPid) ?? "alive";
+        const verdict = callbacks.classifyReportedWorker?.(
+          entry,
+          workerPid,
+          snapshot.pidStartIdentity,
+        ) ?? "alive";
         if (verdict !== "alive") {
           const gone = callbacks.resolveSnapshotWorker?.(entry, workerPid) ?? true;
           await failTurn(entry, project, callbacks, gone
@@ -358,7 +526,6 @@ async function poll(entry, project, commandRunner, callbacks, { failOnFirstError
       const owned = callbacks.captureWorkerPid?.(entry, workerPid) ?? false;
       if (owned) callbacks.captureCodexProcessTree?.(entry, workerPid);
     }
-    callbacks.emit(entry, { type: "status", state: status || "running", lane: "codex" });
     if (["completed", "failed", "cancelled"].includes(status)) {
       const result = JSON.parse(await commandRunner(process.execPath, [
         RUNNER_PATH,
@@ -391,6 +558,7 @@ async function poll(entry, project, commandRunner, callbacks, { failOnFirstError
       await callbacks.finish(entry, project, status === "completed" ? 0 : 1, null);
       return;
     }
+    callbacks.emit(entry, { type: "status", state: status || "running", lane: "codex" });
   } catch (error) {
     const warning = profilePathWarning(error, "status polling");
     if (warning || failOnFirstError) {
@@ -399,6 +567,19 @@ async function poll(entry, project, commandRunner, callbacks, { failOnFirstError
       return;
     }
     entry.stderrLines.push(`codex status failed: ${error.message}`);
+    entry.codexStatusFailures = (entry.codexStatusFailures || 0) + 1;
+    if (entry.codexStatusFailures >= STATUS_FAILURE_RETRY_LIMIT) {
+      const gone = callbacks.resolveSnapshotWorker?.(entry, entry.record.codexWorkerPid) ?? true;
+      await failTurn(
+        entry,
+        project,
+        callbacks,
+        gone
+          ? `worker status remained unavailable: ${error.message}`
+          : `worker status remained unavailable and could not be confirmed dead: ${error.message}`,
+      );
+      return;
+    }
   }
   entry.pollTimer = setTimeout(() => void poll(entry, project, commandRunner, callbacks), pollIntervalMs);
   entry.pollTimer.unref?.();
@@ -416,13 +597,33 @@ function promptFile(entry, prompt, dispatchDir) {
 function launchRunner(options, { resume = false } = {}) {
   const { entry, project, prompt, worktreePath, dispatchDir, env, spawner, commandRunner, callbacks } = options;
   entry.codexTurnCounted = false;
+  entry.codexStatusFailures = 0;
   entry.codexLogOffset = 0;
   entry.codexLogBuffer = "";
+  const jobId = randomBytes(12).toString("hex");
+  const binary = entry.codexBinary ?? inspectCodexBinary(env);
+  const dispatcherLease = callbacks.dispatcherLease?.() ?? {
+    dispatcherInstanceId: `atelier-process-${process.pid}`,
+    dispatcherPid: process.pid,
+    dispatcherPidIdentity: null,
+  };
+  callbacks.captureCodexJob?.(entry, { jobId, workspace: worktreePath });
   const args = [
     RUNNER_PATH,
     "task",
+    "--job-id",
+    jobId,
     "--codex",
     pinnedExecutable(entry, "codex"),
+    "--binary-files-json",
+    JSON.stringify(binary.files ?? []),
+    "--dispatcher-id",
+    dispatcherLease.dispatcherInstanceId,
+    "--dispatcher-pid",
+    String(dispatcherLease.dispatcherPid),
+    ...(dispatcherLease.dispatcherPidIdentity
+      ? ["--dispatcher-pid-identity", dispatcherLease.dispatcherPidIdentity]
+      : []),
     "--state-dir",
     runnerStateDir(),
     "--workspace",
@@ -448,15 +649,16 @@ function launchRunner(options, { resume = false } = {}) {
     }
     let launch;
     try { launch = JSON.parse(output); } catch { launch = {}; }
-    if (processError || code !== 0 || typeof launch.jobId !== "string") {
+    if (processError || code !== 0 || launch.jobId !== jobId) {
       entry.result = { success: false, summary: "Codex app-server runner launch failed" };
       void callbacks.finish(entry, project, code, null, processError);
       return;
     }
     entry.child = undefined;
-    entry.codexJobId = launch.jobId;
+    entry.codexJobId = jobId;
     setLogPath(entry, launch.logFile);
-    callbacks.captureCompanion(entry, { jobId: launch.jobId, workspace: worktreePath });
+    if (launch.warning) addWarningOnce(entry, launch.warning);
+    callbacks.captureCompanion(entry, { jobId, workspace: worktreePath });
     if (callbacks.captureWorkerPid?.(entry, launch.pid)) {
       callbacks.captureCodexProcessTree?.(entry, launch.pid);
     }
@@ -472,12 +674,35 @@ function resume({ text, ...options }) {
   launchRunner({ ...options, prompt: text }, { resume: true });
 }
 
-function reattach({ entry, project, workspace, env, commandRunner, callbacks }) {
+async function reattach({ entry, project, workspace, env, commandRunner, callbacks }) {
   entry.codexJobId = entry.record.codexJobId;
   entry.record.codexWorkspace = workspace;
   entry.env = env ?? entry.env ?? {};
   entry.codexLogOffset = 0;
   entry.codexLogBuffer = "";
+  entry.codexStatusFailures = 0;
+  const dispatcherLease = callbacks.dispatcherLease?.() ?? {
+    dispatcherInstanceId: `atelier-process-${process.pid}`,
+    dispatcherPid: process.pid,
+    dispatcherPidIdentity: null,
+  };
+  const attached = JSON.parse(await commandRunner(process.execPath, [
+    RUNNER_PATH,
+    "attach",
+    entry.codexJobId,
+    "--state-dir",
+    runnerStateDir(),
+    "--dispatcher-id",
+    dispatcherLease.dispatcherInstanceId,
+    "--dispatcher-pid",
+    String(dispatcherLease.dispatcherPid),
+    ...(dispatcherLease.dispatcherPidIdentity
+      ? ["--dispatcher-pid-identity", dispatcherLease.dispatcherPidIdentity]
+      : []),
+    "--break-dead",
+  ], { cwd: entry.record.codexWorkspace, env: entry.env }));
+  if (attached.warning) addWarningOnce(entry, attached.warning);
+  callbacks.captureCompanion(entry, { jobId: entry.codexJobId, workspace });
   callbacks.emit(entry, {
     type: "status",
     state: "running",
@@ -544,6 +769,10 @@ export function _setPollIntervalMs(next = POLL_INTERVAL_MS) {
 
 export function _setModelFileOps(nextFileOps = { readFileSync }) {
   modelFileOps = nextFileOps;
+}
+
+export function _setAppServerProber(next = probeCodexAppServer) {
+  appServerProber = next;
 }
 
 export const _appServerRunnerPath = RUNNER_PATH;

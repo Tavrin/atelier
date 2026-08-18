@@ -85,23 +85,41 @@ enters `resuming`, emits the redacted user `reply` event, and resumes the agent
 in the original worktree and environment. Claude launches `claude --resume`.
 Codex writes each full launch or resume prompt to a mode-`0600` file in
 `<atelier-state>/dispatches/`, then asks `codex-app-server-runner.mjs` to start
-the exact profile-pinned Codex binary. The runner reads the prompt file and
+the exact profile-pinned Codex binary. For the npm distribution the pin covers
+both the resolved JavaScript launcher and the platform-native payload selected
+by that launcher; the profile records the complete digested path list. Version
+compatibility is established by the live initialize handshake, while the
+reported version remains a per-record drift pin. The runner reads the prompt file and
 speaks newline-delimited JSON-RPC (`initialize`, `thread/start` or
 `thread/resume`, then `turn/start`) over `codex app-server --stdio`. This avoids
 the kernel's per-argument length limit without truncating task, ticket, or
 review content.
 Successful resumes run the configured verification stage again.
 
-The detached runner persists mode-`0600` job state and redacted protocol streams
-under `<atelier-state>/codex-app-server/jobs`. Its PID and Linux process-start
-identity are recorded before the launcher exits. A restarted Atelier daemon
-reattaches by job id and accepts a running snapshot only when that persisted
-identity still corroborates the runner; missing or unknown identity fails closed
-and retains the dispatch fence. Cancellation returns `{finish: true}` only after
-the identity is proven gone. `legacyCodexCompanion: true` instead uses the
-deprecated plugin-cache companion and its durable
+The detached runner persists atomically replaced mode-`0600` job state and a
+bounded, redacted protocol stream under `<atelier-state>/codex-app-server/jobs`.
+Atelier first persists the minted job id on the dispatch; the detached child then
+writes its own PID and process-start identity as its first job mutation. An
+exclusive attachment sidecar leases the job to one dispatcher instance. A
+restarted daemon may break that lease only after proving its holder dead, reads
+missing worker identity from the job, and retains the dispatch fence when
+corroboration is unknown. Linux uses PID plus `/proc` start identity. Platforms
+without `/proc` deliberately degrade to signal-0 aliveness and report that
+weaker corroboration rather than declaring a live runner dead. Cancellation
+returns `{finish: true}` only after the identity is proven gone.
+
+Immediately before spawning the app-server, the runner re-lstats every captured
+launcher/payload path and rejects device or inode divergence. A trusted local
+administrator can still modify bytes in place between that check and kernel
+execution; this residual TOCTOU is accepted for Atelier's loopback-only,
+single-user threat model.
+
+`legacyCodexCompanion: true` instead uses the deprecated plugin-cache companion
+and its durable
 `<atelier-state>/codex-companion` state root; no supported app-server path reads
-the plugin cache.
+the plugin cache. Legacy records pin the Node interpreter and companion path plus
+companion digest, but explicitly record `binaryPinned: false`: the companion
+PATH-searches Codex internally and therefore cannot enforce the Codex binary pin.
 
 Claude Code 2.1.216 was validated directly with `--input-format stream-json`.
 The accepted JSONL user-message shape is:

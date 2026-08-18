@@ -8,6 +8,10 @@ import { promisify } from "node:util";
 
 import { REAL_PROVIDER_DISABLED_CODE } from "./fake-agent/poison-adapter.mjs";
 import {
+  _appServerRunnerPath,
+  probeCodexAppServer,
+} from "../server/lib/agents/codex-app-server.mjs";
+import {
   createGoldenHarness,
   processExists,
   runStandaloneFake,
@@ -99,6 +103,19 @@ test("F1 kill switch poisons real providers and dispatch helper cannot override 
   assert.equal(
     refusal.value.error,
     `${REAL_PROVIDER_DISABLED_CODE}: real provider claude is disabled by ATELIER_TEST_NO_REAL_PROVIDER=1`,
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [_appServerRunnerPath, "task"], {
+      env: { ...process.env, ATELIER_TEST_NO_REAL_PROVIDER: "1" },
+    }),
+    /EATELIER_REAL_PROVIDER_DISABLED/,
+  );
+  await assert.rejects(
+    probeCodexAppServer(join(shimRoot, "codex"), {
+      ...process.env,
+      ATELIER_TEST_NO_REAL_PROVIDER: "1",
+    }),
+    /EATELIER_REAL_PROVIDER_DISABLED/,
   );
   assert.equal(await fileContents(receipt), undefined, "F1 receipt shim proved a real provider spawned");
 });

@@ -65,10 +65,13 @@ export function resolveExecutable(command, env = {}) {
 export function createExecutionProfile({
   agentLane,
   command,
+  executableResolvedPath = undefined,
   companionPath = null,
   companionDigest = null,
   executableVersion = null,
   executableContentDigest = null,
+  executableDigestPaths = null,
+  binaryPinned = undefined,
   env,
   controlledKeys = [],
   hooksSupported = true,
@@ -93,10 +96,16 @@ export function createExecutionProfile({
     class: "provider",
     executable: {
       command,
-      resolvedPath: resolveExecutable(command, sortedEnv),
+      resolvedPath: executableResolvedPath === undefined
+        ? resolveExecutable(command, sortedEnv)
+        : executableResolvedPath,
       version: executableVersion ?? null,
       digest: executableContentDigest ?? null,
+      ...(Array.isArray(executableDigestPaths)
+        ? { digestPaths: [...executableDigestPaths] }
+        : {}),
     },
+    ...(binaryPinned === undefined ? {} : { binaryPinned: binaryPinned === true }),
     companionPath: companionPath ?? null,
     companionDigest: companionDigest ?? null,
     // Only operator/project-controlled keys bind process admission. Ambient
@@ -158,7 +167,16 @@ export function executionProfileMismatch(recorded, current, {
       ? [["executable.version", recorded.executable?.version, current.executable?.version]]
       : []),
     ...(executableDigest && recorded.executable?.digest !== undefined
-      ? [["executable.digest", recorded.executable?.digest, current.executable?.digest]]
+      ? [
+          ["executable.digest", recorded.executable?.digest, current.executable?.digest],
+          ...(recorded.executable?.digestPaths !== undefined
+            ? [[
+                "executable.digestPaths",
+                recorded.executable?.digestPaths,
+                current.executable?.digestPaths,
+              ]]
+            : []),
+        ]
       : []),
     ...(companionPath
       ? [["companionPath", recorded.companionPath, current.companionPath]]
@@ -168,7 +186,9 @@ export function executionProfileMismatch(recorded, current, {
       : []),
   ];
   for (const [name, before, after] of fields) {
-    if (before !== after) differences.push(`${name}: ${printable(before)} -> ${printable(after)}`);
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      differences.push(`${name}: ${printable(before)} -> ${printable(after)}`);
+    }
   }
   return differences.length > 0 ? `${EXECUTION_PROFILE_MISMATCH}${differences.join("; ")}` : null;
 }
