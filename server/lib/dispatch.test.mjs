@@ -652,7 +652,7 @@ function stubBakeoffRuntime(
   const calls = [];
   _setBrResolver(() => "/fixture/br");
   _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-    useLegacyCompanion(setup);
+  useLegacyCompanion(setup);
   _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
   _setSpawner((file) => {
     if (isCommand(file, "claude")) return claudeFails ? failedChild() : successfulChild();
@@ -19569,7 +19569,7 @@ test("codex: an unreadable companion result classifies conservatively instead of
   ]) {
     const setup = await fixture(t, { tracker: "none" });
     _setProbe(async () => ({ git: { dirtyCount: 0, branch: "main" } }));
-  useLegacyCompanion(setup);
+    useLegacyCompanion(setup);
     _setGitDirFileOps({ writeFileSync() {}, unlinkSync() {} });
     _setSpawner(() => codexLaunchChild(`codex-${label.replace(/\s+/g, "-")}`));
     _setRunFile(async (file, args) => {
