@@ -8,6 +8,10 @@ import { promisify } from "node:util";
 
 import { REAL_PROVIDER_DISABLED_CODE } from "./fake-agent/poison-adapter.mjs";
 import {
+  _appServerRunnerPath,
+  probeCodexAppServer,
+} from "../server/lib/agents/codex-app-server.mjs";
+import {
   createGoldenHarness,
   processExists,
   runStandaloneFake,
@@ -73,7 +77,13 @@ test("F1 kill switch poisons real providers and dispatch helper cannot override 
   const shimRoot = await mkdtemp(join(tmpdir(), "atelier-real-provider-shim-"));
   t.after(() => rm(shimRoot, { recursive: true, force: true }));
   const receipt = join(shimRoot, "provider-spawned");
-  const shim = `#!/bin/sh\nprintf spawned >'${receipt}'\n`;
+  const shim = `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'codex-cli 9.9.9'
+  exit 0
+fi
+printf spawned >'${receipt}'
+`;
   await writeFile(join(shimRoot, "claude"), shim);
   await writeFile(join(shimRoot, "codex"), shim);
   await chmod(join(shimRoot, "claude"), 0o755);
@@ -82,7 +92,10 @@ test("F1 kill switch poisons real providers and dispatch helper cannot override 
   process.env.PATH = `${shimRoot}:${originalPath}`;
   t.after(() => { process.env.PATH = originalPath; });
 
-  const harness = await createGoldenHarness(t, { scenario: committedScenario("f1.txt", "f1\n") });
+  const harness = await createGoldenHarness(t, {
+    scenario: committedScenario("f1.txt", "f1\n"),
+    allowCodexGuardFlow: true,
+  });
   await assert.rejects(
     harness.dispatch({ lane: "claude" }),
     (error) => error.code === REAL_PROVIDER_DISABLED_CODE,
@@ -99,6 +112,32 @@ test("F1 kill switch poisons real providers and dispatch helper cannot override 
   assert.equal(
     refusal.value.error,
     `${REAL_PROVIDER_DISABLED_CODE}: real provider claude is disabled by ATELIER_TEST_NO_REAL_PROVIDER=1`,
+  );
+  const codexAttempt = await harness.rawApi("/api/dispatch", {
+    method: "POST",
+    body: {
+      project: harness.projectName,
+      prompt: "guard must flow into the supported Codex adapter",
+      lane: "codex",
+    },
+  });
+  assert.equal(codexAttempt.ok, true, JSON.stringify(codexAttempt.value));
+  harness.trackDispatch(codexAttempt.value.id);
+  const codexRefusal = await harness.waitRecord(codexAttempt.value.id);
+  assert.equal(codexRefusal.state, "prepare_failed");
+  assert.match(codexRefusal.exitSummary, /EATELIER_REAL_PROVIDER_DISABLED/);
+  await assert.rejects(
+    execFileAsync(process.execPath, [_appServerRunnerPath, "task"], {
+      env: { ...process.env, ATELIER_TEST_NO_REAL_PROVIDER: "1" },
+    }),
+    /EATELIER_REAL_PROVIDER_DISABLED/,
+  );
+  await assert.rejects(
+    probeCodexAppServer(join(shimRoot, "codex"), {
+      ...process.env,
+      ATELIER_TEST_NO_REAL_PROVIDER: "1",
+    }),
+    /EATELIER_REAL_PROVIDER_DISABLED/,
   );
   assert.equal(await fileContents(receipt), undefined, "F1 receipt shim proved a real provider spawned");
 });

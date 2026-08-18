@@ -78,23 +78,48 @@ clients can apply that precedence without treating an inherited lane as explicit
 ## Reply and live-input flow
 
 Claude's `system/init` event supplies the session id used by terminal replies.
-The Codex companion supplies its thread id in the background job state; Atelier
-stores that value in the same dispatch `sessionId` field. Atelier persists the id,
+The supported Codex app-server supplies its thread id through the detached
+Atelier runner's background job state; Atelier stores that value in the same
+dispatch `sessionId` field. Atelier persists the id,
 enters `resuming`, emits the redacted user `reply` event, and resumes the agent
 in the original worktree and environment. Claude launches `claude --resume`.
 Codex writes each full launch or resume prompt to a mode-`0600` file in
-`<atelier-state>/dispatches/`, then launches
-`codex-companion.mjs task --write --resume --background --json` with only a
-short instruction to read that file. This avoids the kernel's per-argument
-length limit without truncating task, ticket, or review content. The companion
-selects the completed thread tracked for that isolated workspace/session.
+`<atelier-state>/dispatches/`, then asks `codex-app-server-runner.mjs` to start
+the exact profile-pinned Codex binary. For the npm distribution the pin covers
+both the resolved JavaScript launcher and the platform-native payload selected
+by that launcher; the profile records the complete digested path list. Version
+compatibility is established by the live initialize handshake, while the
+reported version remains a per-record drift pin. The runner reads the prompt file and
+speaks newline-delimited JSON-RPC (`initialize`, `thread/start` or
+`thread/resume`, then `turn/start`) over `codex app-server --stdio`. This avoids
+the kernel's per-argument length limit without truncating task, ticket, or
+review content.
 Successful resumes run the configured verification stage again.
 
-Atelier sets `CLAUDE_PLUGIN_DATA` for every Codex companion launch and resume to
-`<atelier-state>/codex-companion`, so the companion's thread registry and job
-records survive host reboots. Threads created before this durable state path was
-introduced remain in the companion's volatile `/tmp` fallback and cannot be
-recovered after that directory is cleared; Atelier does not migrate them.
+The detached runner persists atomically replaced mode-`0600` job state and a
+bounded, redacted protocol stream under `<atelier-state>/codex-app-server/jobs`.
+Atelier first persists the minted job id on the dispatch; the detached child then
+writes its own PID and process-start identity as its first job mutation. An
+exclusive attachment sidecar leases the job to one dispatcher instance. A
+restarted daemon may break that lease only after proving its holder dead, reads
+missing worker identity from the job, and retains the dispatch fence when
+corroboration is unknown. Linux uses PID plus `/proc` start identity. Platforms
+without `/proc` deliberately degrade to signal-0 aliveness and report that
+weaker corroboration rather than declaring a live runner dead. Cancellation
+returns `{finish: true}` only after the identity is proven gone.
+
+Immediately before spawning the app-server, the runner re-lstats every captured
+launcher/payload path and rejects device or inode divergence. A trusted local
+administrator can still modify bytes in place between that check and kernel
+execution; this residual TOCTOU is accepted for Atelier's loopback-only,
+single-user threat model.
+
+`legacyCodexCompanion: true` instead uses the deprecated plugin-cache companion
+and its durable
+`<atelier-state>/codex-companion` state root; no supported app-server path reads
+the plugin cache. Legacy records pin the Node interpreter and companion path plus
+companion digest, but explicitly record `binaryPinned: false`: the companion
+PATH-searches Codex internally and therefore cannot enforce the Codex binary pin.
 
 Claude Code 2.1.216 was validated directly with `--input-format stream-json`.
 The accepted JSONL user-message shape is:
@@ -113,9 +138,10 @@ can continue its captured thread, but Atelier has no Codex mid-turn input channe
 
 ## Codex process-tree lifecycle
 
-A companion job is three processes plus per-session MCP children, each in its own
-process group, so nothing the companion signals reaches all of them. On every live
-poll the codex adapter hands the dispatcher the worker pid it just corroborated
+The supported adapter's Atelier-owned runner is a detached process-group leader
+that owns the pinned `codex app-server` stdio child. The launcher records its PID
+fence before beginning ordinary polling, and every live poll hands the dispatcher
+the worker pid it just corroborated
 (`callbacks.captureCodexProcessTree`), which walks the parent chain and persists
 each member with its `/proc` start-time identity. The capture is gated on
 `captureWorkerPid`'s verdict: that classifies any existing fence first, so a
@@ -124,10 +150,13 @@ different worker is still alive - is neither adopted nor has its descendants
 recorded as Atelier's to kill. The dispatcher reaps that tree on
 terminal transitions, dismissal and merge, and sweeps for leftovers at boot and on
 an interval. Only a turn that is still in flight keeps its tree, and only a member
-Atelier itself captured is ever signalled - a companion-shaped command line in a
-atelier worktree is reported, not reaped.
+Atelier itself captured is ever signalled. The deprecated companion has a wider
+multi-process tree, so this same capture remains necessary for its app-server and
+MCP descendants; a companion-shaped command line in an Atelier worktree is
+reported, not reaped, unless its recorded identity proves ownership.
 
-The adapter-visible consequence is the **cold-start contract**: a Codex resume
+For the deprecated companion, the adapter-visible consequence remains the
+**cold-start contract**: a Codex resume
 relaunches in the original worktree, and if that workspace's app-server has been
 reaped the companion's `ensureBrokerSession(cwd)` starts a fresh one. The thread
 lives in a persisted rollout file under `~/.codex/sessions`, so a reap costs a

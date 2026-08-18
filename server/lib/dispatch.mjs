@@ -35,6 +35,7 @@ import {
 } from "../../shared/review-assessment.mjs";
 import { getAgent } from "./agents/index.mjs";
 import {
+  _setAppServerProber as setAgentAppServerProber,
   _setCompanionResolver as setAgentCompanionResolver,
   _setGitDirFileOps as setAgentGitDirFileOps,
   _setModelFileOps as setAgentModelFileOps,
@@ -509,6 +510,7 @@ function publicRecord(record) {
     // reaches the public API/MCP surface (atelier-tzw review finding 7f).
     codexJobId: record.codexJobId ?? null,
     codexWorkspace: record.codexWorkspace ?? null,
+    codexAdapter: record.codexAdapter ?? null,
     codexWorkerPid: record.codexWorkerPid ?? null,
     codexWorkerPidIdentity: record.codexWorkerPidIdentity ?? null,
     // The companion job's whole process tree (app-server + MCP children), each
@@ -1609,6 +1611,7 @@ export function createDispatcher({
   }
   try {
   const dispatchDir = join(stateDir, "dispatches");
+  const dispatcherInstanceId = randomBytes(16).toString("hex");
   const indexPath = join(dispatchDir, "index.jsonl");
   const queuePath = join(stateDir, "queue.json");
   const convoysPath = join(stateDir, "convoys.json");
@@ -2886,6 +2889,7 @@ export function createDispatcher({
     const exposed = publicRecord(record);
     delete exposed.codexJobId;
     delete exposed.codexWorkspace;
+    delete exposed.codexAdapter;
     delete exposed.codexWorkerPid;
     delete exposed.codexWorkerPidIdentity;
     delete exposed.codexProcessTree;
@@ -3002,6 +3006,44 @@ export function createDispatcher({
     transition(entry, "running", { codexJobId: jobId, codexWorkspace: workspace });
   }
 
+  function captureCodexJob(entry, { jobId, workspace }) {
+    entry.codexJobId = jobId;
+    entry.record.codexJobId = jobId;
+    entry.record.codexWorkspace = workspace;
+    persist(entry);
+  }
+
+  function dispatcherLease() {
+    return {
+      dispatcherInstanceId,
+      dispatcherPid: process.pid,
+      dispatcherPidIdentity: processStartIdentity(process.pid) ?? null,
+    };
+  }
+
+  function retainCodexReattachFailure(entry, detail) {
+    const reason = redactText(String(detail || "Codex runner attachment could not be established"));
+    entry.record.orphanUnresolved = true;
+    entry.record.restartResumeReady = false;
+    entry.record.warnings = (entry.record.warnings || []).filter(
+      (warning) => !String(warning).startsWith(UNRESOLVED_ORPHAN_WARNING_PREFIX),
+    );
+    entry.record.warnings.push(
+      `${UNRESOLVED_ORPHAN_WARNING_PREFIX} ${reason} - the tracker claim is retained and this ticket stays blocked until restart reattach proves the runner state or the dispatch is dismissed`,
+    );
+    persist(entry);
+    emit(entry, { type: "status", state: entry.record.state, detail: reason });
+  }
+
+  function confirmCodexReattach(entry) {
+    if (entry.record.orphanUnresolved !== true) return;
+    entry.record.orphanUnresolved = false;
+    entry.record.warnings = (entry.record.warnings || []).filter(
+      (warning) => !String(warning).startsWith(UNRESOLVED_ORPHAN_WARNING_PREFIX),
+    );
+    persist(entry);
+  }
+
   // Minting an identity for a reported pid is how the codex lane acquires its
   // fence at all (atelier-tzw finding 4: only ORDINARY live polling, with Atelier's
   // own poller watching the job it launched, may establish one).
@@ -3092,14 +3134,36 @@ export function createDispatcher({
   // "provably gone" and "cannot tell" into one answer and only the first may
   // release a claim (round 4, item 1a).
   //
-  // Bare /proc existence is never sufficient evidence on its own (atelier-tzw
-  // review finding 4): identity is only ever legitimately established by
-  // captureWorkerPid during ORDINARY live polling, i.e. while Atelier's own
-  // dispatcher was continuously watching the job run. A boot-time reattach can
-  // extend that trust across the restart, but it can never mint it fresh - so an
-  // uncorroborated live pid is unresolved, not alive and not dead.
-  function classifyReportedWorker(entry, pid) {
+  // A legacy/companion snapshot may only extend an identity Atelier captured
+  // while it was continuously watching that worker. Owner-accepted ATT-009 B2
+  // is the narrow exception: the Atelier-owned runner's durable job file may
+  // mint its reported pid+start identity during boot reattach, closing the
+  // record-persist-before-spawn crash window. Non-Linux signal-0 degradation is
+  // scoped to that runner snapshot too; it never softens the shared fence
+  // classifier or legacy companion liveness.
+  function classifyReportedWorker(entry, pid, reportedIdentity, { runnerSnapshot = false } = {}) {
     if (Number.isInteger(pid) && pid > 0) {
+      if (runnerSnapshot && process.platform !== "linux" && processExists(pid)) {
+        addWarningOnce(
+          entry.record,
+          "Codex runner liveness uses weaker signal-0 corroboration on this platform",
+        );
+        persist(entry);
+        return "alive";
+      }
+      if (
+        runnerSnapshot &&
+        typeof reportedIdentity === "string" &&
+        reportedIdentity &&
+        processStartIdentity(pid) === reportedIdentity &&
+        (!Number.isInteger(entry.record.codexWorkerPid) ||
+          (entry.record.codexWorkerPid === pid && !entry.record.codexWorkerPidIdentity))
+      ) {
+        entry.record.codexWorkerPid = pid;
+        entry.record.codexWorkerPidIdentity = reportedIdentity;
+        persist(entry);
+        return "alive";
+      }
       // Judge the REPORTED pid against what is already on record - capturing the
       // fresh pid first would make a reused-pid check compare an identity with
       // itself and always match.
@@ -4325,14 +4389,11 @@ export function createDispatcher({
     }
     if (BOOT_RECOVERY_STATES.has(loaded.state) && !observer) {
       const project = registry.projects.find((candidate) => candidate.name === loaded.project);
-      // Only a "running" codex dispatch can ever carry a persisted
-      // codexJobId/codexWorkspace pair - captureCompanion persists the jobId
-      // atomically with the running transition, and every resume path clears
-      // both fields atomically with the "resuming" transition (finding 4), so
-      // "preparing"/"resuming" codex records never reach here with a usable
-      // job to reattach to.
+      // ATT-009 B1 persists the minted job id before the detached runner spawn.
+      // A crash can therefore leave preparing/resuming as well as running with
+      // a usable job file; boot adopts all three through the same fail-closed
+      // lease and worker-identity checks.
       const codexReattachable =
-        loaded.state === "running" &&
         loaded.lane === "codex" &&
         typeof loaded.codexJobId === "string" &&
         loaded.codexJobId.length > 0 &&
@@ -4344,15 +4405,12 @@ export function createDispatcher({
       let reattachProfile;
       let reattachEnvironments;
       if (codexReattachable && typeof codexAgentForReattach.reattach === "function") {
-        reattachEnvironments = resolvedEntryEnvironments(project, codexAgentForReattach);
+        reattachEnvironments = resolvedEntryEnvironments(project, codexAgentForReattach, entry);
         reattachProfile = reconcileExecutionProfile(
           entry,
           codexAgentForReattach,
           reattachEnvironments,
-          {
-            compare: { companionPath: true },
-            requirements: { companionPath: true },
-          },
+          codexProfilePolicy(loaded),
         );
         reattachProfileMismatch = reattachProfile.mismatch;
         if (reattachProfileMismatch) {
@@ -4360,7 +4418,7 @@ export function createDispatcher({
             entry,
             reattachProfileMismatch,
             "codex boot reattach",
-            { companionPath: true },
+            reattachProfile.comparison,
           );
         }
       }
@@ -4387,26 +4445,30 @@ export function createDispatcher({
               callbacks: {
                 captureCodexProcessTree,
                 captureCompanion,
+                captureCodexJob,
                 captureSession,
                 captureWorkerPid,
                 classifyReportedWorker,
                 commitOutcomeClear,
                 confirmChildExit,
                 resolveSnapshotWorker,
+                dispatcherLease,
+                confirmCodexReattach,
                 emit,
                 finish,
                 normalizeLine,
                 restoreClearedOutcome,
                 streamLines,
                 transition,
+                retainCodexReattachFailure,
               },
             }))
-            .catch(async (error) => {
+            .catch((error) => {
               entry.inert = false;
               entry.finished = false;
               entry.result = { success: false, summary: "codex reattach failed" };
               entry.stderrLines.push(`codex reattach failed: ${error.message}`);
-              await finish(entry, project, null, null);
+              retainCodexReattachFailure(entry, `codex reattach failed: ${error.message}`);
             }),
         );
         continue;
@@ -5555,7 +5617,7 @@ export function createDispatcher({
       throw new Error("server shutdown interrupted queued post-merge verification");
     }
     const agent = getAgent(entry.record.lane);
-    const postMergeEnvironments = resolvedEntryEnvironments(project, agent);
+    const postMergeEnvironments = resolvedEntryEnvironments(project, agent, entry);
     const postMergeReconciliation = reconcileExecutionProfile(
       entry,
       agent,
@@ -6238,7 +6300,7 @@ export function createDispatcher({
         unattendedQueue: entry.record.queueLaunched === true,
       });
       const prompt = opts.planFirst ? `${PLAN_PROMPT_PREFIX}${taskPrompt}` : taskPrompt;
-      const spawnEnvironments = resolvedEntryEnvironments(project, agent);
+      const spawnEnvironments = resolvedEntryEnvironments(project, agent, entry);
       await agent.preLaunchChecks({
         entry,
         project,
@@ -6262,10 +6324,9 @@ export function createDispatcher({
         controlledKeys: spawnEnvironments.controlledKeys,
         hooksSupported: spawnEnvironments.hooksSupported,
       });
-      requireResolvedExecutionProfile(executionProfile, {
-        executable: true,
-        companionPath: entry.record.lane === "codex",
-      });
+      requireResolvedExecutionProfile(executionProfile, entry.record.lane === "codex"
+        ? codexProfilePolicy(entry.record).requirements
+        : { executable: true });
       if (entry.record.executionProfile) {
         throw new Error("Execution profile already exists before first spawn");
       }
@@ -6290,18 +6351,22 @@ export function createDispatcher({
           childIdentityFields,
           captureCodexProcessTree,
           captureCompanion,
+          captureCodexJob,
           captureSession,
           captureWorkerPid,
           classifyReportedWorker,
           commitOutcomeClear,
           confirmChildExit,
           resolveSnapshotWorker,
+          dispatcherLease,
+          confirmCodexReattach,
           emit,
           finish,
           normalizeLine,
           restoreClearedOutcome,
           streamLines,
           transition,
+          retainCodexReattachFailure,
         },
       });
     } catch (error) {
@@ -6317,7 +6382,7 @@ export function createDispatcher({
     }
   }
 
-  function resolvedEntryEnvironments(project, agent) {
+  function resolvedEntryEnvironments(project, agent, entry) {
     const profile = project.dispatchProfile || {};
     const resolvedDispatchEnv = {
       ...(registry.defaults?.dispatchProfile?.dispatchEnv || {}),
@@ -6334,7 +6399,7 @@ export function createDispatcher({
       ...controlledEnv,
     });
     if (agent.id === "codex") delete workloadEnv.CLAUDE_PLUGIN_DATA;
-    const providerEnv = agent.executionEnv(workloadEnv);
+    const providerEnv = agent.executionEnv(workloadEnv, { project, entry });
     return {
       providerEnv,
       workloadEnv,
@@ -6351,7 +6416,10 @@ export function createDispatcher({
 
   function requireResolvedExecutionProfile(profile, {
     executable = false,
+    executableVersion = false,
+    executableDigest = false,
     companionPath = false,
+    companionDigest = false,
   } = {}) {
     if (executable && !profile.executable?.resolvedPath) {
       throw new Error(`Provider executable could not be resolved: ${profile.executable?.command}`);
@@ -6359,6 +6427,45 @@ export function createDispatcher({
     if (companionPath && !profile.companionPath) {
       throw new Error("Codex lane unavailable: codex-companion.mjs was not found");
     }
+    if (executableVersion && !profile.executable?.version) {
+      throw new Error(`Provider executable version could not be read: ${profile.executable?.resolvedPath}`);
+    }
+    if (executableDigest && !profile.executable?.digest) {
+      throw new Error(`Provider executable digest could not be read: ${profile.executable?.resolvedPath}`);
+    }
+    if (companionDigest && !profile.companionDigest) {
+      throw new Error(`Codex companion digest could not be read: ${profile.companionPath}`);
+    }
+  }
+
+  function codexProfilePolicy(record) {
+    if (record.lane !== "codex") return { compare: {}, requirements: {} };
+    if (record.codexAdapter === "app-server") {
+      const pinned = {
+        executable: true,
+        executableVersion: true,
+        executableDigest: true,
+      };
+      return { compare: pinned, requirements: pinned };
+    }
+    if (record.codexAdapter === "legacy-companion") {
+      const pinned = {
+        executable: true,
+        companionPath: true,
+        companionDigest: true,
+      };
+      return { compare: pinned, requirements: pinned };
+    }
+    // Pre-ATT-009 companion records retain only their recorded companion pin;
+    // undiscriminated records without companion evidence route app-server.
+    return {
+      compare: record.codexJobId || record.codexWorkspace || record.executionProfile?.companionPath
+        ? { executable: true, companionPath: true, companionDigest: true }
+        : { executable: true, executableVersion: true, executableDigest: true },
+      requirements: record.codexJobId || record.codexWorkspace || record.executionProfile?.companionPath
+        ? { executable: true, companionPath: true, companionDigest: true }
+        : { executable: true, executableVersion: true, executableDigest: true },
+    };
   }
 
   function recordGitPostureWarning(entry, profile) {
@@ -6414,7 +6521,7 @@ export function createDispatcher({
       ? entry.record.executionProfileRefusal
       : null;
     const recordedRefusalComparison = recordedRefusal
-      ? refusalComparison(recordedRefusal, compare)
+      ? refusalComparison(entry, recordedRefusal, compare)
       : null;
     const recordedRefusalMismatch = recordedRefusal
       ? executionProfileMismatch(recorded, current, recordedRefusalComparison)
@@ -6434,6 +6541,9 @@ export function createDispatcher({
           companionPath: compare.companionPath || acceptsRecordedRefusal
             ? current.companionPath
             : recorded.companionPath,
+          companionDigest: compare.companionDigest || acceptsRecordedRefusal
+            ? current.companionDigest
+            : recorded.companionDigest,
         }
       : current;
     return {
@@ -6484,14 +6594,17 @@ export function createDispatcher({
     }
   }
 
-  function refusalComparison(refusal, fallback) {
+  function refusalComparison(entry, refusal, fallback) {
     if (refusal?.compare && typeof refusal.compare === "object") {
       return {
         executable: refusal.compare.executable === true,
+        executableVersion: refusal.compare.executableVersion === true,
+        executableDigest: refusal.compare.executableDigest === true,
         companionPath: refusal.compare.companionPath === true,
+        companionDigest: refusal.compare.companionDigest === true,
       };
     }
-    if (refusal?.operation === "codex boot reattach") return { companionPath: true };
+    if (refusal?.operation === "codex boot reattach") return codexProfilePolicy(entry.record).compare;
     if (["reply resume", "plan continuation"].includes(refusal?.operation)) {
       return { executable: true };
     }
@@ -6508,7 +6621,10 @@ export function createDispatcher({
       detail,
       compare: {
         executable: compare.executable === true,
+        executableVersion: compare.executableVersion === true,
+        executableDigest: compare.executableDigest === true,
         companionPath: compare.companionPath === true,
+        companionDigest: compare.companionDigest === true,
       },
       at: new Date().toISOString(),
     };
@@ -7444,6 +7560,9 @@ export function createDispatcher({
       sessionId: null,
       codexJobId: null,
       codexWorkspace: null,
+      codexAdapter: lane === "codex"
+        ? (project.legacyCodexCompanion ? "legacy-companion" : "app-server")
+        : null,
       codexWorkerPid: null,
       codexWorkerPidIdentity: null,
       codexProcessTree: null,
@@ -8316,7 +8435,7 @@ ${diff}`;
         throw dispatcherError(409, `Concurrent dispatch cap exceeded (${cap})`);
       }
       const agent = getAgent(record.lane);
-      const verifyEnvironments = resolvedEntryEnvironments(project, agent);
+      const verifyEnvironments = resolvedEntryEnvironments(project, agent, entry);
       const profile = reconcileExecutionProfile(entry, agent, verifyEnvironments, {
         accept: acceptExecutionProfile === true,
       });
@@ -8472,7 +8591,7 @@ ${diff}`;
           "acceptExecutionProfile applies only to resumes that spawn a new agent turn",
         );
       }
-      const liveEnvironments = resolvedEntryEnvironments(project, agent);
+      const liveEnvironments = resolvedEntryEnvironments(project, agent, entry);
       const liveProfile = reconcileExecutionProfile(entry, agent, liveEnvironments);
       if (liveProfile.mismatch) {
         addWarningOnce(
@@ -8577,15 +8696,13 @@ ${diff}`;
         throw error;
       }
 
-      const resumeEnvironments = resolvedEntryEnvironments(project, agent);
+      const resumeEnvironments = resolvedEntryEnvironments(project, agent, entry);
       const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnvironments, {
         accept: acceptExecutionProfile === true,
         acceptRecordedRefusal: true,
-        compare: { executable: true },
-        requirements: {
-          executable: true,
-          companionPath: entry.record.lane === "codex",
-        },
+        ...(entry.record.lane === "codex"
+          ? codexProfilePolicy(entry.record)
+          : { compare: { executable: true }, requirements: { executable: true } }),
       });
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);
@@ -8672,18 +8789,22 @@ ${diff}`;
             childIdentityFields,
             captureCodexProcessTree,
             captureCompanion,
+            captureCodexJob,
             captureSession,
             captureWorkerPid,
             classifyReportedWorker,
             commitOutcomeClear,
             confirmChildExit,
             resolveSnapshotWorker,
+            dispatcherLease,
+            confirmCodexReattach,
             emit,
             finish,
             normalizeLine,
             restoreClearedOutcome,
             streamLines,
             transition,
+            retainCodexReattachFailure,
           },
         });
       } catch (error) {
@@ -8767,11 +8888,12 @@ ${diff}`;
         project,
         action: "Plan continuation",
       });
-      const resumeEnvironments = resolvedEntryEnvironments(project, agent);
+      const resumeEnvironments = resolvedEntryEnvironments(project, agent, entry);
       const resumeProfile = reconcileExecutionProfile(entry, agent, resumeEnvironments, {
         accept: acceptExecutionProfile === true,
-        compare: { executable: true },
-        requirements: { executable: true },
+        ...(entry.record.lane === "codex"
+          ? codexProfilePolicy(entry.record)
+          : { compare: { executable: true }, requirements: { executable: true } }),
       });
       if (resumeProfile.mismatch) {
         if (reclaimed) await releaseClaim(entry, project);
@@ -8845,18 +8967,22 @@ ${diff}`;
             childIdentityFields,
             captureCodexProcessTree,
             captureCompanion,
+            captureCodexJob,
             captureSession,
             captureWorkerPid,
             classifyReportedWorker,
             commitOutcomeClear,
             confirmChildExit,
             resolveSnapshotWorker,
+            dispatcherLease,
+            confirmCodexReattach,
             emit,
             finish,
             normalizeLine,
             restoreClearedOutcome,
             streamLines,
             transition,
+            retainCodexReattachFailure,
           },
         });
       } catch (error) {
@@ -8961,7 +9087,7 @@ ${diff}`;
         }
         await finish(reservedEntry, project, 0);
       }
-      if (activeState === "preparing") {
+      if (activeState === "preparing" && stopResult.finish) {
         await cleanupDispatchArtifacts(reservedEntry, project, { bestEffort: true });
       }
       return exposedRecord(reservedEntry.record);
@@ -9390,6 +9516,13 @@ ${diff}`;
         if (verdict.action === "report") {
           for (const candidate of group.processes) {
             result.reported.push(codexSweepReport(candidate, group.worktreePath, verdict.reason));
+            if (entry && !dryRun) {
+              addWarningOnce(
+                entry.record,
+                `Codex orphan process ${candidate.pid} left alone: ${verdict.reason}`,
+              );
+              persist(entry);
+            }
           }
           continue;
         }
@@ -9419,6 +9552,13 @@ ${diff}`;
             group.worktreePath,
             `${verdict.reason}, but Atelier never captured this process as a member of the dispatch's tree, so it cannot prove ownership${shape}`,
           ));
+          if (entry && !dryRun) {
+            addWarningOnce(
+              entry.record,
+              `Codex orphan process ${candidate.pid} left alone: Atelier never captured ownership`,
+            );
+            persist(entry);
+          }
         }
         for (const item of reaped.retained) {
           result.reported.push(codexSweepReport(
@@ -9471,6 +9611,7 @@ ${diff}`;
       olderThanDays,
       dismissed: [],
       orphans: [],
+      codexJobs: [],
       errors: [],
       warnings: [],
       persistenceFailureTargets: persistenceFailureTargets(),
@@ -9550,6 +9691,79 @@ ${diff}`;
         }
       } catch (error) {
         result.errors.push(`dispatch ${entry.record.id}: ${error.message}`);
+      }
+    }
+
+    // Runner state has the same retention horizon as the dispatch index. A
+    // terminal job is published only after its app-server is gone, but retain
+    // older/pre-fix files too whenever their recorded pid is still live or
+    // uncorroborated. Auxiliary artifacts are removed before the job JSON so a
+    // crash never leaves an apparently collected job with live attachments.
+    const codexJobsRoot = join(stateDir, "codex-app-server", "jobs");
+    let jobEntries = [];
+    try {
+      jobEntries = readdirSync(codexJobsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code !== "ENOENT") result.errors.push(`codex jobs: ${error.message}`);
+    }
+    for (const dirent of jobEntries) {
+      const match = /^([a-f0-9]{24})\.json$/.exec(dirent.name);
+      if (!match || !dirent.isFile() || dirent.isSymbolicLink()) continue;
+      const jobId = match[1];
+      const path = join(codexJobsRoot, dirent.name);
+      try {
+        const details = lstatSync(path);
+        if (!details.isFile() || details.isSymbolicLink()) continue;
+        const job = JSON.parse(readFileNoFollowSync(path, "utf8"));
+        const endedAt = new Date(job.endedAt).getTime();
+        if (job.jobId !== jobId || !["completed", "failed", "cancelled"].includes(job.status) ||
+            !Number.isFinite(endedAt) || endedAt >= cutoff) continue;
+        const worker = classifyFencedPid(
+          job.pid,
+          job.pidStartIdentity,
+          "this Codex runner job's worker",
+        );
+        if (!["dead", "absent"].includes(worker.outcome)) {
+          result.warnings.push(`codex job ${jobId} retained: worker death is unproven`);
+          continue;
+        }
+        const artifacts = [
+          join(codexJobsRoot, `${jobId}.stream.jsonl`),
+          join(codexJobsRoot, `${jobId}.attach.json`),
+        ];
+        if (typeof job.promptPath === "string" && job.promptPath) {
+          const promptPath = resolve(job.promptPath);
+          const segment = relative(resolve(stateDir), promptPath);
+          if (segment && !segment.startsWith("..") && !isAbsolute(segment) &&
+              basename(promptPath).endsWith(".codex-prompt.md")) {
+            artifacts.push(promptPath);
+          }
+        }
+        if (!dryRun) {
+          const removalArtifacts = [...artifacts, path];
+          let unsafeArtifact;
+          for (const artifact of removalArtifacts) {
+            try {
+              const artifactDetails = lstatSync(artifact);
+              if (!artifactDetails.isFile() || artifactDetails.isSymbolicLink()) {
+                unsafeArtifact = artifact;
+                break;
+              }
+            } catch (error) {
+              if (error?.code !== "ENOENT") throw error;
+            }
+          }
+          if (unsafeArtifact) {
+            result.warnings.push(
+              `codex job ${jobId} retained: artifact is not a regular file (${unsafeArtifact})`,
+            );
+            continue;
+          }
+          for (const artifact of removalArtifacts) rmSync(artifact, { force: true });
+        }
+        result.codexJobs.push(jobId);
+      } catch (error) {
+        result.errors.push(`codex job ${jobId}: ${error.message}`);
       }
     }
 
@@ -12126,6 +12340,10 @@ export function _setBrResolver(nextResolver = resolveBrExecutable) {
 
 export function _setCodexPollIntervalMs(nextIntervalMs) {
   setAgentPollIntervalMs(nextIntervalMs);
+}
+
+export function _setCodexAppServerProber(nextProber) {
+  setAgentAppServerProber(nextProber);
 }
 
 export function _setCompanionResolver(nextResolver) {

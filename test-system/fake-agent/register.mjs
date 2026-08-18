@@ -6,5 +6,7 @@ if (process.env.ATELIER_TEST_NO_REAL_PROVIDER !== "1") {
   throw new Error("fake-agent registration requires ATELIER_TEST_NO_REAL_PROVIDER=1");
 }
 agents.set("claude", poisonAgent("claude"));
-agents.set("codex", poisonAgent("codex"));
+if (process.env.ATELIER_TEST_ALLOW_CODEX_GUARD_FLOW !== "1") {
+  agents.set("codex", poisonAgent("codex"));
+}
 agents.set(fakeAgent.id, fakeAgent);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -72,13 +72,18 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
     [resolve("bin", "atelier.mjs"), "doctor"],
     {
       cwd: resolve("."),
-      env: { ...process.env, ATELIER_CONFIG_DIR: root },
+      env: {
+        ...process.env,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+      },
     },
   );
   assert.match(stdout, /registry: ok \(1 projects\)/);
   assert.match(stdout, /git: ok/);
   assert.match(stdout, /br: ok/);
   assert.match(stdout, /claude: ok/);
+  assert.match(stdout, /codex: (?:guarded|not installed)/);
 
   const atelierState = join(root, "state");
   await mkdir(join(atelierState, "dispatches"), { recursive: true });
@@ -287,6 +292,149 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   } else {
     assert.match(gc.stdout, /codex process sweep unavailable on this platform/);
   }
+});
+
+test("atelier doctor validates the configured Codex binary with initialize only", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "atelier-cli-codex-doctor-"));
+  const projectPath = join(root, "project");
+  const binPath = join(root, "bin");
+  const codexPath = join(binPath, "codex");
+  const protocolLog = join(root, "protocol.ndjson");
+  await mkdir(projectPath);
+  await mkdir(binPath);
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: projectPath });
+  await writeFile(codexPath, `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+if (process.argv[2] === "--version") {
+  console.log("warning line\\ncodex-cli 9.9.9\\nignored trailer");
+  process.exit(0);
+}
+if (process.argv[2] !== "app-server") process.exit(2);
+const lines = createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const message = JSON.parse(line);
+  appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify(message) + "\\n");
+  if (message.method === "initialize") {
+    console.log(JSON.stringify({ id: message.id, result: {
+      ...(process.env.FAKE_CODEX_BAD_INIT === "1" ? {} : {
+        userAgent: "fake-codex/9.9.9",
+        platformFamily: "unix",
+        platformOs: "linux"
+      })
+    } }));
+  }
+});
+`);
+  await chmod(codexPath, 0o755);
+  await writeFile(
+    join(root, "projects.json"),
+    JSON.stringify({
+      version: 1,
+      defaults: {
+        concurrentDispatchCap: 1,
+        dispatchProfile: {
+          defaultModel: "codex-default",
+          maxTurns: 5,
+          allowedTools: [],
+          lane: "codex",
+        },
+      },
+      groups: [],
+      projects: [{
+        name: "fixture",
+        path: projectPath,
+        mainBranch: "main",
+        tracker: "none",
+        containerized: false,
+        verifyMode: "worktree",
+        verifyCommands: [],
+      }],
+    }),
+  );
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor"],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "0",
+        FAKE_CODEX_LOG: protocolLog,
+        PATH: `${binPath}:${process.env.PATH}`,
+      },
+    },
+  );
+
+  assert.ok(stdout.includes(`codex binary: ${codexPath} (sha256 `));
+  assert.match(stdout, /sha256 [a-f0-9]{12}\)/);
+  assert.match(stdout, /codex: ok \(codex-cli 9\.9\.9, app-server ok\)/);
+  const methods = (await readFile(protocolLog, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line).method);
+  assert.deepEqual(methods, ["initialize", "initialized"]);
+
+  const guarded = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor"],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+        FAKE_CODEX_LOG: protocolLog,
+        PATH: `${binPath}:${process.env.PATH}`,
+      },
+    },
+  );
+  assert.match(guarded.stdout, /codex: guarded \(codex-cli 9\.9\.9; app-server probe disabled/);
+  assert.equal((await readFile(protocolLog, "utf8")).trim().split("\n").length, 2);
+
+  const reachableRegistryPath = join(root, "projects.json");
+  const reachableRegistry = JSON.parse(await readFile(reachableRegistryPath, "utf8"));
+  reachableRegistry.defaults.dispatchProfile.lane = "claude";
+  await writeFile(reachableRegistryPath, JSON.stringify(reachableRegistry));
+  const reachableWithoutDefault = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor"],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+        FAKE_CODEX_LOG: protocolLog,
+        PATH: `${binPath}:${process.env.PATH}`,
+      },
+    },
+  );
+  assert.match(reachableWithoutDefault.stdout, /codex: guarded \(codex-cli 9\.9\.9/);
+  reachableRegistry.defaults.dispatchProfile.lane = "codex";
+  await writeFile(reachableRegistryPath, JSON.stringify(reachableRegistry));
+
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [resolve("bin", "atelier.mjs"), "doctor"],
+      {
+        cwd: resolve("."),
+        env: {
+          ...process.env,
+          ATELIER_CONFIG_DIR: root,
+          ATELIER_TEST_NO_REAL_PROVIDER: "0",
+          FAKE_CODEX_BAD_INIT: "1",
+          FAKE_CODEX_LOG: protocolLog,
+          PATH: `${binPath}:${process.env.PATH}`,
+        },
+      },
+    ),
+    (error) => /initialize omitted userAgent server identity/.test(error.stderr),
+  );
 });
 
 test("atelier doctor prints degraded persistence targets", async (t) => {

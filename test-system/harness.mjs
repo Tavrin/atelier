@@ -140,6 +140,7 @@ export async function createGoldenHarness(t, {
   projectName = "fixture",
   forceRegistrationFailure = false,
   onDaemonSpawn,
+  allowCodexGuardFlow = false,
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), "atelier-golden-"));
   const configDir = join(root, "config");
@@ -153,6 +154,7 @@ export async function createGoldenHarness(t, {
     ATELIER_CONFIG_DIR: configDir,
     ATELIER_STATE_DIR: stateDir,
     ATELIER_TEST_CHILD_RECEIPTS: childReceiptsPath,
+    ...(allowCodexGuardFlow ? { ATELIER_TEST_ALLOW_CODEX_GUARD_FLOW: "1" } : {}),
     PORT: String(port),
   });
   const trackedDispatches = new Set();

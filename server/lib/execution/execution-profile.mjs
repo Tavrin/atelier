@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, resolve } from "node:path";
 
 export const EXECUTION_PROFILE_MISMATCH = "EATELIER_EXECUTION_PROFILE_MISMATCH: ";
@@ -12,6 +12,15 @@ export const GIT_POSTURE = Object.freeze({
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function executableDigest(path) {
+  if (!path) return null;
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 function sortedEnvironment(env) {
@@ -56,7 +65,13 @@ export function resolveExecutable(command, env = {}) {
 export function createExecutionProfile({
   agentLane,
   command,
+  executableResolvedPath = undefined,
   companionPath = null,
+  companionDigest = null,
+  executableVersion = null,
+  executableContentDigest = null,
+  executableDigestPaths = null,
+  binaryPinned = undefined,
   env,
   controlledKeys = [],
   hooksSupported = true,
@@ -81,9 +96,18 @@ export function createExecutionProfile({
     class: "provider",
     executable: {
       command,
-      resolvedPath: resolveExecutable(command, sortedEnv),
+      resolvedPath: executableResolvedPath === undefined
+        ? resolveExecutable(command, sortedEnv)
+        : executableResolvedPath,
+      version: executableVersion ?? null,
+      digest: executableContentDigest ?? null,
+      ...(Array.isArray(executableDigestPaths)
+        ? { digestPaths: [...executableDigestPaths] }
+        : {}),
     },
+    ...(binaryPinned === undefined ? {} : { binaryPinned: binaryPinned === true }),
     companionPath: companionPath ?? null,
+    companionDigest: companionDigest ?? null,
     // Only operator/project-controlled keys bind process admission. Ambient
     // daemon state is evidence and may warn, but must not kill restart recovery.
     envDigest: sha256(JSON.stringify(controlledEnv)),
@@ -124,7 +148,10 @@ function printable(value) {
 
 export function executionProfileMismatch(recorded, current, {
   executable = false,
+  executableVersion = false,
+  executableDigest = false,
   companionPath = false,
+  companionDigest = false,
 } = {}) {
   const differences = [];
   if (recorded.envDigest !== current.envDigest) {
@@ -136,12 +163,32 @@ export function executionProfileMismatch(recorded, current, {
     ...(executable
       ? [["executable.resolvedPath", recorded.executable?.resolvedPath, current.executable?.resolvedPath]]
       : []),
+    ...(executableVersion && recorded.executable?.version !== undefined
+      ? [["executable.version", recorded.executable?.version, current.executable?.version]]
+      : []),
+    ...(executableDigest && recorded.executable?.digest !== undefined
+      ? [
+          ["executable.digest", recorded.executable?.digest, current.executable?.digest],
+          ...(recorded.executable?.digestPaths !== undefined
+            ? [[
+                "executable.digestPaths",
+                recorded.executable?.digestPaths,
+                current.executable?.digestPaths,
+              ]]
+            : []),
+        ]
+      : []),
     ...(companionPath
       ? [["companionPath", recorded.companionPath, current.companionPath]]
       : []),
+    ...(companionDigest && recorded.companionDigest !== undefined
+      ? [["companionDigest", recorded.companionDigest, current.companionDigest]]
+      : []),
   ];
   for (const [name, before, after] of fields) {
-    if (before !== after) differences.push(`${name}: ${printable(before)} -> ${printable(after)}`);
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      differences.push(`${name}: ${printable(before)} -> ${printable(after)}`);
+    }
   }
   return differences.length > 0 ? `${EXECUTION_PROFILE_MISMATCH}${differences.join("; ")}` : null;
 }
