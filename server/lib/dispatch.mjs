@@ -70,7 +70,6 @@ import {
   BREAK_GLASS_TTL_MS,
   createBreakGlassTokenAuthority,
 } from "./auth.mjs";
-import { createEventLog } from "./event-log.mjs";
 import {
   normalizeLine,
   questionShapedText,
@@ -583,6 +582,9 @@ function publicRecord(record) {
     mergedClose: record.mergedClose ?? null,
     ...(record.mergeFollowUpDebt
       ? { mergeFollowUpDebt: { ...record.mergeFollowUpDebt } }
+      : {}),
+    ...(record.mergeEventDebt
+      ? { mergeEventDebt: structuredClone(record.mergeEventDebt) }
       : {}),
     harvest: record.harvest
       ? { ...record.harvest, detail: redactText(record.harvest.detail) }
@@ -1579,9 +1581,10 @@ function processStartIdentity(pid) {
 export function createDispatcher({
   registry,
   stateDir,
-  // Structured event log (atelier-e5x). Optional by construction: a dispatcher
-  // built without one behaves identically, which is what makes "logging on" vs
-  // "logging off" a testable equivalence rather than a hope.
+  // Structured event log (atelier-e5x). Ordinary logging remains observational:
+  // a dispatcher built without one behaves identically. Security-critical
+  // durable appends are different: their caller must inject the one service
+  // writer, never lazily construct a competing writer against the same files.
   eventLog,
   breakGlassNow = Date.now,
   breakGlassTtlMs = BREAK_GLASS_TTL_MS,
@@ -1631,7 +1634,6 @@ export function createDispatcher({
   const pendingEventWrites = new Map();
   const malformedTailWarnings = new Set();
   let breakGlassAuthority;
-  let fallbackSecurityEventLog;
 
   function tokenAuthority() {
     breakGlassAuthority ??= createBreakGlassTokenAuthority({ directory: stateDir });
@@ -1640,8 +1642,7 @@ export function createDispatcher({
 
   function securityEventLog() {
     if (typeof eventLog?.appendDurable === "function") return eventLog;
-    fallbackSecurityEventLog ??= createEventLog({ stateDir });
-    return fallbackSecurityEventLog;
+    throw new Error("durable event append requires the injected Atelier event log");
   }
 
   function preserveCorruptState(path, raw, target, failures) {
@@ -4628,6 +4629,9 @@ export function createDispatcher({
   }
   if (!observer && reconcileQueueOutcomes()) persistQueues();
   if (!observer) for (const entry of entries.values()) settleLinkedReview(entry);
+  const bootBreakGlassAuditRecoveries = observer
+    ? []
+    : reconcileConsumedBreakGlassEvents();
   const bootReviewParkings = observer
     ? []
     : [...entries.values()].flatMap((entry) => {
@@ -4639,6 +4643,7 @@ export function createDispatcher({
       });
   const bootRecovery = Promise.all([
     ...bootOrphanReaps,
+    ...bootBreakGlassAuditRecoveries,
     ...bootPostMergeRecoveries,
     ...bootReviewParkings,
     ...bootQueueSettlements,
@@ -7901,16 +7906,18 @@ ${diff}`;
       }
       throw error;
     }
-    logEvent("dispatch.review", {
-      actor: actionActor(actor),
-      project: currentRecord.project,
-      dispatchId: currentRecord.id,
-      ticketId: currentRecord.ticketId ?? null,
-      reviewDispatchId: created.id,
-      phase: "started",
-      forced: force === true,
-      ...(force === true ? { reason: forceReason } : {}),
-    });
+    if (force === true) {
+      logEvent("dispatch.review", {
+        actor: actionActor(actor),
+        project: currentRecord.project,
+        dispatchId: currentRecord.id,
+        ticketId: currentRecord.ticketId ?? null,
+        reviewDispatchId: created.id,
+        phase: "started",
+        forced: true,
+        reason: forceReason,
+      });
+    }
     return exposedRecord(entries.get(created.id).record);
   }
 
@@ -8295,7 +8302,7 @@ ${diff}`;
     const now = new Date();
     const firstDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
     const afterToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-    const totals = { runs: 0, turns: 0, costUSD: 0 };
+    const totals = { runs: 0, merged: 0, forcedMerged: 0, turns: 0, costUSD: 0 };
 
     for (const record of records) {
       let project = projectRows.get(record.project);
@@ -8307,6 +8314,7 @@ ${diff}`;
           completed: 0,
           failed: 0,
           merged: 0,
+          forcedMerged: 0,
           turns: 0,
           costUSD: 0,
         };
@@ -8318,10 +8326,14 @@ ${diff}`;
       project.runs += 1;
       project.completed += record.state === "completed" ? 1 : 0;
       project.failed += ["failed", "prepare_failed", "rejected"].includes(record.state) ? 1 : 0;
-      project.merged += record.merged ? 1 : 0;
+      const forcedMerged = Boolean(record.merged?.forcedBy);
+      project.merged += record.merged && !forcedMerged ? 1 : 0;
+      project.forcedMerged += forcedMerged ? 1 : 0;
       project.turns += turns;
       project.costUSD += costUSD;
       totals.runs += 1;
+      totals.merged += record.merged && !forcedMerged ? 1 : 0;
+      totals.forcedMerged += forcedMerged ? 1 : 0;
       totals.turns += turns;
       totals.costUSD += costUSD;
 
@@ -9669,6 +9681,7 @@ ${diff}`;
       dismissed: [],
       orphans: [],
       codexJobs: [],
+      breakGlassAuthorizations: [],
       errors: [],
       warnings: [],
       persistenceFailureTargets: persistenceFailureTargets(),
@@ -9965,6 +9978,37 @@ ${diff}`;
         result.errors.push(`orphan ${path}: ${error.message}`);
       }
     }
+    for (const { path, override } of breakGlassOverrides()) {
+      let terminalAt = override.consumedAt || override.expiredAt || override.supersededAt;
+      const expiresAtMs = Date.parse(override.expiresAt);
+      if (!terminalAt && Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs) {
+        terminalAt = override.expiresAt;
+        if (!dryRun) {
+          try {
+            persistBreakGlassOverride({
+              ...override,
+              status: "expired",
+              expiredAt: new Date(nowMs).toISOString(),
+            }, "expired break-glass authorization could not be tombstoned by doctor GC");
+          } catch (error) {
+            result.errors.push(`break-glass ${override.tokenId}: ${error.message}`);
+            continue;
+          }
+        }
+      }
+      const terminalAtMs = Date.parse(terminalAt);
+      if (!Number.isFinite(terminalAtMs) || terminalAtMs >= cutoff) continue;
+      if (!dryRun) {
+        try {
+          rmSync(path);
+        } catch (error) {
+          if (error?.code === "ENOENT") continue;
+          result.errors.push(`break-glass ${override.tokenId}: ${error.message}`);
+          continue;
+        }
+      }
+      result.breakGlassAuthorizations.push(override.tokenId);
+    }
     // Last, deliberately: gc has just dismissed records and removed orphan
     // worktrees, so the cwd pass now sees those directories as gone and can
     // corroborate the processes that were left running inside them.
@@ -9977,6 +10021,49 @@ ${diff}`;
     return join(breakGlassDir, `${tokenId}.json`);
   }
 
+  function breakGlassOverrides() {
+    let names;
+    try {
+      names = readdirSync(breakGlassDir).filter((name) => name.endsWith(".json"));
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+    const overrides = [];
+    for (const name of names) {
+      const path = join(breakGlassDir, name);
+      try {
+        const override = JSON.parse(readFileNoFollowSync(path, "utf8", {
+          fileOps: persistenceFileOps,
+        }));
+        if (override && typeof override === "object" && !Array.isArray(override)) {
+          overrides.push({ path, override });
+        }
+      } catch (error) {
+        logPersistenceWarning(
+          `Atelier could not read break-glass authorization ${path}: ${error?.message ?? error}`,
+        );
+      }
+    }
+    return overrides;
+  }
+
+  function persistBreakGlassOverride(override, detail) {
+    try {
+      mkdirSync(breakGlassDir, { recursive: true });
+      writeFileAtomic(breakGlassStorePath(override.tokenId), `${JSON.stringify(override)}\n`, {
+        mode: 0o600,
+        fileOps: persistenceFileOps,
+      });
+      return override;
+    } catch (error) {
+      throw dispatcherError(
+        503,
+        `${detail}: ${error?.message ?? error}`,
+      );
+    }
+  }
+
   function durableBreakGlassEvent(payload) {
     try {
       return securityEventLog().appendDurable("dispatch.break-glass", payload);
@@ -9986,6 +10073,85 @@ ${diff}`;
         `break-glass audit event could not be persisted: ${error?.message ?? error}`,
       );
     }
+  }
+
+  function evidenceSnapshot(record) {
+    return {
+      resultVersion: record.result?.version ?? null,
+      attestation: record.attestation
+        ? {
+            resultCommit: record.attestation.resultCommit ?? null,
+            resultVersion: record.attestation.resultVersion ?? null,
+          }
+        : null,
+    };
+  }
+
+  function evidenceMatches(left, right) {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function supersedePendingBreakGlass(dispatchId, successorTokenId, actor, nowMs) {
+    const supersededAt = new Date(nowMs).toISOString();
+    for (const { override } of breakGlassOverrides()) {
+      if (override.dispatchId !== dispatchId || override.action !== "merge") continue;
+      if (
+        override.consumedAt ||
+        override.expiredAt ||
+        override.supersededAt ||
+        ["consumed", "expired", "superseded"].includes(override.status)
+      ) continue;
+      const expiresAtMs = Date.parse(override.expiresAt);
+      if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+        persistBreakGlassOverride({
+          ...override,
+          status: "expired",
+          expiredAt: supersededAt,
+        }, "expired break-glass authorization could not be tombstoned");
+        continue;
+      }
+      const superseded = {
+        ...override,
+        status: "superseded",
+        supersededAt,
+        supersededByTokenId: successorTokenId,
+      };
+      persistBreakGlassOverride(
+        superseded,
+        "superseded break-glass authorization could not be persisted",
+      );
+      durableBreakGlassEvent({
+        actor: actionActor(actor),
+        phase: "superseded",
+        ...superseded,
+      });
+    }
+  }
+
+  function reconcileConsumedBreakGlassEvents() {
+    const recoveries = [];
+    for (const { override } of breakGlassOverrides()) {
+      if (!override.consumedAt || override.consumedEventAt) continue;
+      recoveries.push(Promise.resolve().then(() => {
+        durableBreakGlassEvent({
+          actor: actionActor(override.consumedBy),
+          phase: "consumed",
+          recovered: true,
+          ...override,
+        });
+        persistBreakGlassOverride({
+          ...override,
+          consumedEventAt: new Date(breakGlassNow()).toISOString(),
+        }, "recovered break-glass audit marker could not be persisted");
+      }).catch((error) => {
+        // Audit recovery is debt collection, not a reason to poison boot. The
+        // missing marker remains durable, so a later boot retries it.
+        logPersistenceWarning(
+          `Atelier break-glass consumed-event recovery remains pending for ${override.tokenId}: ${error?.message ?? error}`,
+        );
+      }));
+    }
+    return recoveries;
   }
 
   function assertForceMergeEligible(entry, project, { allowMerged = false } = {}) {
@@ -10118,28 +10284,27 @@ ${diff}`;
     const mintedAtMs = breakGlassNow();
     const mintedAt = new Date(mintedAtMs).toISOString();
     const expiresAt = new Date(mintedAtMs + breakGlassTtlMs).toISOString();
+    supersedePendingBreakGlass(id, tokenId, actor, mintedAtMs);
     const override = {
       tokenId,
       dispatchId: id,
       action,
       targetSha: branchHead,
+      project: entry.record.project,
+      ticketId: entry.record.ticketId ?? null,
+      ...evidenceSnapshot(entry.record),
       ...audit,
       mintedAt,
       expiresAt,
+      status: "pending",
       consumedAt: null,
+      consumedBy: null,
+      consumedEventAt: null,
+      expiredAt: null,
+      supersededAt: null,
+      supersededByTokenId: null,
     };
-    try {
-      mkdirSync(breakGlassDir, { recursive: true });
-      writeFileAtomic(breakGlassStorePath(tokenId), `${JSON.stringify(override)}\n`, {
-        mode: 0o600,
-        fileOps: persistenceFileOps,
-      });
-    } catch (error) {
-      throw dispatcherError(
-        503,
-        `break-glass authorization could not be persisted: ${error?.message ?? error}`,
-      );
-    }
+    persistBreakGlassOverride(override, "break-glass authorization could not be persisted");
     durableBreakGlassEvent({
       actor,
       project: entry.record.project,
@@ -10173,10 +10338,32 @@ ${diff}`;
     if (override.action !== "merge") {
       throw invalidBreakGlass("authorization is bound to a different action");
     }
-    if (override.consumedAt !== null) throw invalidBreakGlass("authorization was already consumed");
+    if (override.supersededAt || override.status === "superseded") {
+      throw invalidBreakGlass("authorization was superseded");
+    }
+    if (override.expiredAt || override.status === "expired") {
+      throw invalidBreakGlass("authorization expired");
+    }
+    if (override.consumedAt !== null || override.status === "consumed") {
+      throw invalidBreakGlass("authorization was already consumed");
+    }
     const expiresAtMs = Date.parse(override.expiresAt);
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= breakGlassNow()) {
+      persistBreakGlassOverride({
+        ...override,
+        status: "expired",
+        expiredAt: new Date(breakGlassNow()).toISOString(),
+      }, "expired break-glass authorization could not be tombstoned");
       throw invalidBreakGlass("authorization expired");
+    }
+    const currentEvidence = evidenceSnapshot(entry.record);
+    if (override.resultVersion !== currentEvidence.resultVersion) {
+      throw invalidBreakGlass(
+        `result evidence changed (authorized version ${override.resultVersion ?? "missing"}, current ${currentEvidence.resultVersion ?? "missing"})`,
+      );
+    }
+    if (!evidenceMatches(override.attestation ?? null, currentEvidence.attestation)) {
+      throw invalidBreakGlass("attestation evidence changed since mint");
     }
     const branchHead = await deriveBranchHead(entry, project);
     if (override.targetSha !== branchHead) {
@@ -10185,25 +10372,23 @@ ${diff}`;
       );
     }
     const consumedAt = new Date(breakGlassNow()).toISOString();
-    const consumed = { ...override, consumedAt };
-    try {
-      writeFileAtomic(breakGlassStorePath(tokenId), `${JSON.stringify(consumed)}\n`, {
-        mode: 0o600,
-        fileOps: persistenceFileOps,
-      });
-    } catch (error) {
-      throw dispatcherError(
-        503,
-        `break-glass consumption could not be persisted: ${error?.message ?? error}`,
-      );
-    }
+    const consumed = {
+      ...override,
+      status: "consumed",
+      consumedAt,
+      consumedBy: actionActor(actor),
+      consumedEventAt: null,
+    };
+    persistBreakGlassOverride(consumed, "break-glass consumption could not be persisted");
     durableBreakGlassEvent({
       actor: actionActor(actor),
-      project: entry.record.project,
-      ticketId: entry.record.ticketId ?? null,
       phase: "consumed",
       ...consumed,
     });
+    persistBreakGlassOverride({
+      ...consumed,
+      consumedEventAt: new Date(breakGlassNow()).toISOString(),
+    }, "break-glass consumed-event marker could not be persisted");
     return {
       forcedBy: consumed.forcedBy,
       reason: consumed.reason,
@@ -10212,6 +10397,8 @@ ${diff}`;
       tokenId: consumed.tokenId,
       mintedAt: consumed.mintedAt,
       consumedAt,
+      resultVersion: consumed.resultVersion,
+      attestation: consumed.attestation,
     };
   }
 
@@ -11118,6 +11305,7 @@ ${diff}`;
       strategy,
       branch: record.branch ?? null,
       reviewVerdict: record.review?.verdict ?? null,
+      resultVersion: record.merged.resultVersion ?? null,
       forced,
       ...(forced
         ? {
@@ -11128,17 +11316,39 @@ ${diff}`;
             tokenId: record.merged.tokenId,
             mintedAt: record.merged.mintedAt,
             consumedAt: record.merged.consumedAt,
+            attestation: record.merged.attestation ?? null,
           }
         : {}),
       ...(recovered ? { recovered: true } : {}),
     };
+    appendMergeEventWithDebt(entry, mergeEvent);
+  }
+
+  function appendMergeEventWithDebt(entry, mergeEvent = entry.record.mergeEventDebt?.event) {
+    if (!mergeEvent) return true;
+    const previous = entry.record.mergeEventDebt;
+    const attemptedAt = new Date().toISOString();
     try {
       securityEventLog().appendDurable("dispatch.merge", mergeEvent);
+      if (previous) {
+        delete entry.record.mergeEventDebt;
+        persist(entry);
+      }
+      return true;
     } catch (error) {
-      throw dispatcherError(
-        503,
-        `merge audit event could not be persisted: ${error?.message ?? error}`,
-      );
+      const detail = redactText(String(error?.message ?? error)).slice(0, REVIEW_SUMMARY_LIMIT);
+      const warning = `merge audit event pending: ${detail}`;
+      if (!entry.record.warnings.includes(warning)) entry.record.warnings.push(warning);
+      entry.record.mergeEventDebt = {
+        event: structuredClone(mergeEvent),
+        owedAt: previous?.owedAt ?? attemptedAt,
+        attempts: Number.isInteger(previous?.attempts) ? previous.attempts + 1 : 1,
+        lastAttemptAt: attemptedAt,
+        lastError: detail,
+      };
+      persist(entry);
+      logPersistenceWarning(`Atelier ${warning} for ${entry.record.id}`);
+      return false;
     }
   }
 
@@ -11486,12 +11696,13 @@ ${diff}`;
 
   function owedMergeFollowUps(record) {
     const debt = record?.mergeFollowUpDebt;
-    if (!record?.merged || !debt) return [];
+    if (!record?.merged) return [];
     const owed = [];
-    if (debt.postMergeOwedAt && !record.postMerge) {
+    if (record.mergeEventDebt?.event) owed.push("merge audit event");
+    if (debt?.postMergeOwedAt && !record.postMerge) {
       owed.push("post-merge verification");
     }
-    if (debt.ticketCloseOwedAt && !debt.ticketCloseSettledAt) {
+    if (debt?.ticketCloseOwedAt && !debt.ticketCloseSettledAt) {
       owed.push("ticket closure");
     }
     return owed;
@@ -11534,6 +11745,7 @@ ${diff}`;
     // starts advancing it, history refreshes must not replace the record object
     // that tracker closure and post-merge startup are mutating.
     entry.inert = false;
+    appendMergeEventWithDebt(entry);
     await drainMergedTicketCloseDebt(entry, project);
     startOwedPostMergeVerification(entry, project);
   }
@@ -12559,7 +12771,6 @@ ${diff}`;
         ]);
       }
     })().finally(() => {
-      fallbackSecurityEventLog?.shutdown();
       ownedInstanceLock?.release();
     });
     return shutdownPromise;

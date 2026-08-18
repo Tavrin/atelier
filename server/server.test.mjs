@@ -20,6 +20,7 @@ import {
   _setRunFile as _setDispatchRunFile,
   _setSpawner as _setDispatchSpawner,
 } from "./lib/dispatch.mjs";
+import { createEventLog } from "./lib/event-log.mjs";
 import { loadRegistry, normalizeProject } from "./lib/registry.mjs";
 import {
   _setBrResolver as _setTrackerBrResolver,
@@ -443,10 +444,15 @@ async function serverFixture(
   const registryPath = join(root, "config", "projects.json");
   const atelierStateDir = join(root, "atelier-state");
   await mkdir(atelierStateDir);
-  // A factory gets the built registry + state dir, so a test can put the REAL
-  // dispatcher behind the real routes instead of a stub.
-  if (typeof dispatcher === "function") dispatcher = dispatcher({ registry, atelierStateDir });
   if (typeof eventLog === "function") eventLog = eventLog({ registry, atelierStateDir });
+  // A factory gets the built registry + state dir, so a test can put the REAL
+  // dispatcher behind the real routes instead of a stub. Such tests inject the
+  // same service writer that createServer receives; the dispatcher must never
+  // lazily construct a second durable writer.
+  if (typeof dispatcher === "function") {
+    eventLog ??= createEventLog({ stateDir: atelierStateDir });
+    dispatcher = dispatcher({ registry, atelierStateDir, eventLog });
+  }
   await beforeCreateServer?.({ registry, root, tracked, degraded });
   const server = createServer({
     registry,
@@ -2109,6 +2115,43 @@ test("MCP credentials cannot change gate-critical settings but retain benign set
   });
   assert.equal(benign.status, 200);
   assert.equal(registry.projects[0].notes, "Updated through MCP");
+});
+
+test("MCP onboarding cannot set gate policy and accepted onboarding receives safe defaults", async (t) => {
+  const { port, root, registry } = await serverFixture(t);
+  const candidate = await gitProject(root, "mcp-safe-onboarding", "none");
+  const registration = { ...candidate, archetype: "git-only" };
+  delete registration.verifyCommands;
+
+  for (const [field, value] of [
+    ["verifyCommands", ["node --test"]],
+    ["requireReview", false],
+    ["reviewPolicy", "advisory"],
+  ]) {
+    const response = await send(port, {
+      method: "POST",
+      path: "/api/projects",
+      body: JSON.stringify({ ...registration, [field]: value }),
+      contentType: "application/json",
+      credential: "mcp",
+    });
+    assert.equal(response.status, 409, field);
+    assert.match(JSON.parse(response.text).error, /MCP cannot change gate-critical settings/);
+    assert.equal(registry.projects.some((project) => project.name === registration.name), false);
+  }
+
+  const accepted = await send(port, {
+    method: "POST",
+    path: "/api/projects",
+    body: JSON.stringify(registration),
+    contentType: "application/json",
+    credential: "mcp",
+  });
+  assert.equal(accepted.status, 201);
+  const project = JSON.parse(accepted.text);
+  assert.deepEqual(project.verifyCommands, []);
+  assert.equal(project.requireReview, false);
+  assert.equal(project.reviewPolicy, "strict");
 });
 
 test("queueFailureLimit parking changes immediately reach board SSE without a tracker write", async (t) => {
@@ -3994,6 +4037,9 @@ test("all-dispatches UI renders one-shot rollup totals, projects, and DOM bars",
   assert.match(app.text, /function renderRollup/);
   assert.match(app.text, /formatMoney\(rollup\.totals\?\.costUSD\)/);
   assert.match(app.text, /element\("div", "rollup-bar"\)/);
+  assert.match(app.text, /Merged \/ force-merged/);
+  assert.match(app.text, /project\.forcedMerged/);
+  assert.match(app.text, /row\.forcedMerged \+= forcedMerged/);
   assert.match(app.text, /bar\.title = `\$\{day\.day\} \$\{formatMoney\(cost\)\}`/);
   assert.doesNotMatch(app.text, /createElement\(["'](?:canvas|svg)["']\)/);
 });
@@ -4792,7 +4838,7 @@ test("no HTTP endpoint that serves a dispatch record ever exposes a fencing pid 
   });
 
   const { port, atelierStateDir } = await serverFixture(t, {
-    dispatcher: ({ registry, atelierStateDir: stateDirectory }) => {
+    dispatcher: ({ registry, atelierStateDir: stateDirectory, eventLog }) => {
       mkdirSync(join(stateDirectory, "dispatches"), { recursive: true });
       writeFileSync(
         join(stateDirectory, "dispatches", "index.jsonl"),
@@ -4802,7 +4848,7 @@ test("no HTTP endpoint that serves a dispatch record ever exposes a fencing pid 
       for (const record of records) {
         if (record.worktreePath) mkdirSync(record.worktreePath, { recursive: true });
       }
-      return createDispatcher({ registry, stateDir: stateDirectory });
+      return createDispatcher({ registry, stateDir: stateDirectory, eventLog });
     },
   });
 

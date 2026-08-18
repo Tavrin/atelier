@@ -275,6 +275,7 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
     gc.stdout,
     /review advisory debt: merged-with-advisory-debt round-1:finding-1 for fixture-1 \(2 attempts; last error: tracker unavailable\)/,
   );
+  assert.match(gc.stdout, /gc summary: .* 0 break-glass authorizations,/);
   assert.match(gc.stdout, /gc summary: .* 1 review advisory debt,/);
   if (process.platform === "linux") {
     assert.match(gc.stdout, new RegExp(`would reap codex process: ${leaked.pid} `));

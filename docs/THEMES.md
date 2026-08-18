@@ -214,9 +214,9 @@ Other state projections retain their server shapes:
 { project, state, checksTotal, unresolvedFailures, running }
 
 // GET /api/rollup
-{ projects: [{ project, runs, completed, failed, merged, turns, costUSD }],
+{ projects: [{ project, runs, completed, failed, merged, forcedMerged, turns, costUSD }],
   days: [{ day, runs, costUSD }],
-  totals: { runs, turns, costUSD } }
+  totals: { runs, merged, forcedMerged, turns, costUSD } }
 ```
 
 Themes must ignore additive unknown fields.

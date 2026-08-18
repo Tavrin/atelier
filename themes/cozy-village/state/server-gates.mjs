@@ -145,6 +145,8 @@ export function gatesFor(record) {
         tokenId: record.merged.tokenId,
         mintedAt: record.merged.mintedAt,
         consumedAt: record.merged.consumedAt,
+        resultVersion: record.merged.resultVersion,
+        attestation: record.merged.attestation,
       }
     : undefined;
   return [

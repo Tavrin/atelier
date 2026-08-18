@@ -164,7 +164,6 @@ const projectRegistrationSchema = objectSchema({
     enum: ["worktree", "container-primary", "primary-postmerge", "advisory"],
     description: "Verification posture.",
   },
-  verifyCommands: stringArrayProperty("Verification commands."),
   smokeCommand: { type: "string", description: "Optional smoke command." },
   warn: { type: "string", description: "Agent warning text." },
   group: { type: "string", description: "Project group name." },
@@ -178,12 +177,6 @@ const projectRegistrationSchema = objectSchema({
   },
   autoCommitTracker: booleanProperty("Auto-commit Atelier tracker mutations."),
   autoCloseOnMerge: booleanProperty("Close the tracker ticket after merge."),
-  requireReview: booleanProperty("Require a passing linked review before merge."),
-  reviewPolicy: {
-    type: "string",
-    enum: ["strict", "tiered", "advisory"],
-    description: "Review finding merge policy; strict is the default.",
-  },
   maxFixRounds: {
     type: "integer",
     minimum: 1,
@@ -201,7 +194,6 @@ const projectRegistrationSchema = objectSchema({
   "tracker",
   "containerized",
   "verifyMode",
-  "verifyCommands",
 ]);
 
 export const MCP_TOOLS = Object.freeze([
@@ -307,7 +299,7 @@ export const MCP_TOOLS = Object.freeze([
     ].join(" "),
     objectSchema({
       kind: stringProperty(
-        "Exact event kind, or a comma-separated list: queue.drain, queue.settings, queue.park, queue.unpark, dispatch.transition, dispatch.review, dispatch.review-disposition, dispatch.merge, dispatch.dismiss, budget.evaluation, registry.change, service.start, service.stop, service.shutdown.",
+        "Exact event kind, or a comma-separated list: queue.drain, queue.settings, queue.park, queue.unpark, dispatch.transition, dispatch.review, dispatch.review-disposition, dispatch.break-glass, dispatch.merge, dispatch.dismiss, budget.evaluation, registry.change, service.start, service.stop, service.shutdown.",
       ),
       project: projectProperty,
       dispatchId: dispatchIdProperty,

@@ -41,7 +41,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import { appendDurable as appendFileDurable } from "./fs-integrity.mjs";
+import {
+  appendDurable as appendFileDurable,
+  fsyncDirectoryBestEffort,
+} from "./fs-integrity.mjs";
 import { redactValue } from "./stream.mjs";
 
 export const EVENT_LOG_SCHEMA_VERSION = 1;
@@ -404,6 +407,7 @@ export function createEventLog({
       if (fileOps.existsSync(from)) fileOps.renameSync(from, rotatedPath(index + 1));
     }
     fileOps.renameSync(path, rotatedPath(1));
+    fsyncDirectoryBestEffort(directory, { fileOps });
   }
 
   function normalizeSource(value) {

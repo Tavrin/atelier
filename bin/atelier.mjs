@@ -605,6 +605,13 @@ async function doctor(args) {
     for (const path of result.orphans) console.log(`${orphanVerb}: ${path}`);
     const codexJobVerb = result.dryRun ? "would remove codex job" : "removed codex job";
     for (const jobId of result.codexJobs ?? []) console.log(`${codexJobVerb}: ${jobId}`);
+    const breakGlassAuthorizations = result.breakGlassAuthorizations ?? [];
+    const breakGlassVerb = result.dryRun
+      ? "would remove break-glass authorization"
+      : "removed break-glass authorization";
+    for (const authorizationId of breakGlassAuthorizations) {
+      console.log(`${breakGlassVerb}: ${authorizationId}`);
+    }
     const codexProcesses = result.codexProcesses ??
       { supported: false, reaped: [], reported: [], errors: [] };
     for (const reaped of codexProcesses.reaped) {
@@ -641,7 +648,7 @@ async function doctor(args) {
       : `${codexProcesses.reaped.length} codex process${codexProcesses.reaped.length === 1 ? "" : "es"} reaped, ${codexProcesses.reported.length} reported`;
     const errorCount = result.errors.length + (codexProcesses.errors?.length ?? 0);
     console.log(
-      `gc summary: ${result.dismissed.length} dispatch${result.dismissed.length === 1 ? "" : "es"}, ${result.orphans.length} orphan worktree${result.orphans.length === 1 ? "" : "s"}, ${advisoryDebts.length} review advisory debt${advisoryDebts.length === 1 ? "" : "s"}, ${processSummary}, ${errorCount} error${errorCount === 1 ? "" : "s"}`,
+      `gc summary: ${result.dismissed.length} dispatch${result.dismissed.length === 1 ? "" : "es"}, ${result.orphans.length} orphan worktree${result.orphans.length === 1 ? "" : "s"}, ${breakGlassAuthorizations.length} break-glass authorization${breakGlassAuthorizations.length === 1 ? "" : "s"}, ${advisoryDebts.length} review advisory debt${advisoryDebts.length === 1 ? "" : "s"}, ${processSummary}, ${errorCount} error${errorCount === 1 ? "" : "s"}`,
     );
     if (errorCount > 0) process.exitCode = 1;
     return;

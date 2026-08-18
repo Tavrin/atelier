@@ -4090,7 +4090,7 @@ function renderRollup(rollup, { filtered = false } = {}) {
     const table = element("table", "rollup-table");
     const head = element("thead");
     const heading = element("tr");
-    for (const label of ["Project", "Runs", "Completed / failed", "Merged", "Cost"]) {
+    for (const label of ["Project", "Runs", "Completed / failed", "Merged / force-merged", "Cost"]) {
       heading.append(element("th", "", label));
     }
     head.append(heading);
@@ -4105,7 +4105,7 @@ function renderRollup(rollup, { filtered = false } = {}) {
         projectCell,
         element("td", "", String(project.runs || 0)),
         element("td", "", `${project.completed || 0} / ${project.failed || 0}`),
-        element("td", "", String(project.merged || 0)),
+        element("td", "", `${project.merged || 0} / ${project.forcedMerged || 0}`),
         element("td", "", formatMoney(project.costUSD)),
       );
       body.append(row);
@@ -4136,7 +4136,7 @@ function renderRollup(rollup, { filtered = false } = {}) {
 function rollupForDispatches(records) {
   const projects = new Map();
   const days = new Map();
-  const totals = { runs: 0, turns: 0, costUSD: 0 };
+  const totals = { runs: 0, merged: 0, forcedMerged: 0, turns: 0, costUSD: 0 };
   const now = new Date();
   const firstDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
   const afterToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
@@ -4148,6 +4148,7 @@ function rollupForDispatches(records) {
       completed: 0,
       failed: 0,
       merged: 0,
+      forcedMerged: 0,
       turns: 0,
       costUSD: 0,
     };
@@ -4157,11 +4158,15 @@ function rollupForDispatches(records) {
     row.runs += 1;
     row.completed += record.state === "completed" ? 1 : 0;
     row.failed += ["failed", "prepare_failed", "rejected"].includes(record.state) ? 1 : 0;
-    row.merged += record.merged ? 1 : 0;
+    const forcedMerged = Boolean(record.merged?.forcedBy);
+    row.merged += record.merged && !forcedMerged ? 1 : 0;
+    row.forcedMerged += forcedMerged ? 1 : 0;
     row.turns += turns;
     row.costUSD += costUSD;
     projects.set(record.project, row);
     totals.runs += 1;
+    totals.merged += record.merged && !forcedMerged ? 1 : 0;
+    totals.forcedMerged += forcedMerged ? 1 : 0;
     totals.turns += turns;
     totals.costUSD += costUSD;
 

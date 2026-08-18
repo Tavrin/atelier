@@ -834,8 +834,10 @@ export function createServer({
       });
       requestAuthContexts.set(request, authContext);
       if (authContext.requestClass === "session-bootstrap") {
-        // Local authentication blocks cross-origin and remote callers, not a
-        // process already running as the same OS user; that boundary is OS policy.
+        // Surface discipline only: any unlabeled same-UID process can bootstrap
+        // this session and is trusted-local by owner decision. ATT-008 must make
+        // the human boundary enforceable by excluding /api/session and
+        // /api/break-glass from sandboxed agents' brokered API access.
         const session = requestAuth.mintSession();
         response.setHeader("Set-Cookie", session.cookie);
         jsonResponse(response, 200, { csrfToken: session.csrfToken });
@@ -899,6 +901,9 @@ export function createServer({
       }
 
       if (request.method === "POST" && path === "/api/break-glass") {
+        // This actor/credential gate rejects every labeled automation surface.
+        // It is not a same-UID boundary while /api/session is locally reachable;
+        // ATT-008 owns the real sandbox-and-broker exclusion (see REGISTRY.md).
         if (authContext.actor !== "human-ui" || authContext.credential !== "session") {
           throw new HttpError(
             409,
@@ -1010,6 +1015,20 @@ export function createServer({
       if (request.method === "POST" && path === "/api/projects") {
         try {
           const registration = { ...postBody };
+          const restricted = Object.keys(registration).filter((key) =>
+            MCP_RESTRICTED_SETTINGS.has(key)
+          );
+          if (requestActor(request) === "mcp" && restricted.length > 0) {
+            throw new HttpError(
+              409,
+              `MCP cannot change gate-critical settings (${restricted.join(", ")}); use the human break-glass policy`,
+            );
+          }
+          if (requestActor(request) === "mcp") {
+            registration.verifyCommands = [];
+            registration.requireReview = false;
+            registration.reviewPolicy = "strict";
+          }
           const trackerLocation = optionalString(registration, "trackerLocation");
           delete registration.trackerLocation;
           let initializeTracker = false;

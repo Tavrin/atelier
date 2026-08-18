@@ -50,6 +50,30 @@ function closeAfter(ops, descriptor, operation) {
   }
 }
 
+// Directory metadata durability is necessarily best-effort on Windows and on
+// filesystems that refuse directory descriptors. Callers use this after a new
+// durable file becomes visible or after a rotation rename; the file write/fsync
+// itself remains mandatory and still throws through its own path.
+export function fsyncDirectoryBestEffort(path, { fileOps } = {}) {
+  const ops = operations(fileOps);
+  let descriptor;
+  try {
+    descriptor = ops.openSync(path, "r");
+    ops.fsyncSync(descriptor);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        ops.closeSync(descriptor);
+      } catch {
+        // Best-effort directory fsync includes best-effort close.
+      }
+    }
+  }
+}
+
 export function writeFileAtomic(path, contents, { mode = 0o600, fileOps } = {}) {
   const ops = operations(fileOps);
   const directory = dirname(path);
@@ -81,24 +105,7 @@ export function writeFileAtomic(path, contents, { mode = 0o600, fileOps } = {}) 
     throw error;
   }
 
-  // Windows and some unusual filesystems do not permit opening/fsyncing a
-  // directory. The file fsync + atomic rename remain mandatory; only this
-  // final directory-metadata flush is best-effort for portability.
-  let directoryDescriptor;
-  try {
-    directoryDescriptor = ops.openSync(directory, "r");
-    ops.fsyncSync(directoryDescriptor);
-  } catch {
-    // See portability comment above.
-  } finally {
-    if (directoryDescriptor !== undefined) {
-      try {
-        ops.closeSync(directoryDescriptor);
-      } catch {
-        // Best-effort directory fsync includes best-effort close.
-      }
-    }
-  }
+  fsyncDirectoryBestEffort(directory, { fileOps: ops });
 }
 
 export function appendDurable(path, line, { fileOps } = {}) {
@@ -130,6 +137,7 @@ export function appendDurable(path, line, { fileOps } = {}) {
     // The append and fsync intentionally use the same descriptor/inode.
     ops.fsyncSync(descriptor);
   });
+  if (created) fsyncDirectoryBestEffort(dirname(path), { fileOps: ops });
 }
 
 export function appendGuarded(path, line, { fileOps } = {}) {

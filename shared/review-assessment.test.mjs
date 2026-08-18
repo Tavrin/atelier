@@ -119,6 +119,8 @@ test("forced merge is bypassed in all gate mirrors without rewriting failed veri
       tokenId: "token-id",
       mintedAt: "2026-08-18T10:00:00.000Z",
       consumedAt: "2026-08-18T10:01:00.000Z",
+      resultVersion: 4,
+      attestation: { resultCommit: "authorized-head", resultVersion: 4 },
     },
   };
   const expected = gatesFor(record);

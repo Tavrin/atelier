@@ -226,6 +226,53 @@ test("atelier_settings_patch excludes gate-critical policy fields from automatio
   }
 });
 
+test("atelier_project_add refuses gate-critical onboarding fields and forwards safe-default registration", async () => {
+  const requests = [];
+  const base = {
+    name: "safe-project",
+    path: "/srv/safe-project",
+    archetype: "git-only",
+    mainBranch: "main",
+    tracker: "none",
+    containerized: false,
+    verifyMode: "worktree",
+  };
+  const responses = await exchange(handshake(
+    toolCall(2, "atelier_project_add", {
+      registration: { ...base, verifyCommands: ["node --test"] },
+    }),
+    toolCall(3, "atelier_project_add", {
+      registration: { ...base, requireReview: false },
+    }),
+    toolCall(4, "atelier_project_add", {
+      registration: { ...base, reviewPolicy: "advisory" },
+    }),
+    toolCall(5, "atelier_project_add", { registration: base }),
+  ), async (url, options) => {
+    requests.push({ url, options });
+    return new Response(JSON.stringify({
+      ...base,
+      verifyCommands: [],
+      requireReview: false,
+      reviewPolicy: "strict",
+    }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(requests[0].options.body), base);
+  for (const response of responses.slice(1, 4)) {
+    assert.equal(response.error.code, -32602);
+    assert.match(
+      response.error.message,
+      /Unknown argument field: registration\.(?:verifyCommands|requireReview|reviewPolicy)/,
+    );
+  }
+  assert.equal(responses[4].result.isError, false);
+});
+
 test("parity tools proxy chronicle, ticket action, bake-off, main-health, agents, and diff routes", async () => {
   const requests = [];
   const responses = await exchange(handshake(
@@ -345,7 +392,6 @@ test("parity tools proxy queue, convoy, GC, project, tracker, and editor operati
     tracker: "none",
     containerized: false,
     verifyMode: "worktree",
-    verifyCommands: ["node --test"],
   };
   const responses = await exchange(handshake(
     toolCall(2, "atelier_queue", { project: "atelier fixture" }),
@@ -805,4 +851,9 @@ test("atelier_logs proxies the event-log route with its filters and rejects bad 
   assert.match(responses[4].error.message, /Unknown argument field: unknownFilter/);
   assert.equal(responses[1].result.isError, false);
   assert.equal(responses[2].result.isError, false);
+});
+
+test("atelier_logs advertises dispatch.break-glass as a filterable kind", () => {
+  const logs = MCP_TOOLS.find((tool) => tool.name === "atelier_logs");
+  assert.match(logs.inputSchema.properties.kind.description, /dispatch\.break-glass/);
 });

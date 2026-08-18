@@ -318,16 +318,28 @@ test("gatesFor distinguishes passed-with-dispositions and carries the force audi
       forcedBy: "maintainer",
       reason: "The open finding is consciously waived.",
       dispositionRef: "ticket-comment-75",
+      targetSha: "abc123",
+      tokenId: "break-glass-75",
+      mintedAt: "2026-08-18T10:00:00.000Z",
+      consumedAt: "2026-08-18T10:01:00.000Z",
+      resultVersion: 3,
+      attestation: { resultCommit: "abc123", resultVersion: 3 },
     },
   };
   assert.deepEqual(
     gatesFor(forced).find((gate) => gate.gate === "merge"),
     {
       gate: "merge",
-      state: "passed",
+      state: "bypassed",
       forcedBy: "maintainer",
       reason: "The open finding is consciously waived.",
       dispositionRef: "ticket-comment-75",
+      targetSha: "abc123",
+      tokenId: "break-glass-75",
+      mintedAt: "2026-08-18T10:00:00.000Z",
+      consumedAt: "2026-08-18T10:01:00.000Z",
+      resultVersion: 3,
+      attestation: { resultCommit: "abc123", resultVersion: 3 },
     },
   );
 });

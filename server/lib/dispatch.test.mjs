@@ -76,7 +76,7 @@ import {
   _setRunFile as setRunFile,
   _setSpawner,
   _resolveDispatchLane,
-  createDispatcher,
+  createDispatcher as createDispatcherCore,
   invalidateResult,
 } from "./dispatch.mjs";
 
@@ -86,6 +86,22 @@ const FORCE_AUDIT = Object.freeze({
   dispositionRef: "fixture-disposition-ref",
 });
 const seededSyntheticBranches = new Set();
+const testEventLogs = new Map();
+
+// Tests inject one writer per disposable state directory. Production owns this
+// wiring in createServer; keeping it explicit here prevents the dispatcher from
+// masking writer-identity bugs with a lazy second event log.
+function createDispatcher(options) {
+  let eventLog = options.eventLog;
+  if (!eventLog) {
+    eventLog = testEventLogs.get(options.stateDir);
+    if (!eventLog) {
+      eventLog = createEventLog({ stateDir: options.stateDir });
+      testEventLogs.set(options.stateDir, eventLog);
+    }
+  }
+  return createDispatcherCore({ ...options, eventLog });
+}
 
 function isCommand(file, name) {
   return basename(String(file)).toLowerCase().replace(/\.exe$/, "") === name;
@@ -6385,6 +6401,77 @@ test("break-glass authorization is single-use and its pending record is private"
   );
 });
 
+test("durable security events require the injected service writer", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const dispatcher = createDispatcherCore({ registry: setup.registry, stateDir: setup.state });
+
+  await assert.rejects(
+    dispatcher.mintBreakGlass(seeded.id, {
+      action: "merge",
+      targetSha: seeded.branchHead,
+      ...FORCE_AUDIT,
+      actor: "human-ui",
+    }),
+    /durable event append requires the injected Atelier event log/,
+  );
+  assert.equal(existsSync(join(setup.state, "logs")), false, "dispatcher must not construct a second writer");
+});
+
+test("break-glass authorization is bound to result and attestation evidence at the same HEAD", async (t) => {
+  for (const scenario of [
+    {
+      label: "result version",
+      mutate(record) {
+        record.result.version += 1;
+        record.attestation.resultVersion += 1;
+      },
+      expected: /result evidence changed/,
+    },
+    {
+      label: "attestation commit",
+      mutate(record) {
+        record.attestation.resultCommit = "re-attested-same-head";
+      },
+      expected: /attestation evidence changed/,
+    },
+  ]) {
+    const setup = await fixture(t);
+    const seeded = await seedDispatch(setup);
+    stubFastForwardMerge(setup);
+    const eventLog = createEventLog({ stateDir: setup.state });
+    const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+    const authorization = await dispatcher.mintBreakGlass(seeded.id, {
+      action: "merge",
+      targetSha: seeded.branchHead,
+      ...FORCE_AUDIT,
+      actor: "human-ui",
+    });
+    const changed = rawRecord(setup, seeded.id);
+    scenario.mutate(changed);
+    appendFileSync(
+      join(setup.state, "dispatches", "index.jsonl"),
+      `${JSON.stringify(changed)}\n`,
+    );
+    const restarted = createDispatcher({
+      registry: setup.registry,
+      stateDir: setup.state,
+      eventLog,
+    });
+
+    await assert.rejects(
+      restarted.merge(seeded.id, {
+        force: true,
+        breakGlassToken: authorization.token,
+        actor: "human-ui",
+      }),
+      scenario.expected,
+      scenario.label,
+    );
+  }
+});
+
 test("break-glass authorization refuses expiry and a branch move after mint", async (t) => {
   const expiredSetup = await fixture(t);
   const expiredSeed = await seedDispatch(expiredSetup);
@@ -6411,6 +6498,21 @@ test("break-glass authorization refuses expiry and a branch move after mint", as
       actor: "human-ui",
     }),
     /EATELIER_BREAK_GLASS_INVALID: authorization expired/,
+  );
+  const [expiredStoreName] = await readdir(join(expiredSetup.state, "break-glass"));
+  const expiredStorePath = join(expiredSetup.state, "break-glass", expiredStoreName);
+  const expiredStore = JSON.parse(await readFile(expiredStorePath, "utf8"));
+  assert.equal(expiredStore.status, "expired");
+  assert.match(expiredStore.expiredAt, /^2026-/);
+  now -= 60 * 60 * 1_000;
+  await assert.rejects(
+    expiredDispatcher.merge(expiredSeed.id, {
+      force: true,
+      breakGlassToken: expired.token,
+      actor: "human-ui",
+    }),
+    /EATELIER_BREAK_GLASS_INVALID: authorization expired/,
+    "clock rollback must not revive an expiry tombstone",
   );
 
   const movedSetup = await fixture(t);
@@ -6447,6 +6549,161 @@ test("break-glass authorization refuses expiry and a branch move after mint", as
     }),
     /EATELIER_BREAK_GLASS_INVALID: branch moved \(authorized validated-head, current moved-after-mint\)/,
   );
+});
+
+test("boot recovers a consumed break-glass event debt from the durable token store", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  let failConsumed = true;
+  const failingLog = {
+    append: (...args) => eventLog.append(...args),
+    appendDurable(kind, payload, options) {
+      if (kind === "dispatch.break-glass" && payload.phase === "consumed" && failConsumed) {
+        failConsumed = false;
+        throw new Error("fixture consumed audit EIO");
+      }
+      return eventLog.appendDurable(kind, payload, options);
+    },
+  };
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog: failingLog,
+  });
+  const authorization = await dispatcher.mintBreakGlass(seeded.id, {
+    action: "merge",
+    targetSha: seeded.branchHead,
+    ...FORCE_AUDIT,
+    actor: "human-ui",
+  });
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: authorization.token,
+      actor: "human-ui",
+    }),
+    /break-glass audit event could not be persisted/,
+  );
+  const [storeName] = await readdir(join(setup.state, "break-glass"));
+  const storePath = join(setup.state, "break-glass", storeName);
+  assert.equal(JSON.parse(await readFile(storePath, "utf8")).consumedEventAt, null);
+
+  createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  await waitForCondition(
+    () => Boolean(JSON.parse(readFileSync(storePath, "utf8")).consumedEventAt),
+    "boot did not settle consumed-event debt",
+  );
+  const consumedEvents = eventLog.read({ kind: "dispatch.break-glass" })
+    .filter((event) => event.phase === "consumed");
+  assert.equal(consumedEvents.length, 1);
+  assert.equal(consumedEvents[0].recovered, true);
+  assert.equal(rawRecord(setup, seeded.id).merged, null);
+});
+
+test("merge audit append debt never retroactively fails a landed merge and drains later and at boot", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  stubFastForwardMerge(setup);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  let mergeFailures = 2;
+  const failingLog = {
+    append: (...args) => eventLog.append(...args),
+    appendDurable(kind, payload, options) {
+      if (kind === "dispatch.merge" && mergeFailures > 0) {
+        mergeFailures -= 1;
+        throw new Error("fixture merge audit EIO");
+      }
+      return eventLog.appendDurable(kind, payload, options);
+    },
+  };
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog: failingLog,
+  });
+  const merged = await forceMerge(dispatcher, seeded.id);
+  assert.ok(merged.merged, "landed merge remains a successful operation");
+  assert.equal(merged.postMerge.state, "skipped", "post-merge handoff still ran");
+  assert.equal(merged.mergeEventDebt.attempts, 1);
+  assert.ok(merged.warnings.some((warning) => warning.startsWith("merge audit event pending:")));
+
+  const duplicate = await dispatcher.merge(seeded.id);
+  assert.equal(duplicate.merged.commit, merged.merged.commit);
+  assert.equal(duplicate.mergeEventDebt.attempts, 2, "later operation retried without failing");
+
+  const restarted = createDispatcher({ registry: setup.registry, stateDir: setup.state, eventLog });
+  await waitForCondition(
+    () => restarted.get(seeded.id)?.mergeEventDebt === undefined,
+    "boot did not drain merge event debt",
+  );
+  assert.equal(eventLog.read({ kind: "dispatch.merge" }).length, 1);
+});
+
+test("new break-glass mint supersedes the prior active token and doctor GC reaps old tombstones", async (t) => {
+  const setup = await fixture(t);
+  const seeded = await seedDispatch(setup);
+  let now = Date.parse("2026-08-01T10:00:00.000Z");
+  stubFastForwardMerge(setup);
+  const eventLog = createEventLog({ stateDir: setup.state });
+  const dispatcher = createDispatcher({
+    registry: setup.registry,
+    stateDir: setup.state,
+    eventLog,
+    breakGlassNow: () => now,
+  });
+  const mint = () => dispatcher.mintBreakGlass(seeded.id, {
+    action: "merge",
+    targetSha: seeded.branchHead,
+    forcedBy: "operator sk-abcdefghijklmnopq",
+    reason: "token: hunter2-hunter2-hunter2",
+    dispositionRef: "review/secret",
+    actor: "human-ui",
+  });
+  const first = await mint();
+  const second = await mint();
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: first.token,
+      actor: "human-ui",
+    }),
+    /authorization was superseded/,
+  );
+  const stores = (await readdir(join(setup.state, "break-glass"))).sort();
+  assert.equal(stores.length, 2);
+  const stored = await Promise.all(stores.map(async (name) =>
+    JSON.parse(await readFile(join(setup.state, "break-glass", name), "utf8"))));
+  assert.deepEqual(stored.map((entry) => entry.status).sort(), ["pending", "superseded"]);
+  assert.doesNotMatch(JSON.stringify(stored), /sk-abcdefghijklmnopq|hunter2/);
+  assert.deepEqual(
+    eventLog.read({ kind: "dispatch.break-glass" }).map((event) => event.phase),
+    ["minted", "superseded", "minted"],
+  );
+
+  now += 10 * 60 * 1_000 + 1;
+  await assert.rejects(
+    dispatcher.merge(seeded.id, {
+      force: true,
+      breakGlassToken: second.token,
+      actor: "human-ui",
+    }),
+    /authorization expired/,
+  );
+  const dryRun = await dispatcher.gc({
+    dryRun: true,
+    olderThanDays: 7,
+    now: new Date(now + 8 * 24 * 60 * 60 * 1_000),
+  });
+  assert.equal(dryRun.breakGlassAuthorizations.length, 2);
+  assert.equal((await readdir(join(setup.state, "break-glass"))).length, 2);
+  const collected = await dispatcher.gc({
+    olderThanDays: 7,
+    now: new Date(now + 8 * 24 * 60 * 60 * 1_000),
+  });
+  assert.equal(collected.breakGlassAuthorizations.length, 2);
+  assert.deepEqual(await readdir(join(setup.state, "break-glass")), []);
 });
 
 test("break-glass consume is durable before any merge git movement", async (t) => {
@@ -11909,6 +12166,21 @@ test("rollup de-duplicates persisted history and sums projects and local days", 
     },
     {
       ...base,
+      id: "alpha-force-merged",
+      project: "alpha",
+      state: "completed",
+      startedAt: localStartedAt(1),
+      turns: 0,
+      costUSD: 0,
+      merged: {
+        commit: "forced",
+        mergedAt: localStartedAt(0),
+        strategy: "ff",
+        forcedBy: "fixture-architect",
+      },
+    },
+    {
+      ...base,
       id: "alpha-rejected",
       project: "alpha",
       state: "rejected",
@@ -11929,10 +12201,11 @@ test("rollup de-duplicates persisted history and sums projects and local days", 
       {
         project: "alpha",
         projectRemoved: true,
-        runs: 2,
-        completed: 1,
+        runs: 3,
+        completed: 2,
         failed: 1,
         merged: 1,
+        forcedMerged: 1,
         turns: 4,
         costUSD: 1.5,
       },
@@ -11943,15 +12216,16 @@ test("rollup de-duplicates persisted history and sums projects and local days", 
         completed: 0,
         failed: 1,
         merged: 0,
+        forcedMerged: 0,
         turns: 4,
         costUSD: 2.5,
       },
     ],
     days: [
-      { day: localDay(1), runs: 1, costUSD: 1.25 },
+      { day: localDay(1), runs: 2, costUSD: 1.25 },
       { day: localDay(0), runs: 2, costUSD: 2.75 },
     ],
-    totals: { runs: 3, turns: 8, costUSD: 4 },
+    totals: { runs: 4, merged: 1, forcedMerged: 1, turns: 8, costUSD: 4 },
   });
 });
 
@@ -18726,7 +19000,7 @@ test("requireReview preserves flat and mid-upgrade passes for merge and never me
     stateDir: reviewSetup.state,
   });
   await assert.rejects(
-    reviewDispatcher.merge(reviewRecord.id),
+    forceMerge(reviewDispatcher, reviewRecord.id),
     /review dispatches are read-only audit records/,
   );
   // Negative control: the no-review record above still fails the unforced
