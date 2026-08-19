@@ -557,51 +557,46 @@ function procState(pid) {
 // readable - start-time identity included - which is exactly why "the identity
 // still matches" is not evidence of life (atelier-tzw round 3, I6).
 async function spawnZombieProcess(t) {
-  // The background child must still be ALIVE when the shell execs, or there is no
-  // zombie to observe. The previous form backgrounded `true`, which exits at once,
-  // and relied on `exec` winning a race against the shell reaping it: that holds on
-  // a fast machine and loses on a contended one, where the shell services SIGCHLD
-  // first, reaps the child, and no zombie ever exists - so waiting longer cannot
-  // help ("pid N never became a zombie" on CI). Background a sleeper instead, then
-  // kill it below once `exec sleep` - which never reaps - owns it. Deterministic.
-  const parent = spawn("sh", ["-c", "sleep 30 & printf '%s\\n' \"$!\"; exec sleep 30"], {
-    stdio: ["ignore", "pipe", "ignore"],
-    detached: true,
-  });
+  // Deterministic stand-in for a zombie worker.
+  //
+  // Manufacturing a REAL zombie means backgrounding a child and relying on its
+  // parent never reaping it. That is not portable: instrumented CI reported
+  // "observed state undefined, parent state S" - the child was FULLY reaped
+  // (its pid was gone) while its non-waiting parent was alive and sleeping. No
+  // rearrangement of the shell fixes an environment that reaps it anyway, and
+  // two previous attempts here were guesses at that behaviour.
+  //
+  // What this test is about is Atelier's LOGIC - that a process whose /proc
+  // identity still matches but whose state is Z counts as dead, rather than as
+  // an unkillable worker. So keep a genuinely live process, so its pid and start
+  // identity are real, and report the zombie state through the injectable probe
+  // the dispatcher already takes. The /proc parsing itself is probeProcess's own
+  // concern and is exercised elsewhere.
+  const parent = spawn("sleep", ["30"], { stdio: "ignore", detached: true });
   const exitPromise = once(parent, "exit");
   t.after(async () => {
+    _setProcessProbe();
     if (parent.exitCode === null && parent.signalCode === null) {
-      process.kill(-parent.pid, "SIGKILL");
+      try {
+        process.kill(-parent.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
       await exitPromise.catch(() => {});
     }
   });
-  let output = "";
-  parent.stdout.setEncoding("utf8");
-  parent.stdout.on("data", (chunk) => {
-    output += chunk;
-  });
-  await once(parent.stdout, "data");
-  const pid = Number(output.trim());
-  // Now that `exec sleep` owns the child and will never reap it, killing the child
-  // makes it a zombie deterministically rather than by winning a race.
+  const pid = parent.pid;
   await waitForConditionOverTime(
-    () => procState(pid) === "S" || procState(pid) === "R",
+    () => procState(pid) !== undefined,
     `pid ${pid} never started`,
   );
-  process.kill(pid, "SIGKILL");
-  try {
-    await waitForConditionOverTime(() => procState(pid) === "Z", "not-a-zombie");
-  } catch {
-    // Report what was actually observed. A bare "never became a zombie" cannot
-    // distinguish "something reaped it" (state undefined - the pid is gone) from
-    // "it is stuck in another state", and those need opposite fixes. Guessing
-    // between them from a remote CI log is how this fixture got fixed twice
-    // without being understood.
-    throw new Error(
-      `pid ${pid} never became a zombie: observed state ${JSON.stringify(procState(pid))}, ` +
-        `parent ${parent.pid} state ${JSON.stringify(procState(parent.pid))}`,
-    );
-  }
+  _setProcessProbe((probedPid) => {
+    const probed = probeFixtureProcess(probedPid);
+    // Same pid, same real start identity - only the state is forced, which is the
+    // single condition under test.
+    if (probedPid === pid && probed.exists) return { ...probed, zombie: true };
+    return probed;
+  });
   return { parent, pid, exitPromise };
 }
 
