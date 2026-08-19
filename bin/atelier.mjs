@@ -694,11 +694,22 @@ async function doctor(args) {
 
   const backends = createSandboxBackends();
   const platformSupport = sandboxPlatformSupport();
+  // Isolation is only REQUIRED where something actually resolves to a sandboxed
+  // confinement. trusted-local is the default and needs no backend, so an absent
+  // or unsupported backend is reported as a fact but must not fail doctor for an
+  // install that never asked to be sandboxed - otherwise every trusted-local user,
+  // and every macOS user, gets a permanently failing health check. Fail-closed
+  // belongs on the dispatch that requests confinement, which is where it lives.
+  const sandboxRequired = [
+    resolveTrustProfile({}, registry.defaults),
+    ...registry.projects.map((project) => resolveTrustProfile(project, registry.defaults)),
+  ].some((profile) => sandboxEnforcesIsolation(profile.confinement));
   if (!platformSupport.supported) {
     console.log(
-      `sandbox: unsupported (${platformSupport.platform}; ${platformSupport.reason})`,
+      `sandbox: unsupported (${platformSupport.platform}; ${platformSupport.reason})` +
+        (sandboxRequired ? "" : "; no project requests isolation"),
     );
-    process.exitCode = 1;
+    if (sandboxRequired) process.exitCode = 1;
   }
   const selectedBackendIds = new Set([
     resolveSandboxBackendId({}, registry.defaults),
@@ -714,9 +725,10 @@ async function doctor(args) {
     const name = index === 0 ? "sandbox" : `sandbox ${backendId}`;
     console.log(
       `${name}: ${probe.available ? "ok" : "unavailable"} ` +
-        `(${platformSupport.platform}; ${backendId}; ${version}; ${probe.reason})`,
+        `(${platformSupport.platform}; ${backendId}; ${version}; ${probe.reason})` +
+        (probe.available || sandboxRequired ? "" : "; no project requests isolation"),
     );
-    if (!probe.available) process.exitCode = 1;
+    if (!probe.available && sandboxRequired) process.exitCode = 1;
   }
   const brokerAllowlist = resolveSandboxBrokerAllowlist(registry.defaults);
   console.log(

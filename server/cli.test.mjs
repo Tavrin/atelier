@@ -310,7 +310,13 @@ test("atelier doctor reports the selected backend's specific unavailable reason"
     join(root, "projects.json"),
     JSON.stringify({
       version: 1,
-      defaults: { sandboxBackend: "podman" },
+      // The isolation request is what makes an unavailable backend fatal. Without
+      // it this registry is trusted-local and doctor must stay green - asserted by
+      // the companion test below.
+      defaults: {
+        sandboxBackend: "podman",
+        trustProfile: { confinement: "sandboxed-write", credential: "none" },
+      },
       groups: [],
       projects: [],
     }),
@@ -350,6 +356,59 @@ test("atelier doctor reports the selected backend's specific unavailable reason"
       return true;
     },
   );
+});
+
+test("atelier doctor stays green when an unavailable backend is not requested", async (t) => {
+  // Regression: doctor used to exit 1 whenever the sandbox backend was absent,
+  // regardless of whether anything asked to be sandboxed. That made every
+  // trusted-local install - and every macOS install, where no backend exists at
+  // all - permanently unhealthy, and it broke the packed-artifact CI smoke on a
+  // runner without bubblewrap. Fail-closed belongs on the dispatch that requests
+  // confinement, not on the health check of an install that never asked for it.
+  const root = await mkdtemp(join(tmpdir(), "atelier-cli-sandbox-optional-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, "projects.json"),
+    JSON.stringify({
+      version: 1,
+      defaults: { sandboxBackend: "podman" },
+      groups: [],
+      projects: [],
+    }),
+  );
+  for (const command of ["git", "br", "claude"]) {
+    const path = join(root, command);
+    await writeFile(path, `#!/bin/sh\nprintf '%s\\n' '${command} fixture'\n`);
+    await chmod(path, 0o755);
+  }
+  const podman = join(root, "podman");
+  await writeFile(
+    podman,
+    "#!/bin/sh\n" +
+      "if [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'podman version 4.9.3'; exit 0; fi\n" +
+      "printf '%s\\n' 'AppArmor denied the rootless user namespace' >&2\n" +
+      "exit 1\n",
+  );
+  await chmod(podman, 0o755);
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [resolve("bin", "atelier.mjs"), "doctor"],
+    {
+      cwd: resolve("."),
+      env: {
+        ...process.env,
+        PATH: root,
+        ATELIER_CONFIG_DIR: root,
+        ATELIER_STATE_DIR: join(root, "state"),
+        ATELIER_TEST_NO_REAL_PROVIDER: "1",
+      },
+    },
+  );
+  // The unavailability is still REPORTED - it is evidence, not a secret - and the
+  // line says why it is not fatal.
+  assert.match(stdout, /sandbox: unavailable \(linux; podman; podman version 4\.9\.3;/);
+  assert.match(stdout, /no project requests isolation/);
 });
 
 test("atelier doctor validates the configured Codex binary with initialize only", async (t) => {
