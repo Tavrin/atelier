@@ -1214,13 +1214,30 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const readStatus = async () => JSON.parse((await execFileAsync(process.execPath, [
     _appServerRunnerPath, "status", jobId, "--state-dir", statePath,
   ], { env })).stdout);
+  // "finishing" is TRANSIENT - it lasts only until the app-server actually exits.
+  // Sampling it by spawning a `status` subprocess per attempt costs tens of
+  // milliseconds per sample, so under a loaded batch a single sample can outlast
+  // the whole window and the poller steps straight over it, failing a runner that
+  // behaved correctly (atelier-7nv; widening the window reduced the rate but did
+  // not remove the race). Read the job file directly instead: microseconds per
+  // sample, so the window cannot be missed. The CLI still serves the terminal
+  // assertions below, which are the ones that need the production entrypoint.
+  const jobFile = join(statePath, `${jobId}.json`);
   let finishing;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const snapshot = await readStatus();
-    if (snapshot.status === "finishing") { finishing = snapshot; break; }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    // Yield every sample: a synchronous busy-loop starves the event loop, so the
+    // runner's own I/O never progresses and the state never advances at all.
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    try {
+      const snapshot = JSON.parse(readFileSync(jobFile, "utf8"));
+      if (snapshot.status === "finishing") { finishing = snapshot; break; }
+      if (snapshot.status === "completed") break;
+    } catch {
+      // Mid-write or not yet created; sample again.
+    }
   }
-  assert.equal(finishing?.status, "finishing");
+  assert.equal(finishing?.status, "finishing", "never observed the transient finishing state");
   assert.ok(Number.isInteger(finishing.pid), "finishing must still expose the live runner");
   let completed;
   for (let attempt = 0; attempt < 100; attempt += 1) {

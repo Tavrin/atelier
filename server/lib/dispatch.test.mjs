@@ -13392,7 +13392,14 @@ test("a drain lease blocks dispatch() and the reply() resume transition until re
   );
 
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
-  const lease = dispatcher.acquireDrainLease({ ttlMs: 5_000 });
+  // The maximum TTL the contract allows (acquireDrainLease validates 1000..60000).
+  // This test asserts that a HELD lease blocks acquisition, not that a lease
+  // expires: several awaited dispatch/reply round-trips run before the "already
+  // held" assertion below, and under full-batch contention the previous 5s TTL
+  // elapsed first - the lease then expired exactly as specified and the assertion
+  // flipped, failing a correct implementation (atelier-i4q, ~1 batch in 3).
+  // TTL expiry deserves its own test, with a short TTL and no intervening awaits.
+  const lease = dispatcher.acquireDrainLease({ ttlMs: 60_000 });
   assert.ok(lease.token);
 
   await assert.rejects(

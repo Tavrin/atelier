@@ -31,6 +31,31 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ matrix.node-version }}
+      # The batch resolves `claude` and `br` through PATH when it builds an
+      # execution profile, but never EXECUTES them - dispatch tests inject their
+      # own spawner. Their presence is a precondition, not the thing under test,
+      # so stubs satisfy it honestly. Proven locally: with the real binaries
+      # removed the batch drops to 41 failures in dispatch.test.mjs alone, and
+      # with these stubs it returns to 1072/1072.
+      #
+      # Without this the batch is not hermetic - it passes on a maintainer
+      # machine that happens to have the provider toolchain installed and
+      # collapses anywhere else, which is precisely what the previously-hanging
+      # CI job could never tell us.
+      - name: Install provider stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          stub_dir="$RUNNER_TEMP/provider-stubs"
+          mkdir -p "$stub_dir"
+          for name in claude br; do
+            # %%s so the OUTER printf emits a literal %s into the stub, rather
+            # than consuming it here and writing a stub that ignores its own name.
+            printf '#!/bin/sh\nprintf "%%s stub 1.0\\n" "$(basename "$0")"\n' >"$stub_dir/$name"
+            chmod +x "$stub_dir/$name"
+          done
+          echo "$stub_dir" >>"$GITHUB_PATH"
+
       # scripts/test-batch.mjs owns the file set, and `npm test` runs the same
       # thing a maintainer runs locally. Duplicating the enumeration here is how
       # CI and local drift apart.
