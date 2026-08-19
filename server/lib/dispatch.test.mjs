@@ -831,10 +831,24 @@ async function settleAsyncWork(turns = 50) {
   }
 }
 
-async function waitForCondition(predicate, message) {
+async function waitForCondition(predicate, message, { timeoutMs = 10_000 } = {}) {
+  // Fast path unchanged: 100 setImmediate turns settle anything that only needs
+  // microtasks, in well under a millisecond.
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  }
+  // Wall-clock safety net. Those 100 turns cost <1ms on an idle workstation but
+  // ~9ms on a contended CI runner, and anything waiting on real I/O - a persist,
+  // a subprocess, a claim release - can easily need longer than either. That is a
+  // latent flake in all ~130 callers, not just the one that surfaced it ("boot did
+  // not release the crash-window failure's claim", failing in 9.3ms). The comment
+  // below already warned that immediate-polling is useless against real elapsed
+  // time; this stops that from being every caller's problem to remember.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
   }
   throw new Error(message);
 }
