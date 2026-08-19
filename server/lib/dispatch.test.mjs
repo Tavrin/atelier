@@ -22597,6 +22597,12 @@ test("the sweep reports a Atelier-adjacent tree it cannot attribute and never lo
   const foreign = await fixtureForeignTree(t, outside);
   await seedCodexRecord(setup, { state: "running", codexProcessTree: null });
   _setRunFile(async () => "");
+  // The seeded record is legacy-companion, so building its profile needs a
+  // companion path. Every other legacy test says so explicitly; this one did not,
+  // and silently fell through to resolving the maintainer's ~/.claude plugin
+  // cache - so it passed on that machine and failed anywhere without it with
+  // "Codex lane unavailable: codex-companion.mjs was not found".
+  useLegacyCompanion(setup);
 
   const dispatcher = createDispatcher({ registry: setup.registry, stateDir: setup.state });
   const swept = await dispatcher.sweepCodexProcesses();
