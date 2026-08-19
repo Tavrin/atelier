@@ -529,6 +529,18 @@ test("API authentication enforces the bearer, browser CSRF, Host, and Origin mat
 
   assert.equal((await send(port, { path: "/", authenticated: false })).status, 200);
   assert.equal((await send(port, { path: "/api/projects", authenticated: false })).status, 401);
+  // A bearer that is PRESENT but invalid must be refused, not merely one that is
+  // absent. Found by the ATT-011 mutation matrix: disabling the invalid-bearer
+  // refusal in auth.mjs turned nothing red anywhere, because every case here sent
+  // either no credential or a valid one. The guard was correct; nothing asserted it.
+  for (const forged of ["atelier-v1.api.not-a-real-signature", "garbage", ""]) {
+    const refused = await send(port, {
+      path: "/api/projects",
+      authenticated: false,
+      headers: { Authorization: `Bearer ${forged}` },
+    });
+    assert.equal(refused.status, 401, `a forged bearer (${JSON.stringify(forged)}) was accepted`);
+  }
   assert.equal((await send(port, { path: "/api/projects" })).status, 200);
 
   const unauthenticated = await send(port, {
