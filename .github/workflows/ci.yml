@@ -91,6 +91,35 @@ jobs:
       - name: Run the golden production-entrypoint suite
         run: node test-system/run-tests.mjs
 
+  # ATT-011 mutation matrix: breaks one integrity guard at a time in production
+  # source and requires the named gate to turn red and to localize. A green suite
+  # that asserts nothing is the failure mode this exists to catch - it already
+  # found one: the invalid-bearer refusal was unasserted anywhere.
+  mutation-matrix:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.x
+      - name: Install provider stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          stub_dir="$RUNNER_TEMP/provider-stubs"
+          mkdir -p "$stub_dir"
+          for name in claude br; do
+            printf '#!/bin/sh\nprintf "%%s stub 1.0\\n" "$(basename "$0")"\n' >"$stub_dir/$name"
+            chmod +x "$stub_dir/$name"
+          done
+          echo "$stub_dir" >>"$GITHUB_PATH"
+      - name: Run the mutation matrix
+        run: node test-system/mutation-matrix.mjs
+
   packed-artifact:
     runs-on: ubuntu-24.04
     steps:
