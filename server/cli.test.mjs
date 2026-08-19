@@ -83,10 +83,14 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   assert.match(stdout, /git: ok/);
   assert.match(stdout, /br: ok/);
   assert.match(stdout, /claude: ok/);
-  assert.match(
-    stdout,
-    /sandbox: ok \(linux; bwrap; bubblewrap 0\.10\.0; bubblewrap unprivileged namespace probe succeeded\)/,
-  );
+  // Shape, not the host's bubblewrap build. Pinning "ok ... bubblewrap 0.10.0"
+  // made this pass only on a machine with that exact version installed: it failed
+  // on CI, where there is no bubblewrap at all, and would fail for any contributor
+  // on a different build. Whether the backend is available is a property of the
+  // machine; what doctor owes is naming the platform, the backend and a specific
+  // reason. The fail-closed semantics are asserted by the two dedicated tests
+  // below (unavailable-and-requested => exit 1; unavailable-and-unrequested => green).
+  assert.match(stdout, /^sandbox: (ok|unavailable) \(linux; bwrap; .+\)$/m);
   assert.match(
     stdout,
     /sandbox daemon broker: ok \(unix socket; operator allowlist: \/api\/dispatches; \/api\/session and \/api\/break-glass unconditionally denied; remote provider APIs unavailable\)/,

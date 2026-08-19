@@ -1239,14 +1239,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
   assert.equal(finishing?.status, "finishing", "never observed the transient finishing state");
   assert.ok(Number.isInteger(finishing.pid), "finishing must still expose the live runner");
+  // Wait for the runner to be GONE, not merely for the status to flip. printableJob
+  // derives pid as `alive ? job.pid : null`, so a completed job still reports its
+  // pid for as long as the runner process is genuinely still exiting - that is
+  // honest reporting, not a stale field. Asserting on the first completed sample
+  // therefore races the runner's own exit: it passed on a fast workstation and
+  // failed on CI with `3057 !== null`. The test's name is "then releases its
+  // lease", so waiting for that release is what it meant all along.
   let completed;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
     completed = await readStatus();
-    if (completed.status === "completed") break;
+    if (completed.status === "completed" && completed.pid === null) break;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   assert.equal(completed.status, "completed");
-  assert.equal(completed.pid, null);
+  assert.equal(completed.pid, null, "the runner never released its pid after completing");
   assert.equal(existsSync(join(statePath, `${jobId}.attach.json`)), false);
 });
 
