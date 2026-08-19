@@ -42,8 +42,24 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-console.log(`test-batch: running ${files.length} test files`);
-const result = spawnSync(process.execPath, ["--test", ...files, ...process.argv.slice(2)], {
-  stdio: "inherit",
-});
+// Node defaults test concurrency to the machine's parallelism. This suite spawns
+// real dispatchers, git and provider children per file, so on a 4-core CI runner
+// four heavy files at once starve each other and time-sensitive tests fail - a
+// different small set every run (boot, convoy, claim, lease). That reads as
+// flakiness but is contention, and chasing the tests one at a time never
+// converges. ATELIER_TEST_CONCURRENCY caps it; CI sets it, and a 32-core
+// workstation leaves it alone.
+const concurrency = process.env.ATELIER_TEST_CONCURRENCY;
+const options = concurrency ? [`--test-concurrency=${concurrency}`] : [];
+
+console.log(
+  `test-batch: running ${files.length} test files` +
+    (concurrency ? ` at concurrency ${concurrency}` : ""),
+);
+// Node options precede the file list; trailing flags are treated as paths.
+const result = spawnSync(
+  process.execPath,
+  ["--test", ...options, ...process.argv.slice(2), ...files],
+  { stdio: "inherit" },
+);
 process.exit(result.status ?? 1);

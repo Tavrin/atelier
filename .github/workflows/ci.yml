@@ -60,6 +60,19 @@ jobs:
       # thing a maintainer runs locally. Duplicating the enumeration here is how
       # CI and local drift apart.
       - name: Run the campaign test batch
+        # Hosted runners have ~4 cores and this suite spawns real dispatchers, git
+        # and provider children per file. At Node's default concurrency (one file
+        # per core) they starve each other and a DIFFERENT small set of
+        # time-sensitive boot/convoy/claim tests fails each run - contention that
+        # reads as flakiness, which is why chasing the individual tests never
+        # converged.
+        #
+        # Reproduced locally with `taskset -c 0-3` to model a 4-core runner:
+        # default concurrency fails 2, concurrency 2 still fails 1-2, concurrency 1
+        # passes 1072/1072 three times in ~2m24s. Serialising costs a couple of
+        # minutes and buys a gate whose red actually means something.
+        env:
+          ATELIER_TEST_CONCURRENCY: "1"
         run: npm test
 
   # The P0 proof rail. It existed as an npm script and was never invoked by CI, so
