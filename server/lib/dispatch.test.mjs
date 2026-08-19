@@ -548,7 +548,14 @@ function procState(pid) {
 // readable - start-time identity included - which is exactly why "the identity
 // still matches" is not evidence of life (atelier-tzw round 3, I6).
 async function spawnZombieProcess(t) {
-  const parent = spawn("sh", ["-c", "true & printf '%s\\n' \"$!\"; exec sleep 30"], {
+  // The background child must still be ALIVE when the shell execs, or there is no
+  // zombie to observe. The previous form backgrounded `true`, which exits at once,
+  // and relied on `exec` winning a race against the shell reaping it: that holds on
+  // a fast machine and loses on a contended one, where the shell services SIGCHLD
+  // first, reaps the child, and no zombie ever exists - so waiting longer cannot
+  // help ("pid N never became a zombie" on CI). Background a sleeper instead, then
+  // kill it below once `exec sleep` - which never reaps - owns it. Deterministic.
+  const parent = spawn("sh", ["-c", "sleep 30 & printf '%s\\n' \"$!\"; exec sleep 30"], {
     stdio: ["ignore", "pipe", "ignore"],
     detached: true,
   });
@@ -566,6 +573,13 @@ async function spawnZombieProcess(t) {
   });
   await once(parent.stdout, "data");
   const pid = Number(output.trim());
+  // Now that `exec sleep` owns the child and will never reap it, killing the child
+  // makes it a zombie deterministically rather than by winning a race.
+  await waitForConditionOverTime(
+    () => procState(pid) === "S" || procState(pid) === "R",
+    `pid ${pid} never started`,
+  );
+  process.kill(pid, "SIGKILL");
   await waitForConditionOverTime(
     () => procState(pid) === "Z",
     `pid ${pid} never became a zombie`,

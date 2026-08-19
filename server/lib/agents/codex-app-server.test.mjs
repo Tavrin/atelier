@@ -975,8 +975,18 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const runnerEnv = {
     ...process.env,
     ATELIER_TEST_NO_REAL_PROVIDER: "1",
-    ATELIER_TEST_CODEX_REQUEST_TIMEOUT_MS: "50",
-    ATELIER_TEST_CODEX_TERMINATION_GRACE_MS: "50",
+    // The request timeout is GLOBAL, so it must be comfortably longer than the
+    // requests the stub does answer (initialize, thread/start) and is otherwise
+    // free: the stub deliberately never answers turn/start, so that request times
+    // out at any value. At 50ms the budget was tight enough that on a contended
+    // runner `initialize` timed out first and the test asserted the wrong path -
+    // CI saw "codex app-server initialize request timed out" where it expects
+    // "turn/start request timed out". Larger is not slower here, because the
+    // deadline that actually elapses is the unanswered one.
+    ATELIER_TEST_CODEX_REQUEST_TIMEOUT_MS: "2000",
+    // Grace covers TERM -> KILL escalation; the stub ignores TERM and must still
+    // get scheduled to write its marker file before KILL lands.
+    ATELIER_TEST_CODEX_TERMINATION_GRACE_MS: "500",
     CODEX_HOME: codexHome,
     CODEX_STUB_CHILD_PID: childPidPath,
     CODEX_STUB_TERM: termPath,
