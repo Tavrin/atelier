@@ -116,12 +116,24 @@ function requireCleanTree() {
 
 // Run one test file and report which of its tests failed, by name.
 function gateResult(gateFile) {
-  const result = run(process.execPath, ["--test", gateFile], {
-    env: { ...process.env, ATELIER_TEST_NO_REAL_PROVIDER: "1" },
-  });
+  // Pin the reporter. Node 22 emits TAP by default and Node 24 emits `spec`
+  // (✔/✖), so an unpinned parser reads nothing on one of them - and reading
+  // nothing looked exactly like "no gate turned red", i.e. the harness reported
+  // all five guards UNGUARDED while it was simply blind. Silence is not a result.
+  const result = run(
+    process.execPath,
+    ["--test", "--test-reporter=tap", gateFile],
+    { env: { ...process.env, ATELIER_TEST_NO_REAL_PROVIDER: "1" } },
+  );
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   const failed = [...output.matchAll(/^not ok \d+ - (.*)$/gm)].map((match) => match[1].trim());
   const passed = [...output.matchAll(/^ok \d+ - (.*)$/gm)].map((match) => match[1].trim());
+  if (failed.length === 0 && passed.length === 0) {
+    throw new Error(
+      `mutation-matrix could not read any test result from ${gateFile}. Refusing to ` +
+        "interpret an unreadable run as a verdict.\n" + output.slice(-2000),
+    );
+  }
   return { failed, passed, output };
 }
 
