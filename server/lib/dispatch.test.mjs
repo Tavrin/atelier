@@ -263,7 +263,16 @@ async function fixture(t, projectOverrides = {}, defaults = {}) {
     _setProcessProbe();
     _setFencedProcessSignal();
     _setGitConfigCountProbe();
-    await rm(root, { recursive: true, force: true });
+    // recursive+force still throws ENOTEMPTY when something CREATES entries while
+    // the walk is removing them - a dispatcher whose persist is still in flight as
+    // the test body ends. On CI that raced often enough to fail the hook (and a
+    // hook failure fails a test that itself passed). maxRetries is Node's
+    // documented remedy for exactly this.
+    //
+    // Note for ATT-011's process/worktree leak report: a dispatcher still writing
+    // after its test finished is worth counting, not just tolerating. This makes
+    // teardown robust; it does not establish that nothing outlives the test.
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   });
   return { root, primary, state, companionPath, project: configuredProject, registry };
 }
@@ -580,10 +589,19 @@ async function spawnZombieProcess(t) {
     `pid ${pid} never started`,
   );
   process.kill(pid, "SIGKILL");
-  await waitForConditionOverTime(
-    () => procState(pid) === "Z",
-    `pid ${pid} never became a zombie`,
-  );
+  try {
+    await waitForConditionOverTime(() => procState(pid) === "Z", "not-a-zombie");
+  } catch {
+    // Report what was actually observed. A bare "never became a zombie" cannot
+    // distinguish "something reaped it" (state undefined - the pid is gone) from
+    // "it is stuck in another state", and those need opposite fixes. Guessing
+    // between them from a remote CI log is how this fixture got fixed twice
+    // without being understood.
+    throw new Error(
+      `pid ${pid} never became a zombie: observed state ${JSON.stringify(procState(pid))}, ` +
+        `parent ${parent.pid} state ${JSON.stringify(procState(parent.pid))}`,
+    );
+  }
   return { parent, pid, exitPromise };
 }
 

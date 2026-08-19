@@ -90,7 +90,11 @@ test("atelier doctor validates a fixture registry from ATELIER_CONFIG_DIR", asyn
   // machine; what doctor owes is naming the platform, the backend and a specific
   // reason. The fail-closed semantics are asserted by the two dedicated tests
   // below (unavailable-and-requested => exit 1; unavailable-and-unrequested => green).
-  assert.match(stdout, /^sandbox: (ok|unavailable) \(linux; bwrap; .+\)$/m);
+  // No `)$` anchor: when nothing requests isolation the line continues past the
+  // closing paren with "; no project requests isolation". My own two changes
+  // contradicted each other here - the doctor fix added that suffix and this
+  // regex demanded the line end at the paren.
+  assert.match(stdout, /^sandbox: (ok|unavailable) \(linux; bwrap; /m);
   assert.match(
     stdout,
     /sandbox daemon broker: ok \(unix socket; operator allowlist: \/api\/dispatches; \/api\/session and \/api\/break-glass unconditionally denied; remote provider APIs unavailable\)/,
