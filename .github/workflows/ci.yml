@@ -7,12 +7,39 @@ on:
 permissions:
   contents: read
 
-# Browser tests are intentionally excluded: this first proof rail has no Chrome dependency.
 env:
   ATELIER_TEST_NO_REAL_PROVIDER: "1"
 
 jobs:
+  # The campaign batch, via scripts/test-batch.mjs. It replaces a bare
+  # `node --test`, which discovered 67 files against this batch's 53 and then
+  # HUNG on the *.browser.test.mjs suites (no Chrome on the runner). A bare run
+  # sat at 1h13m against a ~70s batch before being cancelled, so this job had
+  # never actually gated anything. The script documents both exclusions.
   test:
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22.x", "24.x"]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node-version }}
+      # scripts/test-batch.mjs owns the file set, and `npm test` runs the same
+      # thing a maintainer runs locally. Duplicating the enumeration here is how
+      # CI and local drift apart.
+      - name: Run the campaign test batch
+        run: npm test
+
+  # The P0 proof rail. It existed as an npm script and was never invoked by CI, so
+  # until now it had only ever run on the maintainer's machine.
+  golden:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -22,10 +49,9 @@ jobs:
       - name: Use Node.js 24.x
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          # Minor floating within the maintained Node 24 LTS line is deliberate.
           node-version: 24.x
-      - name: Run full Node test suite
-        run: node --test
+      - name: Run the golden production-entrypoint suite
+        run: node test-system/run-tests.mjs
 
   packed-artifact:
     runs-on: ubuntu-24.04
@@ -37,7 +63,6 @@ jobs:
       - name: Use Node.js 24.x
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          # Minor floating within the maintained Node 24 LTS line is deliberate.
           node-version: 24.x
       - name: Pack and smoke-test the installed artifact
         shell: bash
@@ -58,5 +83,10 @@ jobs:
           printf '#!/bin/sh\nprintf "test shim 1.0\\n"\n' >"$shim_dir/br"
           printf '#!/bin/sh\nprintf "test shim 1.0\\n"\n' >"$shim_dir/claude"
           chmod +x "$shim_dir/br" "$shim_dir/claude"
+          # This runner has no bubblewrap. doctor must still succeed, because the
+          # default confinement is trusted-local and asks for no backend at all -
+          # an absent backend is evidence, not a failure. Fail-closed lives on the
+          # dispatch that requests confinement. This step is what caught the
+          # regression where it did not.
           PATH="$shim_dir:$PATH" ATELIER_CONFIG_DIR="$config_dir" ATELIER_STATE_DIR="$state_dir" \
             ./node_modules/.bin/atelier doctor

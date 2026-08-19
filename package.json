@@ -8,10 +8,11 @@
   "homepage": "https://github.com/Tavrin/atelier#readme",
   "type": "module",
   "scripts": {
-    "test": "node --test",
+    "test": "node scripts/test-batch.mjs",
+    "test:all": "node --test",
     "test:golden": "node test-system/run-tests.mjs"
   },
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=22.0.0" },
   "bin": { "atelier": "bin/atelier.mjs" },
   "files": ["bin", "server", "shared", "ui", "themes", "docs", "README.md", "LICENSE"],
   "keywords": ["agents", "coding-agents", "claude-code", "codex", "kanban", "git-worktree", "local-first"],
