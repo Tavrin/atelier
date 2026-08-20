@@ -195,7 +195,7 @@ export const RECOVERY_LIMITS = Object.freeze([
   }),
   Object.freeze({
     topic: "deep_scan_structural_fields",
-    limit: "Deep recovery and doctor GC retain diagnostic process IDs and worktree paths by policy; free text is redacted on both surfaces.",
+    limit: "Deep recovery and doctor GC retain diagnostic process IDs and worktree paths by policy, except that any path segment matching a credential shape is redacted on both surfaces.",
   }),
 ]);
 

@@ -27,6 +27,11 @@ export function timelineEvidenceHref(evidence) {
   return http.startsWith("/api/") ? http : null;
 }
 
+export function timelineLinkHref(link) {
+  if (link?.to?.kind !== "dispatch" || link.to.id == null) return null;
+  return `#/dispatch/${encodeURIComponent(String(link.to.id))}`;
+}
+
 export function timelineGroups(payload = {}) {
   const groups = new Map();
   for (const item of Array.isArray(payload.items) ? payload.items : []) {
@@ -46,13 +51,15 @@ export function timelineGroups(payload = {}) {
       group.state = item.state;
     }
   }
+  // Deliberately NOT re-sorted by id. The server already orders records
+  // newest-first and truncates from the tail, so an alphabetical sort here would
+  // silently undo that ordering and show the operator a different set than the
+  // one the bound selected. Map preserves insertion order, which IS server order.
   return [...groups.values()]
     .map((group) => ({
       ...group,
       steps: group.steps.slice().sort((left, right) =>
         timelineStageOrder(left.stage) - timelineStageOrder(right.stage) ||
         String(left.code).localeCompare(String(right.code))),
-    }))
-    .sort((left, right) => left.id.localeCompare(right.id));
+    }));
 }
-

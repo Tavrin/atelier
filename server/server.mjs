@@ -41,6 +41,7 @@ import {
   textResponse,
 } from "./lib/http.mjs";
 import { createEventLog, fieldDiff } from "./lib/event-log.mjs";
+import { redactText } from "./lib/stream.mjs";
 import { configDir, stateDir } from "./lib/paths.mjs";
 import {
   deepRecoveryFor,
@@ -1052,7 +1053,10 @@ export function createServer({
             }))),
           );
         } catch (error) {
-          throw dispatchHttpError(error);
+          throw dispatchHttpError({
+            ...error,
+            message: redactText(error?.message ?? error),
+          });
         }
         return;
       }
@@ -1541,7 +1545,10 @@ export function createServer({
             const gcResult = await dispatcher.gc({ dryRun: true, actor: requestActor(request) });
             deep = deepRecoveryFor(redactGcResult(gcResult), options);
           } catch (error) {
-            throw dispatchHttpError(error);
+            throw dispatchHttpError({
+              ...error,
+              message: redactText(error?.message ?? error),
+            });
           }
         }
         jsonResponse(response, 200, { ...recovery, deep });
@@ -1563,13 +1570,20 @@ export function createServer({
       }
       const timelineRoute = path.match(/^\/api\/timeline\/([^/]+)$/);
       if (request.method === "GET" && timelineRoute) {
-        const dispatchId = decodeURIComponent(timelineRoute[1]);
-        if (!dispatcher.get(dispatchId)) {
+        let dispatchId;
+        try {
+          dispatchId = decodeURIComponent(timelineRoute[1]);
+        } catch (error) {
+          if (error instanceof URIError) throw new HttpError(400, "Malformed timeline dispatch id");
+          throw error;
+        }
+        const records = dispatcher.list();
+        if (!records.some((record) => record?.id === dispatchId)) {
           throw new HttpError(404, `Unknown dispatch: ${dispatchId}`);
         }
         const limit = projectionLimit(url, TIMELINE_LIMIT);
         jsonResponse(response, 200, dispatchTimelineFor({
-          records: dispatcher.list(),
+          records,
           projects: registry.projects,
           queues: registry.projects.map((project) => ({
             project: project.name,

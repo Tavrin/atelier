@@ -43,6 +43,8 @@ export const TIMELINE_COVERAGE = Object.freeze([
   coverage("merge-main-health", "containment", "The post-merge outcome lives on the same dispatch record.", "dispatch.mjs:5729-5736"),
   coverage("main-health-acknowledgement", "stored-identifier", "Acknowledgement is keyed by the dispatch id and logs that id and commit.", "dispatch.mjs:6006-6011; attention.mjs:93-96"),
   coverage("bakeoff-sibling", "stored-identifier", "Bakeoff siblings share the durable batchId minted for the batch.", "dispatch.mjs:521-523,8510-8524"),
+  coverage("convoy-member", "stored-identifier", "Corrected by the Wave 1C adversarial review: convoy members, including past members, store the convoy id as batchId and convoy as batchKind.", "dispatch.mjs:521-523,12571-12579"),
+  coverage("same-batch", "stored-identifier", "Records with an unknown or absent batch kind still share a durable batchId, without proving a more specific relationship.", "dispatch.mjs:521-523"),
   coverage("convoy-current-dispatch", "stored-identifier", "A convoy stores only its currentDispatchId.", "dispatch.mjs:2885-2899,12656"),
   coverage("queue-last-dispatch", "stored-identifier", "A parked queue attempt stores lastDispatchId.", "dispatch.mjs:2716-2724"),
   coverage("attention-subject", "containment", "Attention is a pure projection whose dispatch subject id is the record id.", "attention.mjs:213-220"),
@@ -50,7 +52,7 @@ export const TIMELINE_COVERAGE = Object.freeze([
   coverage("event-dispatch", "stored-identifier", "Operational events carry dispatchId as a first-class filter field.", "event-log.mjs:68; dispatch.mjs:3034-3035"),
   coverage("review-verification", "association", "reviewedHead equality proves the same tree, not that the review followed or consumed a verification attempt.", "dispatch.mjs:3466-3472"),
   coverage("same-ticket", "association", "A ticket id is caller-supplied and may be shared by multiple dispatches; this is not causal.", "dispatch.mjs:7892-7909,7981"),
-  coverage("convoy-past-dispatch", "association", "Past convoy membership is recoverable only through ticket ids, which are non-causal associations.", "dispatch.mjs:12651-12666"),
+  coverage("convoy-past-dispatch", "association", "When a dispatch lacks the convoy batchId, matching it to convoy.ticketIds is only a non-causal ticket association.", "dispatch.mjs:12571-12579,12651-12666"),
   coverage("main-health-cause", "association", "A failed main tip contains everything merged before it, so this change is not established as the cause.", "dispatch.mjs:5729-5736"),
   coverage("same-branch", "association", "A branch name is a name, not an identity, and is never rendered as a link.", "LINKAGE-COVERAGE-2026-08-20.md:2"),
   coverage("event-adjacency", "association", "Adjacency or ordering in an event log is never rendered as a link.", "LINKAGE-COVERAGE-2026-08-20.md:2"),
@@ -63,6 +65,25 @@ export const TIMELINE_COVERAGE = Object.freeze([
 ]);
 
 export const TIMELINE_LIMIT = 200;
+
+export const TIMELINE_LIMITS = Object.freeze([
+  Object.freeze({
+    topic: "full_history_read",
+    limit: "The timeline inherits dispatcher list and persistence-status reads that each reparse full dispatch history.",
+  }),
+  Object.freeze({
+    topic: "credential_shaped_path_redaction",
+    limit: "Path segments matching a credential shape are redacted on timeline-linked Recovery Center and doctor GC surfaces.",
+  }),
+  Object.freeze({
+    topic: "sibling_scan_cost",
+    limit: "Ticket and batch indexes are built once in O(N); links for the bounded selected records are then materialized from those indexed groups.",
+  }),
+  Object.freeze({
+    topic: "immutable_evidence_store",
+    limit: "No immutable evidence-store reference exists at this HEAD.",
+  }),
+]);
 
 const NO_EVIDENCE_STORE = "no immutable evidence-store reference exists";
 const ACTIVE_STATES = new Set(["queued", "preparing", "resuming", "running", "verifying", "stopping"]);
@@ -96,8 +117,8 @@ function encoded(value) {
   return encodeURIComponent(String(value));
 }
 
-function evidenceFor(record, { diff = false, logs = false, label = "Dispatch record" } = {}) {
-  const id = encoded(record.id);
+function evidenceForId(recordId, { diff = false, logs = false, label = "Dispatch record" } = {}) {
+  const id = encoded(recordId);
   return [
     { kind: "dispatch-record", label, http: `/api/dispatch/${id}`, mcp: "atelier_dispatch" },
     { kind: "dispatch-events", label: "Per-dispatch event stream", http: `/api/dispatch/${id}/events`, mcp: "atelier_dispatch_tail" },
@@ -108,6 +129,20 @@ function evidenceFor(record, { diff = false, logs = false, label = "Dispatch rec
       ? [{ kind: "operational-log", label: "Operational events for this dispatch", http: `/api/logs?dispatchId=${id}`, mcp: "atelier_logs" }]
       : []),
   ];
+}
+
+function evidenceFor(record, options = {}) {
+  return evidenceForId(record.id, options);
+}
+
+function dispatchLink(relation, record, proof, detail) {
+  return {
+    relation,
+    to: { kind: "dispatch", id: String(record.id) },
+    proof,
+    detail,
+    evidence: evidenceFor(record),
+  };
 }
 
 function actionDetails(keys, table) {
@@ -164,17 +199,25 @@ function reviewRounds(record) {
 }
 
 function verifyAttempts(record) {
-  if (Array.isArray(record.verify?.attempts) && record.verify.attempts.length > 0) {
-    return record.verify.attempts;
+  const verify = record.verify;
+  if (!verify || typeof verify !== "object") return [];
+  const attempts = Array.isArray(verify.attempts) ? [...verify.attempts] : [];
+  if (attempts.length === 0) return [verify];
+  if (
+    Number.isInteger(verify.attempt) &&
+    !attempts.some((attempt) => attempt?.attempt === verify.attempt)
+  ) {
+    const { attempts: _history, ...liveAttempt } = verify;
+    attempts.push(liveAttempt);
   }
-  return record.verify ? [record.verify] : [];
+  return attempts;
 }
 
 function attemptId(record, attempt, index) {
   return `${record.id}:verify:${attempt?.attempt ?? index + 1}`;
 }
 
-function workStep(record, records, queues, convoys) {
+function workStep(record, recordsByTicket, recordsByBatch, queues, convoys) {
   const links = [];
   const unknown = ["no durable command identity links this work to the command that requested it"];
   if (record.ticketId != null) {
@@ -184,25 +227,28 @@ function workStep(record, records, queues, convoys) {
       proof: "association",
       detail: "The dispatch stores this caller-supplied ticket id, but multiple dispatches may share it; this association is not causal.",
     });
-    for (const other of records) {
-      if (other?.id === record.id || other?.ticketId !== record.ticketId) continue;
-      links.push({
-        relation: "same-ticket",
-        to: { kind: "dispatch", id: String(other.id) },
-        proof: "association",
-        detail: "The dispatches share a ticket, but multiple dispatches may share it; this association is not causal.",
-      });
+    for (const other of recordsByTicket.get(record.ticketId) ?? []) {
+      if (other.id === record.id) continue;
+      links.push(dispatchLink(
+        "same-ticket",
+        other,
+        "association",
+        "The dispatches share a ticket, but multiple dispatches may share it; this association is not causal.",
+      ));
     }
   }
   if (record.batchId != null) {
-    for (const other of records) {
-      if (other?.id === record.id || other?.batchId !== record.batchId) continue;
-      links.push({
-        relation: "bakeoff-sibling",
-        to: { kind: "dispatch", id: String(other.id) },
-        proof: "stored-identifier",
-        detail: `Both records store batchId ${record.batchId}.`,
-      });
+    const relation = record.batchKind === "bakeoff"
+      ? "bakeoff-sibling"
+      : record.batchKind === "convoy" ? "convoy-member" : "same-batch";
+    const detail = relation === "bakeoff-sibling"
+      ? `Both bakeoff records store batchId ${record.batchId}.`
+      : relation === "convoy-member"
+        ? `Both convoy records store batchId ${record.batchId}.`
+        : `Both records store batchId ${record.batchId}; no more specific batch relationship is recorded.`;
+    for (const other of recordsByBatch.get(record.batchId) ?? []) {
+      if (other.id === record.id) continue;
+      links.push(dispatchLink(relation, other, "stored-identifier", detail));
     }
   }
   for (const item of queues) {
@@ -224,7 +270,11 @@ function workStep(record, records, queues, convoys) {
         proof: "stored-identifier",
         detail: "The convoy stores this record as currentDispatchId.",
       });
-    } else if (record.ticketId != null && convoy?.ticketIds?.includes(record.ticketId)) {
+    } else if (
+      record.batchId !== convoy?.id &&
+      record.ticketId != null &&
+      convoy?.ticketIds?.includes(record.ticketId)
+    ) {
       unknown.push(`convoy ${convoy.id} past membership is unknown; ticketId is not causal`);
     }
   }
@@ -263,10 +313,7 @@ function verificationSteps(record) {
   return verifyAttempts(record).map((attempt, index) => {
     const links = [];
     const number = attempt?.attempt ?? index + 1;
-    if (
-      record.attestation?.resultCommit &&
-      (record.attestation.attempt == null || record.attestation.attempt === number)
-    ) {
+    if (record.attestation?.resultCommit && record.attestation.attempt === number) {
       links.push({
         relation: "verification-result",
         to: { kind: "commit", id: String(record.attestation.resultCommit) },
@@ -274,9 +321,13 @@ function verificationSteps(record) {
         detail: "The attestation stores this exact result commit and tree identity.",
       });
     }
+    const unknown = record.attestation?.resultCommit && record.attestation.attempt == null
+      ? ["the attestation does not record which verification attempt produced it"]
+      : [];
     return step(record, "verification", `verification-attempt-${number}`, `Verification attempt ${number}`, storedTimestamp(attempt?.endedAt, attempt?.startedAt), verdictState(attempt?.state), {
       links,
       evidence: evidenceFor(record, { diff: true, label: "Dispatch record verification and attestation" }),
+      unknown,
     });
   });
 }
@@ -294,19 +345,20 @@ function reviewSteps(record, recordsById) {
     }
     const reviewerId = round?.reviewDispatchId ?? round?.dispatchId;
     if (reviewerId) {
-      links.push({
-        relation: "reviewer-dispatch",
-        to: { kind: "dispatch", id: String(reviewerId) },
-        proof: "stored-identifier",
-        detail: "The review round stores the reviewer dispatch id.",
-      });
+      links.push(dispatchLink(
+        "reviewer-dispatch",
+        recordsById.get(reviewerId) ?? { id: reviewerId },
+        "stored-identifier",
+        "The review round stores the reviewer dispatch id.",
+      ));
     }
     const attestation = record.attestation;
     const attempts = verifyAttempts(record);
     const matchingIndex = attempts.findIndex((attempt, attemptIndex) =>
       round?.reviewedHead &&
       attestation?.resultCommit === round.reviewedHead &&
-      (attestation.attempt == null || attestation.attempt === (attempt?.attempt ?? attemptIndex + 1)));
+      attestation.attempt != null &&
+      attestation.attempt === (attempt?.attempt ?? attemptIndex + 1));
     if (matchingIndex >= 0) {
       links.push({
         relation: "review-verification",
@@ -316,21 +368,25 @@ function reviewSteps(record, recordsById) {
       });
     }
     const number = round?.round ?? index + 1;
+    const unknown = ["review findings have no durable code anchor beyond reviewedHead"];
+    if (attestation?.resultCommit && attestation.attempt == null) {
+      unknown.push("the attestation does not record which verification attempt produced it");
+    }
     return step(record, "review", `review-round-${number}`, `Review round ${number}`, storedTimestamp(round?.at), verdictState(round?.verdict ?? round?.state), {
       links,
       evidence: evidenceFor(record, { diff: true, label: "Dispatch record review rounds" }),
-      unknown: ["review findings have no durable code anchor beyond reviewedHead"],
+      unknown,
     });
   });
 
   if (record.reviewOf != null) {
     const target = recordsById.get(record.reviewOf);
-    const links = [{
-      relation: "review-target",
-      to: { kind: "dispatch", id: String(record.reviewOf) },
-      proof: "stored-identifier",
-      detail: "This reviewer dispatch stores the target id in reviewOf.",
-    }];
+    const links = [dispatchLink(
+      "review-target",
+      target ?? { id: record.reviewOf },
+      "stored-identifier",
+      "This reviewer dispatch stores the target id in reviewOf.",
+    )];
     if (record.reviewedHead) {
       links.push({
         relation: "review-tree",
@@ -342,7 +398,8 @@ function reviewSteps(record, recordsById) {
     if (record.reviewedHead && target?.attestation?.resultCommit === record.reviewedHead) {
       const attempts = verifyAttempts(target);
       const matchingIndex = attempts.findIndex((attempt, index) =>
-        target.attestation.attempt == null || target.attestation.attempt === (attempt?.attempt ?? index + 1));
+        target.attestation.attempt != null &&
+        target.attestation.attempt === (attempt?.attempt ?? index + 1));
       if (matchingIndex >= 0) {
         links.push({
           relation: "review-verification",
@@ -352,10 +409,14 @@ function reviewSteps(record, recordsById) {
         });
       }
     }
+    const unknown = ["review findings have no durable code anchor beyond reviewedHead"];
+    if (target?.attestation?.resultCommit && target.attestation.attempt == null) {
+      unknown.push("the target attestation does not record which verification attempt produced it");
+    }
     rounds.push(step(record, "review", "review-dispatch", "Review dispatch", storedTimestamp(record.endedAt, record.startedAt), executionState(record.state), {
       links,
       evidence: evidenceFor(record, { diff: true, label: "Reviewer dispatch record" }),
-      unknown: ["review findings have no durable code anchor beyond reviewedHead"],
+      unknown,
     }));
   }
   return rounds;
@@ -445,15 +506,54 @@ function countsFor(items) {
   };
 }
 
+function groupBy(records, key) {
+  const groups = new Map();
+  for (const record of records) {
+    const value = record?.[key];
+    if (value == null) continue;
+    const group = groups.get(value) ?? [];
+    group.push(record);
+    groups.set(value, group);
+  }
+  return groups;
+}
+
+function recordOrder(left, right) {
+  const leftAt = storedTimestamp(left.startedAt, left.endedAt);
+  const rightAt = storedTimestamp(right.startedAt, right.endedAt);
+  const byTime = (rightAt == null ? Number.NEGATIVE_INFINITY : Date.parse(rightAt)) -
+    (leftAt == null ? Number.NEGATIVE_INFINITY : Date.parse(leftAt));
+  return byTime || left.id.localeCompare(right.id);
+}
+
+function innerProjectionLimit({ records, queues, convoys, persistence }) {
+  const parkedAndQueues = queues.reduce((total, item) =>
+    total + 1 + (Array.isArray(item?.queue?.parkedTickets) ? item.queue.parkedTickets.length : 0), 0);
+  const advisoryFollowUps = records.reduce((total, record) =>
+    total + reviewRounds(record).reduce((roundTotal, round) =>
+      roundTotal + (Array.isArray(round?.advisoryFollowUps) ? round.advisoryFollowUps.length : 0), 0), 0);
+  const persistenceTargets = persistence.degraded === true && Array.isArray(persistence.targets)
+    ? persistence.targets.length
+    : 0;
+  // This upper-bounds both pure projections without changing their input, so
+  // convoy, queue and bakeoff absorption remains identical while no target can
+  // be lost to either projection's ordinary 200-item serialization bound.
+  return records.length * 5 + advisoryFollowUps + parkedAndQueues + convoys.length * 2 +
+    persistenceTargets + 1;
+}
+
 export function timelineFor(input = {}, {
   now = new Date(),
   limit = TIMELINE_LIMIT,
   dispatchId,
 } = {}) {
-  const records = (Array.isArray(input.records) ? input.records : [])
-    .filter((record) => record && typeof record.id === "string")
-    .filter((record) => dispatchId === undefined || record.id === dispatchId);
-  const allRecords = Array.isArray(input.records) ? input.records : [];
+  const boundedLimit = normalizedLimit(limit);
+  const allRecords = (Array.isArray(input.records) ? input.records : [])
+    .filter((record) => record && typeof record.id === "string");
+  const candidateRecords = allRecords
+    .filter((record) => dispatchId === undefined || record.id === dispatchId)
+    .sort(recordOrder);
+  const records = candidateRecords.slice(0, boundedLimit);
   const projects = Array.isArray(input.projects) ? input.projects : [];
   const queues = Array.isArray(input.queues) ? input.queues : [];
   const convoys = Array.isArray(input.convoys) ? input.convoys : [];
@@ -461,13 +561,16 @@ export function timelineFor(input = {}, {
     ? input.persistence
     : {};
   const recordsById = new Map(allRecords.map((record) => [record?.id, record]));
+  const recordsByTicket = groupBy(allRecords, "ticketId");
+  const recordsByBatch = groupBy(allRecords, "batchId");
   const routineInput = { records: allRecords, projects, queues, convoys, persistence };
-  const attention = attentionFor(routineInput, { now, limit: TIMELINE_LIMIT });
-  const recovery = recoveryFor(routineInput, { now, limit: TIMELINE_LIMIT });
+  const routineLimit = innerProjectionLimit(routineInput);
+  const attention = attentionFor(routineInput, { now, limit: routineLimit });
+  const recovery = recoveryFor(routineInput, { now, limit: routineLimit });
   const items = [];
   for (const record of records) {
     items.push(
-      workStep(record, allRecords, queues, convoys),
+      workStep(record, recordsByTicket, recordsByBatch, queues, convoys),
       executionStep(record),
       ...verificationSteps(record),
       ...reviewSteps(record, recordsById),
@@ -477,17 +580,18 @@ export function timelineFor(input = {}, {
       ...mainHealthStep(record),
     );
   }
+  const recordRank = new Map(records.map((record, index) => [record.id, index]));
   items.sort((left, right) =>
-    left.subject.id.localeCompare(right.subject.id) ||
+    recordRank.get(left.subject.id) - recordRank.get(right.subject.id) ||
     TIMELINE_STAGES[left.stage].order - TIMELINE_STAGES[right.stage].order ||
     left.code.localeCompare(right.code));
-  const boundedLimit = normalizedLimit(limit);
   return {
     generatedAt: isoTimestamp(now),
     items: items.slice(0, boundedLimit),
     counts: countsFor(items),
-    truncated: items.length > boundedLimit,
+    truncated: candidateRecords.length > records.length || items.length > boundedLimit,
     coverage: TIMELINE_COVERAGE,
+    limits: TIMELINE_LIMITS,
   };
 }
 
