@@ -2534,6 +2534,55 @@ test("periodic drain retries a terminal record snapshot that stayed unpersisted"
   assert.equal(reloaded.get(id).state, "completed");
 });
 
+// ATT-007 rev-crit#3, deferred to ATT-011 as a DOCUMENTED LIMITATION rather than a
+// fix: durable checksum envelopes are an explicit spec non-goal, so a degradation
+// recorded only in memory cannot survive the daemon dying. This test exists to make
+// that residual EXECUTABLE instead of leaving it as a ticket comment - the same
+// treatment ATT-008's R-B residual got.
+//
+// If this test ever fails, the residual has been CLOSED, not broken: someone made
+// persistence failures durable. That is a good outcome - update the ATT-007 ledger
+// and the declaration bundle, and delete this test.
+test("DOCUMENTED RESIDUAL (ATT-007 rev-crit#3): persistence degradation does not survive a restart", async (t) => {
+  const setup = await fixture(t, { tracker: "committed" });
+  const seeded = await seedDispatch(setup);
+  let queueWritesFail = true;
+  _setPersistenceFileOps({
+    writeDescriptorSync(descriptor, contents, options, path) {
+      if (queueWritesFail && isAtomicWriteFor(path, "queue.json")) {
+        throw Object.assign(new Error("fixture total write outage"), { code: "EIO" });
+      }
+      writeFileSync(descriptor, contents, options);
+    },
+  });
+
+  const before = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+  before.setQueue("fixture", { enabled: true });
+  assert.equal(
+    before.getQueue("fixture").persistenceDegraded,
+    true,
+    "precondition: the write outage must actually degrade this dispatcher",
+  );
+  // While degraded, the gate holds - this is ATT-007 working as merged.
+  await assert.rejects(
+    forceMerge(before, seeded.id),
+    (error) => /persistence degradation gate failed/.test(error.message),
+    "a degraded dispatcher must refuse a forced merge",
+  );
+
+  // The daemon dies. Nothing recorded the degradation durably, because
+  // entry.persistenceFailures is an in-memory Set rebuilt empty on construction.
+  queueWritesFail = false;
+  const after = createDispatcher({ registry: setup.registry, stateDir: setup.state });
+
+  assert.equal(
+    after.getQueue("fixture").persistenceDegraded,
+    false,
+    "RESIDUAL: a restart clears degradation that was blocking merges. If this now " +
+      "reports true, the limitation has been closed - update the ATT-007 ledger.",
+  );
+});
+
 test("persistence degradation blocks forced merge and queue automation while manual dispatch continues", async (t) => {
   const setup = await fixture(t, { tracker: "committed" });
   const seeded = await seedDispatch(setup);
