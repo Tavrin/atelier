@@ -984,9 +984,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     // "turn/start request timed out". Larger is not slower here, because the
     // deadline that actually elapses is the unanswered one.
     ATELIER_TEST_CODEX_REQUEST_TIMEOUT_MS: "2000",
-    // Grace covers TERM -> KILL escalation; the stub ignores TERM and must still
-    // get scheduled to write its marker file before KILL lands.
-    ATELIER_TEST_CODEX_TERMINATION_GRACE_MS: "500",
+    // Grace covers TERM -> KILL escalation. The stub ignores TERM but must still be
+    // SCHEDULED to write its marker before KILL lands, and scheduling latency is what
+    // varies wildly under preemption. 500ms held under steady load and failed 1-in-8
+    // under deliberate oversubscription - the same class of failure this test showed
+    // on CI. Five seconds is a large margin against tail scheduling latency rather
+    // than a nudge past the last observed failure.
+    ATELIER_TEST_CODEX_TERMINATION_GRACE_MS: "5000",
     CODEX_HOME: codexHome,
     CODEX_STUB_CHILD_PID: childPidPath,
     CODEX_STUB_TERM: termPath,
@@ -1014,6 +1018,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
   assert.equal(status.status, "failed");
   assert.match(status.summary, /turn\/start request timed out/);
+  // Poll, do not sample once. The stub writes this marker from its SIGTERM handler,
+  // so the file appears only after the stub is SCHEDULED - and under unpredictable
+  // preemption (a shared CI runner, or six busy-loops on four cores locally) it can
+  // receive TERM and be descheduled before the handler runs. Checking once here
+  // asserts that the stub happened to be scheduled by this instant, which is a
+  // property of the scheduler, not of the runner's escalation behaviour.
+  for (let attempt = 0; attempt < 400 && !existsSync(termPath); attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
   assert.equal(existsSync(termPath), true, "the app-server must first receive TERM");
   const appServerPid = Number(readFileSync(childPidPath, "utf8"));
   let alive = true;
