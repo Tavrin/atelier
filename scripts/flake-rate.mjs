@@ -65,12 +65,20 @@ for (let attempt = 1; attempt <= runs; attempt += 1) {
     exitCode: result.status,
     durationMs: Date.now() - started,
     failedTests: [...new Set(failedTests)],
+    // Keep WHY, not just THAT. A rate without the assertion behind it cannot be
+    // diagnosed - especially for a flake that only reproduces on CI, where the
+    // job log is the single opportunity to see it. Failing attempts only, so a
+    // clean run stays readable.
+    ...(passed ? {} : { outputTail: output.slice(-6000) }),
   });
   process.stdout.write(
     `${label} ${attempt}/${runs}: ${passed ? "pass" : "FAIL"}` +
       (failedTests.length > 0 ? ` (${[...new Set(failedTests)].join("; ")})` : "") +
       "\n",
   );
+  if (!passed) {
+    process.stdout.write(`--- ${label} attempt ${attempt} output (tail) ---\n${output.slice(-4000)}\n---\n`);
+  }
 }
 
 const failures = attempts.filter((entry) => !entry.passed);
