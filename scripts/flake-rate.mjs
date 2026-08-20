@@ -55,12 +55,12 @@ function failureBlocks(output, limit = 6000) {
   const blocks = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (!/^not ok \d+ - /.test(line) && !/^\s*✖ /.test(line)) continue;
+    if (!/^\s*not ok \d+ - /.test(line) && !/^\s*✖ /.test(line)) continue;
     const block = [line];
     for (let next = index + 1; next < lines.length; next += 1) {
       const following = lines[next];
       // Stop at the next test result; keep the indented diagnostic in between.
-      if (/^(not )?ok \d+ - /.test(following) || /^\s*[✔✖] /.test(following)) break;
+      if (/^\s*(not )?ok \d+ - /.test(following) || /^\s*[✔✖] /.test(following)) break;
       block.push(following);
       if (block.length > 40) break;
     }
@@ -77,7 +77,11 @@ for (let attempt = 1; attempt <= runs; attempt += 1) {
   // Both reporters, because Node 22 emits TAP and Node 24 emits `spec`. Reading
   // neither would silently report "no failures" for a failing run.
   const failedTests = [
-    ...[...output.matchAll(/^not ok \d+ - (.*)$/gm)].map((match) => match[1].trim()),
+    // Leading whitespace ALLOWED: node nests subtest failures under the file's own
+    // "not ok", so an anchored ^not-ok saw only the wrapper ("server/server.test.mjs,
+    // ERR_TEST_FAILURE") and never the assertion underneath. That is the difference
+    // between a name and a diagnosis.
+    ...[...output.matchAll(/^\s*not ok \d+ - (.*)$/gm)].map((match) => match[1].trim()),
     ...[...output.matchAll(/^✖ (.*?)(?: \(\d+(?:\.\d+)?ms\))?$/gm)]
       .map((match) => match[1].trim())
       .filter((name) => name && name !== "failing tests:"),
