@@ -795,11 +795,24 @@ async function waitForState(dispatcher, id, states) {
   });
 }
 
-async function waitForConvoy(dispatcher, id, predicate) {
+async function waitForConvoy(dispatcher, id, predicate, { timeoutMs = 10_000 } = {}) {
+  // Same shape as waitForCondition: a fast microtask path, then a wall-clock net.
+  // 100 setImmediate turns cost under a millisecond idle and single-digit
+  // milliseconds on a contended runner, so convoy boot - which waits on real
+  // persistence and a spawned child - gave up long before it could have settled.
+  // That failed both CI test jobs in ~33ms and also poisoned the mutation matrix's
+  // baseline for dispatch.test.mjs. waitForCondition was fixed for this and its
+  // sibling here was missed; waitForState is event-driven and needs no net.
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const convoy = dispatcher.listConvoys().find((candidate) => candidate.id === id);
     if (convoy && predicate(convoy)) return convoy;
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const convoy = dispatcher.listConvoys().find((candidate) => candidate.id === id);
+    if (convoy && predicate(convoy)) return convoy;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
   }
   throw new Error(`convoy ${id} did not reach the expected condition`);
 }
