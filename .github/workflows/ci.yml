@@ -120,6 +120,31 @@ jobs:
       - name: Run the mutation matrix
         run: node test-system/mutation-matrix.mjs
 
+  # ATT-011 process/worktree leak report. The golden harness asserts no leaks
+  # per test; this is the whole-run artifact the declaration bundle owes, and it
+  # self-tests first - a leak report that always reads "0" is indistinguishable
+  # from a broken one.
+  leak-report:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.x
+      - name: Generate the leak report
+        run: node test-system/leak-report.mjs
+      - name: Upload the leak report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leak-report
+          path: leak-report.json
+          if-no-files-found: warn
+
   packed-artifact:
     runs-on: ubuntu-24.04
     steps:
