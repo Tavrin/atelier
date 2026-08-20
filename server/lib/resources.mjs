@@ -30,11 +30,11 @@ export const RESOURCE_COST_MODEL = Object.freeze([
   cost("logs.codexJobs", 2, "unbounded job and stream file count", "not separately measured"),
   cost("logs.breakGlass", 2, "unbounded authorization file count", "not separately measured"),
   cost("logs.legacyCompanion", 2, "unbounded legacy-companion tree", "not separately measured"),
-  cost("worktrees.recordBackedCount", 1, "caller-supplied record count", "in-memory; not separately measured"),
+  cost("worktrees.recordBackedCount", 1, "cost proportional to total dispatch history", "in-memory; not separately measured"),
   cost("worktrees.onDiskCount", 1, `${RESOURCE_SCAN_CAP} directory entries per root`, "0.241 ms"),
   cost("worktrees.deepBytes", 3, "unbounded recursive worktree content", "2.364 ms for a 30 MiB checkout"),
   cost("processes.relevantCount", 2, "unbounded /proc PID count", "0.694 ms internal"),
-  cost("processes.directRunners", 1, "caller-supplied in-memory handle count", "in-memory; not separately measured"),
+  cost("processes.directRunners", 1, "unavailable from record projections", "in-memory child handles are not exposed to record projections"),
   cost("evidence.deepBytes", 3, "unbounded recursive evidence content", "not measured; store absent"),
 ]);
 
@@ -185,12 +185,13 @@ function sumFiles(ops, root, { recursive = false, include = () => true } = {}) {
   return bytes;
 }
 
-function byteAggregate(ops, root, measuredAt, options = {}) {
+function byteAggregate(ops, root, completedAt, options = {}) {
   try {
+    const value = sumFiles(ops, root, options);
     return measurement({
-      value: sumFiles(ops, root, options),
+      value,
       unit: "bytes",
-      measuredAt,
+      measuredAt: completedAt(),
       tier: 2,
       bounded: false,
     });
@@ -198,7 +199,7 @@ function byteAggregate(ops, root, measuredAt, options = {}) {
     return measurement({
       value: null,
       unit: "bytes",
-      measuredAt,
+      measuredAt: completedAt(),
       tier: 2,
       bounded: false,
       detail: errorDetail(error),
@@ -261,19 +262,6 @@ function recordBackedWorkspaceCount(records) {
   return paths.size;
 }
 
-function directRunnerCount(records) {
-  const handles = new Set();
-  for (const candidate of records) {
-    for (const key of ["child", "verifyChild", "postMergeChild"]) {
-      const handle = candidate?.[key];
-      if (handle && (typeof handle === "object" || typeof handle === "function")) {
-        handles.add(handle);
-      }
-    }
-  }
-  return handles.size;
-}
-
 function parseProcStat(pid, raw) {
   const commandEnd = raw.lastIndexOf(")");
   const commandStart = raw.indexOf("(");
@@ -289,12 +277,12 @@ function insideRoot(path, root) {
   return normalized === root || normalized.startsWith(`${root}${sep}`);
 }
 
-function relevantProcesses(processOps, stateRoot, measuredAt) {
+function relevantProcesses(processOps, stateRoot, completedAt) {
   if (processOps.platform !== "linux") {
     return measurement({
       value: null,
       unit: "count",
-      measuredAt,
+      measuredAt: completedAt(),
       tier: 2,
       bounded: false,
       supported: false,
@@ -347,7 +335,7 @@ function relevantProcesses(processOps, stateRoot, measuredAt) {
     return measurement({
       value: relevant.size,
       unit: "count",
-      measuredAt,
+      measuredAt: completedAt(),
       tier: 2,
       bounded: false,
       detail: "processes rooted in an Atelier worktree, including their observed descendants",
@@ -356,7 +344,7 @@ function relevantProcesses(processOps, stateRoot, measuredAt) {
     return measurement({
       value: null,
       unit: "count",
-      measuredAt,
+      measuredAt: completedAt(),
       tier: 2,
       bounded: false,
       detail: errorDetail(error),
@@ -436,50 +424,53 @@ export function createResourceProjector({
     return date;
   }
 
-  function tierTwo(measuredAt) {
+  function tierTwo() {
     const dispatches = join(root, "dispatches");
+    const completedAt = () => instant().toISOString();
+    const logs = {
+      transcripts: byteAggregate(ops, dispatches, completedAt, {
+        include: (name) => name !== "index.jsonl" && name.endsWith(".jsonl"),
+      }),
+      prompts: byteAggregate(ops, dispatches, completedAt, {
+        include: (name) => name.endsWith(".codex-prompt.md"),
+      }),
+      codexJobs: byteAggregate(ops, join(root, "codex-app-server", "jobs"), completedAt, {
+        include: (name) => /^(?:[a-f0-9]{24})\.(?:json|stream\.jsonl)$/.test(name),
+      }),
+      breakGlass: byteAggregate(ops, join(root, "break-glass"), completedAt, {
+        include: (name) => name.endsWith(".json"),
+      }),
+      legacyCompanion: byteAggregate(ops, join(root, "codex-companion"), completedAt, {
+        recursive: true,
+      }),
+    };
+    const relevantCount = relevantProcesses(proc, root, completedAt);
     return {
-      measuredAt,
-      logs: {
-        transcripts: byteAggregate(ops, dispatches, measuredAt, {
-          include: (name) => name !== "index.jsonl" && name.endsWith(".jsonl"),
-        }),
-        prompts: byteAggregate(ops, dispatches, measuredAt, {
-          include: (name) => name.endsWith(".codex-prompt.md"),
-        }),
-        codexJobs: byteAggregate(ops, join(root, "codex-app-server", "jobs"), measuredAt, {
-          include: (name) => /^(?:[a-f0-9]{24})\.(?:json|stream\.jsonl)$/.test(name),
-        }),
-        breakGlass: byteAggregate(ops, join(root, "break-glass"), measuredAt, {
-          include: (name) => name.endsWith(".json"),
-        }),
-        legacyCompanion: byteAggregate(ops, join(root, "codex-companion"), measuredAt, {
-          recursive: true,
-        }),
-      },
-      relevantCount: relevantProcesses(proc, root, measuredAt),
+      measuredAt: relevantCount.measuredAt,
+      logs,
+      relevantCount,
     };
   }
 
   function measure({ records = [], deep = false } = {}) {
-    const generated = instant();
-    const generatedAt = generated.toISOString();
-    const generatedAtMs = generated.getTime();
+    const started = instant();
+    const startedAt = started.toISOString();
+    const startedAtMs = started.getTime();
     const suppliedRecords = Array.isArray(records) ? records : [];
 
     const eventPaths = [join(root, "logs", "events.jsonl")];
     for (let index = 1; index <= 5; index += 1) {
       eventPaths.push(join(root, "logs", `events.${index}.jsonl`));
     }
-    const eventLog = statFiles(ops, eventPaths, generatedAt);
-    const dispatchIndex = statFiles(ops, [join(root, "dispatches", "index.jsonl")], generatedAt);
+    const eventLog = statFiles(ops, eventPaths, startedAt);
+    const dispatchIndex = statFiles(ops, [join(root, "dispatches", "index.jsonl")], startedAt);
 
     const byRoot = WORKTREE_ROOTS.map((name) => countRoot(ops, root, name));
     const rootFailure = byRoot.find((entry) => entry.error);
     const onDiskCount = measurement({
       value: rootFailure ? null : byRoot.reduce((total, entry) => total + entry.count, 0),
       unit: "count",
-      measuredAt: generatedAt,
+      measuredAt: startedAt,
       tier: 1,
       bounded: true,
       truncated: byRoot.some((entry) => entry.truncated),
@@ -491,17 +482,22 @@ export function createResourceProjector({
       truncated,
     }));
 
-    const cachedAge = tierTwoCache ? generatedAtMs - Date.parse(tierTwoCache.measuredAt) : Infinity;
+    const recordBackedCount = recordBackedWorkspaceCount(suppliedRecords);
+    const cachedAge = tierTwoCache ? startedAtMs - Date.parse(tierTwoCache.measuredAt) : Infinity;
     if (!tierTwoCache || cachedAge < 0 || cachedAge >= cacheMs) {
-      tierTwoCache = tierTwo(generatedAt);
+      tierTwoCache = tierTwo();
     }
 
     if (deep) {
       tierThreeCache = {
-        worktrees: deepWorktreeBytes(ops, root, generatedAt),
-        evidence: deepBytes(ops, join(root, "evidence"), generatedAt),
+        worktrees: deepWorktreeBytes(ops, root, startedAt),
+        evidence: deepBytes(ops, join(root, "evidence"), startedAt),
       };
     }
+
+    const generated = instant();
+    const generatedAt = generated.toISOString();
+    const generatedAtMs = generated.getTime();
 
     return {
       generatedAt,
@@ -515,12 +511,12 @@ export function createResourceProjector({
       },
       worktrees: {
         recordBackedCount: measurement({
-          value: recordBackedWorkspaceCount(suppliedRecords),
+          value: recordBackedCount,
           unit: "count",
           measuredAt: generatedAt,
           tier: 1,
-          bounded: true,
-          detail: "record-backed workspace paths only; not authoritative for orphaned directories",
+          bounded: false,
+          detail: "record-backed workspace paths only; cost is proportional to total dispatch history and the count is not authoritative for orphaned directories",
         }),
         onDiskCount,
         byRoot: publicByRoot,
@@ -529,12 +525,12 @@ export function createResourceProjector({
       processes: {
         relevantCount: aged(tierTwoCache.relevantCount, generatedAtMs),
         directRunners: measurement({
-          value: directRunnerCount(suppliedRecords),
+          value: null,
           unit: "count",
           measuredAt: generatedAt,
           tier: 1,
           bounded: true,
-          detail: "caller-supplied in-memory child handles; distinct from the /proc relevant count",
+          detail: "in-memory child handles are not exposed to record projections",
         }),
       },
       evidence: { deepBytes: aged(tierThreeCache?.evidence, generatedAtMs) },

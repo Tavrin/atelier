@@ -250,6 +250,65 @@ test("higher-precedence convoy absorption prevents the same dispatch riding queu
     .reasons.includes(occurrences[0]), true);
 });
 
+test("two paused convoys cannot absorb the same current dispatch", () => {
+  const result = projection({
+    records: [record("shared", { state: "needs_input" })],
+    convoys: [
+      {
+        id: "convoy-first",
+        project: "fixture",
+        state: "paused",
+        currentDispatchId: "shared",
+      },
+      {
+        id: "convoy-second",
+        project: "fixture",
+        state: "paused",
+        currentDispatchId: "shared",
+      },
+    ],
+  });
+  const occurrences = result.entries.flatMap((entry) => entry.reasons)
+    .filter((reason) => reason.code === "needs_input" && reason.evidence.dispatchId === "shared");
+  assert.equal(occurrences.length, 1);
+  assert.equal(result.entries.find((entry) => entry.key === "convoy:convoy-first")
+    .reasons.includes(occurrences[0]), true);
+});
+
+test("dismissal does not suppress an unresolved main-health failure", () => {
+  const result = projection({ records: [record("dismissed-main", {
+    dismissed: { at: NOW.toISOString() },
+    merged: { commit: "abc" },
+    postMerge: {
+      state: "failed",
+      endedAt: "2026-08-20T10:05:00.000Z",
+      error: "main red",
+    },
+  })] });
+  assert.equal(result.entries.length, 1);
+  assert.deepEqual(result.entries[0].reasons.map(({ code }) => code), ["main_health_failed"]);
+  assert.deepEqual(result.entries[0].actions, ["main_health_ack"]);
+});
+
+test("unresolved orphans stay out of attention until fencing is resolved", () => {
+  const unresolved = projection({ records: [record("orphan", {
+    state: "failed",
+    verify: null,
+    orphanUnresolved: true,
+  })] });
+  assert.deepEqual(unresolved.entries, []);
+  assert.ok(ATTENTION_EXCLUSIONS.some(({ condition, reason }) =>
+    condition === "unresolved_orphan" && /Recovery Center.*reply is refused/i.test(reason)));
+
+  const resolved = projection({ records: [record("resolved", {
+    state: "failed",
+    verify: null,
+    orphanUnresolved: false,
+  })] });
+  assert.deepEqual(resolved.entries[0].reasons.map(({ code }) => code), ["failed_unresolved"]);
+  assert.deepEqual(resolved.entries[0].actions, ["reply", "dismiss"]);
+});
+
 test("three simultaneous dispatch reasons collapse into one entry", () => {
   const result = projection({ records: [record("multi", {
     state: "failed",
