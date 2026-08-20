@@ -69,6 +69,11 @@ import {
 } from "./lib/tracker.mjs";
 import { moveProjectTracker } from "./lib/tracker-move.mjs";
 import { snapshotThemeBundles } from "./lib/themes.mjs";
+import {
+  dispatchTimelineFor,
+  timelineFor,
+  TIMELINE_LIMIT,
+} from "./lib/timeline.mjs";
 import { createBootStamp } from "./lib/version.mjs";
 import { loadFencedReadySnapshot } from "./lib/ready.mjs";
 import { createResourceProjector } from "./lib/resources.mjs";
@@ -106,6 +111,10 @@ const STATIC_ALLOWLIST = new Map([
   [
     "/ready-projection.mjs",
     { fileName: "ready-projection.mjs", contentType: "text/javascript; charset=utf-8" },
+  ],
+  [
+    "/timeline-view.mjs",
+    { fileName: "timeline-view.mjs", contentType: "text/javascript; charset=utf-8" },
   ],
   [
     "/notifications.mjs",
@@ -1536,6 +1545,42 @@ export function createServer({
           }
         }
         jsonResponse(response, 200, { ...recovery, deep });
+        return;
+      }
+      if (request.method === "GET" && path === "/api/timeline") {
+        const limit = projectionLimit(url, TIMELINE_LIMIT);
+        jsonResponse(response, 200, timelineFor({
+          records: dispatcher.list(),
+          projects: registry.projects,
+          queues: registry.projects.map((project) => ({
+            project: project.name,
+            queue: dispatcher.getQueue(project.name),
+          })),
+          convoys: dispatcher.listConvoys(),
+          persistence: dispatcher.persistenceStatus(),
+        }, limit === undefined ? {} : { limit }));
+        return;
+      }
+      const timelineRoute = path.match(/^\/api\/timeline\/([^/]+)$/);
+      if (request.method === "GET" && timelineRoute) {
+        const dispatchId = decodeURIComponent(timelineRoute[1]);
+        if (!dispatcher.get(dispatchId)) {
+          throw new HttpError(404, `Unknown dispatch: ${dispatchId}`);
+        }
+        const limit = projectionLimit(url, TIMELINE_LIMIT);
+        jsonResponse(response, 200, dispatchTimelineFor({
+          records: dispatcher.list(),
+          projects: registry.projects,
+          queues: registry.projects.map((project) => ({
+            project: project.name,
+            queue: dispatcher.getQueue(project.name),
+          })),
+          convoys: dispatcher.listConvoys(),
+          persistence: dispatcher.persistenceStatus(),
+        }, {
+          dispatchId,
+          ...(limit === undefined ? {} : { limit }),
+        }));
         return;
       }
       if (request.method === "GET" && path === "/api/resources") {
