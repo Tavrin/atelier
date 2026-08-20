@@ -260,19 +260,47 @@ export async function createGoldenHarness(t, {
     if (tornDown) return;
     tornDown = true;
     let teardownError;
+    // Evidence for the leak assertions below. A worktree count of 2 does not say
+    // WHICH worktree survived or why, and this flake is CI-only at roughly 1 in
+    // 10 (atelier-h2g) - so a failure has to explain itself on the occurrence
+    // that happens, not the one someone can reproduce. Printed only on failure.
+    const forensics = { dismissals: [], records: [], worktrees: {} };
+    const snapshotWorktrees = async (when) => {
+      if (!projectInitialized) return;
+      forensics.worktrees[when] = await runGit(projectPath, tempHome, ["worktree", "list", "--porcelain"])
+        .then(({ stdout }) => stdout.trim().split("\n").filter((line) => line.startsWith("worktree ")))
+        .catch((error) => [`<unavailable: ${error?.message ?? error}>`]);
+    };
     try {
+      await snapshotWorktrees("afterTestBodies");
       if (daemon && processExists(daemon.pid)) {
         const records = await rawApi("/api/dispatches").then(({ value }) => value, () => []);
         if (Array.isArray(records)) {
           for (const record of records) {
             trackedDispatches.add(record.id);
+            forensics.records.push({
+              id: record.id,
+              state: record.state,
+              merged: Boolean(record.merged),
+              dismissed: Boolean(record.dismissed),
+              worktreePath: record.worktreePath ?? null,
+              verifyWorktreePath: record.verify?.worktreePath ?? null,
+              postMergeState: record.postMerge?.state ?? null,
+              postMergeWorktreePath: record.postMerge?.worktreePath ?? null,
+            });
             if (!record.merged && !record.dismissed && [
               "completed", "completed_empty", "needs_input", "failed", "prepare_failed", "rejected", "stopped",
             ].includes(record.state)) {
+              // Capture the outcome. `.catch(() => {})` here meant a dismiss that
+              // 500'd looked identical to one that cleaned up, and the leak
+              // assertion below then blamed Atelier for a removal that never ran.
               await rawApi(`/api/dispatch/${encodeURIComponent(record.id)}/dismiss`, {
                 method: "POST",
                 body: {},
-              }).catch(() => {});
+              }).then(
+                ({ status }) => forensics.dismissals.push({ id: record.id, status }),
+                (error) => forensics.dismissals.push({ id: record.id, error: String(error?.message ?? error) }),
+              );
             }
           }
         }
@@ -305,6 +333,30 @@ export async function createGoldenHarness(t, {
         }
       }
 
+      // Re-read the records AFTER the quiesce wait, while the daemon is still
+      // reachable. forensics.records above is captured during the dismiss loop,
+      // i.e. BEFORE the wait - reading post-merge state from it says nothing about
+      // whether the wait worked, which is a mistake I made on this very output.
+      // This snapshot is the A/B discriminator: if a postMergeWorktreePath is
+      // still set here, the wait timed out and candidate A stands; if it is clear
+      // and a worktree still leaked, the leak is not post-merge (candidate B -
+      // cleanup debt on an already-merged record, which never retries).
+      if (daemon && processExists(daemon.pid)) {
+        forensics.recordsAfterQuiesce = await rawApi("/api/dispatches").then(
+          ({ value }) => (Array.isArray(value) ? value : []).map((record) => ({
+            id: record.id,
+            state: record.state,
+            merged: Boolean(record.merged),
+            dismissed: Boolean(record.dismissed),
+            worktreePath: record.worktreePath ?? null,
+            postMergeState: record.postMerge?.state ?? null,
+            postMergeWorktreePath: record.postMerge?.worktreePath ?? null,
+          })),
+          (error) => [`<unavailable: ${error?.message ?? error}>`],
+        );
+      }
+      await snapshotWorktrees("afterDismissals");
+
       const scenarioPids = await childPids();
       for (const pid of scenarioPids) await terminatePid(pid);
 
@@ -328,9 +380,14 @@ export async function createGoldenHarness(t, {
         assert.equal(processExists(pid), false, `golden harness leaked fake-agent child PID ${pid}`);
       }
       if (projectInitialized) {
+        await snapshotWorktrees("afterDaemonExit");
         const worktrees = (await runGit(projectPath, tempHome, ["worktree", "list", "--porcelain"]))
           .stdout.match(/^worktree /gm) || [];
-        assert.equal(worktrees.length, 1, "golden harness leaked a dispatch worktree");
+        assert.equal(
+          worktrees.length,
+          1,
+          `golden harness leaked a dispatch worktree\n${JSON.stringify(forensics, null, 2)}`,
+        );
       }
       const processList = (await execFileAsync("ps", ["-eo", "pid=,args="])).stdout;
       assert.doesNotMatch(processList, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
