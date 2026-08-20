@@ -82,6 +82,46 @@ test("golden production path onboards, dispatches, verifies, and merges fake-age
   assert.ok(merged.merged?.commit);
   await git(harness.projectPath, ["cat-file", "-e", `${merged.merged.commit}^{commit}`]);
   assert.equal(await readFile(join(harness.projectPath, "implemented.txt"), "utf8"), "implemented\n");
+
+  // EXACT SHA CHAIN (ATT-011). Asserting only that "a merge happened" would pass
+  // even if the thing merged were not the thing tested. These links are what make
+  // "tested = reviewed = merged" mechanical rather than assumed, and each is a
+  // separate equality so a break names which link parted.
+  const chain = {
+    resultCommit: completed.result?.commit,
+    resultTree: completed.result?.tree,
+    resultVersion: completed.result?.version,
+    attestedCommit: completed.attestation?.resultCommit,
+    attestedTree: completed.attestation?.resultTree,
+    attestedVersion: completed.attestation?.resultVersion,
+    branchHead: completed.branchHead,
+    mergeResultCommit: merged.merged?.resultCommit,
+    mergeResultVersion: merged.merged?.resultVersion,
+    mergeCommit: merged.merged?.commit,
+  };
+  const link = (name) => `SHA chain broken at ${name}: ${JSON.stringify(chain)}`;
+
+  assert.ok(chain.resultCommit, link("record.result.commit is absent"));
+  // ATT-003: the attestation is bound to the exact result it verified.
+  assert.equal(chain.attestedCommit, chain.resultCommit, link("attestation -> result commit"));
+  assert.equal(chain.attestedTree, chain.resultTree, link("attestation -> result tree"));
+  assert.equal(chain.attestedVersion, chain.resultVersion, link("attestation -> result version"));
+  // ATT-004: what was merged is the head that was verified, not a later commit.
+  assert.equal(chain.branchHead, chain.resultCommit, link("branch head -> result commit"));
+  // record.merged carries resultCommit/resultVersion; targetSha is a BREAK-GLASS
+  // field (the SHA a human authorization is bound to), not part of an ordinary
+  // merge. My first version asserted targetSha here and this chain caught it -
+  // the assertion was wrong, not the product.
+  assert.equal(chain.mergeResultCommit, chain.resultCommit, link("merge record -> result commit"));
+  assert.equal(chain.mergeResultVersion, chain.resultVersion, link("merge record -> result version"));
+
+  // ...and the merge actually landed that work on the main branch, so the chain
+  // terminates in the repository rather than in Atelier's own records.
+  const mainHead = (await git(harness.projectPath, ["rev-parse", "HEAD"])).stdout.trim();
+  assert.equal(mainHead, chain.mergeCommit, link("main HEAD -> merge commit"));
+  await git(harness.projectPath, [
+    "merge-base", "--is-ancestor", chain.resultCommit, chain.mergeCommit,
+  ]);
 });
 
 test("golden human session mints and consumes one break-glass merge authorization", async (t) => {
