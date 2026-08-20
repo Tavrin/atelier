@@ -23,9 +23,10 @@ const files = (await testFiles(resolve("test-system"))).sort();
 // nothing. This does not explain that hang, and is not claimed to fix it; it bounds
 // it, so the gate fails loudly instead of disappearing silently.
 //
-// 120s is far above the whole suite's normal runtime (~5s) so it cannot mask
-// ordinary slowness on a contended runner.
-const TEST_TIMEOUT_MS = Number(process.env.ATELIER_GOLDEN_TEST_TIMEOUT_MS || 120_000);
+// 600s. The golden suite runs in ~5s, so this is a vast margin - deliberately, after
+// the campaign batch's 120s bound turned out to be only 1.9x the slowest single file
+// and fired on slowness rather than a hang. A hang is unbounded; slowness is not.
+const TEST_TIMEOUT_MS = Number(process.env.ATELIER_GOLDEN_TEST_TIMEOUT_MS || 600_000);
 const child = spawn(
   process.execPath,
   ["--test", `--test-timeout=${TEST_TIMEOUT_MS}`, ...files],

@@ -52,9 +52,17 @@ if (files.length === 0) {
 const concurrency = process.env.ATELIER_TEST_CONCURRENCY;
 // Bound every test so a hang becomes a failure rather than a silent stall. This
 // batch is the mandatory gate; a gate that hangs does not gate (atelier-uub, and
-// the pre-f174e02 job that sat at 1h13m). Generous relative to the whole batch's
-// ~70s so it cannot fire on ordinary contention.
-const timeoutMs = Number(process.env.ATELIER_TEST_TIMEOUT_MS || 120_000);
+// the pre-f174e02 job that sat at 1h13m).
+//
+// 600s, not 120s. My first value compared the bound against the whole batch's ~70s
+// WALL TIME, but --test-timeout applies PER TEST FILE, and server/server.test.mjs
+// alone takes 64s unloaded - a 1.9x margin, not the comfortable one I claimed. Under
+// deliberate oversubscription it exceeded 120s and the bound fired on legitimate
+// slowness, which on a slow runner would have been a self-inflicted CI failure
+// wearing a product failure's clothes. A hang is UNBOUNDED, so a large ceiling still
+// catches it; slowness is not, so the ceiling must clear the slowest real file by a
+// wide margin.
+const timeoutMs = Number(process.env.ATELIER_TEST_TIMEOUT_MS || 600_000);
 const options = [
   `--test-timeout=${timeoutMs}`,
   ...(concurrency ? [`--test-concurrency=${concurrency}`] : []),
