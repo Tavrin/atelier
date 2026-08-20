@@ -16,7 +16,21 @@ async function testFiles(directory) {
 // discovering beneath it. Enumerating files preserves the intended scoped gate
 // and works on every supported platform without shell glob semantics.
 const files = (await testFiles(resolve("test-system"))).sort();
-const child = spawn(process.execPath, ["--test", ...files], { stdio: "inherit" });
+// A per-test timeout converts a HANG into a FAILURE. atelier-uub: forcing teardown
+// assertions to fail across all golden tests made this runner sit past 600s where a
+// normal run takes ~5s, and a hanging proof rail is the failure mode that already
+// cost this campaign its gate once - the pre-f174e02 CI job sat at 1h13m and gated
+// nothing. This does not explain that hang, and is not claimed to fix it; it bounds
+// it, so the gate fails loudly instead of disappearing silently.
+//
+// 120s is far above the whole suite's normal runtime (~5s) so it cannot mask
+// ordinary slowness on a contended runner.
+const TEST_TIMEOUT_MS = Number(process.env.ATELIER_GOLDEN_TEST_TIMEOUT_MS || 120_000);
+const child = spawn(
+  process.execPath,
+  ["--test", `--test-timeout=${TEST_TIMEOUT_MS}`, ...files],
+  { stdio: "inherit" },
+);
 child.once("error", (error) => {
   throw error;
 });

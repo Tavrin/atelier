@@ -50,7 +50,15 @@ if (files.length === 0) {
 // converges. ATELIER_TEST_CONCURRENCY caps it; CI sets it, and a 32-core
 // workstation leaves it alone.
 const concurrency = process.env.ATELIER_TEST_CONCURRENCY;
-const options = concurrency ? [`--test-concurrency=${concurrency}`] : [];
+// Bound every test so a hang becomes a failure rather than a silent stall. This
+// batch is the mandatory gate; a gate that hangs does not gate (atelier-uub, and
+// the pre-f174e02 job that sat at 1h13m). Generous relative to the whole batch's
+// ~70s so it cannot fire on ordinary contention.
+const timeoutMs = Number(process.env.ATELIER_TEST_TIMEOUT_MS || 120_000);
+const options = [
+  `--test-timeout=${timeoutMs}`,
+  ...(concurrency ? [`--test-concurrency=${concurrency}`] : []),
+];
 
 console.log(
   `test-batch: running ${files.length} test files` +
