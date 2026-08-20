@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import test from "node:test";
 
 import {
@@ -81,6 +81,37 @@ test("binary evidence round-trips byte-identically through a validated envelope"
   assert.equal(Object.isFrozen(envelope.attributes), true);
   assert.equal(Object.isFrozen(envelope.provenanceRefs), true);
   assert.deepEqual(store.readBody(minted.id), body);
+});
+
+test("mint copies caller-owned body bytes before hashing and writing", async (t) => {
+  const root = await evidenceRoot(t, "body-copy");
+  const shared = new SharedArrayBuffer(4);
+  const callerBytes = new Uint8Array(shared);
+  callerBytes.set([0x10, 0x20, 0x30, 0x40]);
+  const expected = Buffer.from(callerBytes);
+  let mutated = false;
+  const store = createEvidenceStore({
+    stateDir: root,
+    fileOps: {
+      ...fs,
+      openSync(path, flags, ...rest) {
+        if (
+          !mutated &&
+          path.includes(`${sep}objects${sep}`) &&
+          typeof flags === "number" &&
+          (flags & constants.O_CREAT) !== 0
+        ) {
+          callerBytes[0] = 0xff;
+          mutated = true;
+        }
+        return fs.openSync(path, flags, ...rest);
+      },
+    },
+  });
+
+  const minted = store.mint({ type: "test.body-copy", body: callerBytes });
+  assert.equal(mutated, true, "the caller's shared bytes changed during the write");
+  assert.deepEqual(store.readBody(minted.id), expected);
 });
 
 test("a zero-byte body is distinct from a bodyless envelope", async (t) => {
@@ -154,32 +185,90 @@ test("identity canonicalizes attributes and changes with meaningful fields", asy
   assert.notEqual(first.id, reorderedRefs.id);
 });
 
+test("a relative stateDir is fixed to the construction cwd", async (t) => {
+  const root = await evidenceRoot(t, "absolute-root");
+  const constructionCwd = join(root, "construction");
+  const laterCwd = join(root, "later");
+  mkdirSync(constructionCwd);
+  mkdirSync(laterCwd);
+  const originalCwd = process.cwd();
+  let store;
+  try {
+    process.chdir(constructionCwd);
+    store = createEvidenceStore({ stateDir: "relative-state" });
+    process.chdir(laterCwd);
+    const minted = store.mint({ type: "test.absolute-root", body: "anchored" });
+
+    assert.equal(store.paths.root, resolve(constructionCwd, "relative-state", "evidence"));
+    assert.equal(store.readBody(minted.id).toString(), "anchored");
+    assert.equal(existsSync(join(laterCwd, "relative-state")), false);
+  } finally {
+    process.chdir(originalCwd);
+  }
+});
+
 test("evidence-envelope survives restart, event rotation, and dispatch-index rebuild", async (t) => {
   const root = await evidenceRoot(t, "proof");
   const moduleUrl = new URL("./evidence-store.mjs", import.meta.url).href;
+  const proofInputs = [
+    {
+      type: "proof.text",
+      bodyHex: "726573746172742d737461626c65",
+      attributes: { occurrence: "turn-1" },
+    },
+    {
+      type: "proof.binary",
+      bodyHex: "00ff01fe",
+      attributes: { occurrence: "turn-2" },
+    },
+    { type: "proof.marker", bodyHex: null, attributes: { occurrence: "turn-3" } },
+  ];
+  const expectedEnvelopes = [
+    {
+      schemaVersion: 1,
+      id: "ev1_843a53a0b8c5a02fdff4492399a6e386cf55cfeb9fd072a786bbf97b3bf8fd9e",
+      type: "proof.text",
+      contentDigest: "sha256:e3490e4f7cbbf3c45bdc28dde6510d38a7c07206c87d26955be8e09ee1ba70a8",
+      attributes: { occurrence: "turn-1" },
+      provenanceRefs: [],
+    },
+    {
+      schemaVersion: 1,
+      id: "ev1_e7d22d0bdda209dd80553d94d934b464c51295b7b01bf7cd7c052eeefb361b26",
+      type: "proof.binary",
+      contentDigest: "sha256:5d8d910591d272938aef5f966e0816e374beaf7b5adf02cca5f8f770596c2ce3",
+      attributes: { occurrence: "turn-2" },
+      provenanceRefs: [],
+    },
+    {
+      schemaVersion: 1,
+      id: "ev1_7185a1e342d0331d971d646c166479e6744cb25f4785323d56783fd927d20452",
+      type: "proof.marker",
+      contentDigest: null,
+      attributes: { occurrence: "turn-3" },
+      provenanceRefs: [],
+    },
+  ];
   const childScript = `
     import { createEvidenceStore } from ${JSON.stringify(moduleUrl)};
-    const store = createEvidenceStore({ stateDir: process.argv[1] });
-    const inputs = [
-      { type: "proof.text", body: "restart-stable", attributes: { occurrence: "turn-1" } },
-      { type: "proof.binary", body: Buffer.from([0, 255, 1, 254]), attributes: { occurrence: "turn-2" } },
-      { type: "proof.marker", attributes: { occurrence: "turn-3" } },
-    ];
-    const result = inputs.map((input) => {
-      const minted = store.mint(input);
-      return {
-        ...minted,
-        envelope: store.read(minted.id),
-        bodyHex: minted.contentDigest === null ? null : store.readBody(minted.id).toString("hex"),
-      };
-    });
-    process.stdout.write(JSON.stringify(result));
+    const inputs = JSON.parse(process.argv[1]);
+    const store = createEvidenceStore({ stateDir: process.argv[2] });
+    const ids = inputs.map(({ bodyHex, ...input }) =>
+      store.mint({
+        ...input,
+        ...(bodyHex === null ? {} : { body: Buffer.from(bodyHex, "hex") }),
+      }).id,
+    );
+    process.stdout.write(JSON.stringify(ids));
   `;
-  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", childScript, root], {
-    encoding: "utf8",
-  });
+  const child = spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", childScript, JSON.stringify(proofInputs), root],
+    { encoding: "utf8" },
+  );
   assert.equal(child.status, 0, child.stderr);
-  const references = JSON.parse(child.stdout);
+  const ids = JSON.parse(child.stdout);
+  assert.deepEqual(ids, expectedEnvelopes.map((envelope) => envelope.id));
 
   const log = createEventLog({ stateDir: root, maxBytes: 260, rotations: 2 });
   for (let index = 0; index < 24; index += 1) {
@@ -204,15 +293,18 @@ test("evidence-envelope survives restart, event rotation, and dispatch-index reb
   // This is the first parent-process store handle: all evidence was minted by
   // another Node process that has exited.
   const store = createEvidenceStore({ stateDir: root });
-  for (const reference of references) {
-    assert.deepEqual(store.read(reference.id), reference.envelope);
-    if (reference.bodyHex === null) {
+  for (const [index, expectedEnvelope] of expectedEnvelopes.entries()) {
+    assert.deepEqual(store.read(ids[index]), expectedEnvelope);
+    if (proofInputs[index].bodyHex === null) {
       assert.throws(
-        () => store.readBody(reference.id),
+        () => store.readBody(ids[index]),
         expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_NO_BODY),
       );
     } else {
-      assert.equal(store.readBody(reference.id).toString("hex"), reference.bodyHex);
+      assert.deepEqual(
+        store.readBody(ids[index]),
+        Buffer.from(proofInputs[index].bodyHex, "hex"),
+      );
     }
   }
 });
@@ -244,6 +336,25 @@ test("a modified envelope fails the caller-anchored id check", async (t) => {
   assert.throws(
     () => store.read(minted.id),
     expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_ID_MISMATCH),
+  );
+});
+
+test("a semantically unchanged but non-canonical envelope is malformed", async (t) => {
+  const root = await evidenceRoot(t, "envelope-canonical");
+  const store = createEvidenceStore({ stateDir: root });
+  const minted = store.mint({
+    type: "tamper.canonical",
+    attributes: { alpha: 1, beta: "two" },
+  });
+  const path = envelopePath(store, minted.id);
+  const envelope = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, `${JSON.stringify(envelope, null, 2)}\n`);
+
+  assert.throws(
+    () => store.read(minted.id),
+    (error) =>
+      expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED)(error) &&
+      /not in canonical form/.test(error.message),
   );
 });
 
@@ -279,6 +390,49 @@ test("a symlinked envelope is refused", { skip: process.platform === "win32" }, 
   );
 });
 
+test(
+  "symlinked shard directories are refused for reads and writes",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = await evidenceRoot(t, "shard-symlink");
+
+    const readStore = createEvidenceStore({ stateDir: join(root, "read-state") });
+    const minted = readStore.mint({ type: "tamper.read-shard" });
+    const storedEnvelope = envelopePath(readStore, minted.id);
+    const readShard = dirname(storedEnvelope);
+    const readTarget = join(root, "outside-read");
+    mkdirSync(readTarget);
+    writeFileSync(join(readTarget, storedEnvelope.slice(readShard.length + 1)), readFileSync(storedEnvelope));
+    fs.rmSync(readShard, { recursive: true, force: true });
+    symlinkSync(readTarget, readShard, "dir");
+
+    assert.throws(
+      () => readStore.read(minted.id),
+      (error) =>
+        expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED)(error) &&
+        error.message.includes(readShard),
+    );
+
+    const writeStore = createEvidenceStore({ stateDir: join(root, "write-state") });
+    const body = Buffer.from("redirect-me");
+    const digest = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    const destination = objectPath(writeStore, digest);
+    const writeShard = dirname(destination);
+    const writeTarget = join(root, "outside-write");
+    mkdirSync(writeStore.paths.objects, { recursive: true });
+    mkdirSync(writeTarget);
+    symlinkSync(writeTarget, writeShard, "dir");
+
+    assert.throws(
+      () => writeStore.mint({ type: "tamper.write-shard", body }),
+      (error) =>
+        expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED)(error) &&
+        error.message.includes(writeShard),
+    );
+    assert.equal(existsSync(join(writeTarget, destination.slice(writeShard.length + 1))), false);
+  },
+);
+
 test("a truncated or non-JSON envelope is malformed", async (t) => {
   const root = await evidenceRoot(t, "malformed");
   const store = createEvidenceStore({ stateDir: root });
@@ -289,6 +443,117 @@ test("a truncated or non-JSON envelope is malformed", async (t) => {
     () => store.read(minted.id),
     expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED),
   );
+});
+
+test("stored envelope fields with the wrong type fail with a typed error", async (t) => {
+  const root = await evidenceRoot(t, "malformed-field-type");
+  const store = createEvidenceStore({ stateDir: root });
+  const minted = store.mint({ type: "tamper.field-type", body: "original" });
+  const path = envelopePath(store, minted.id);
+  const envelope = JSON.parse(readFileSync(path, "utf8"));
+  envelope.contentDigest = { toString: null };
+  writeFileSync(path, JSON.stringify(envelope));
+
+  assert.throws(
+    () => store.read(minted.id),
+    expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED),
+  );
+});
+
+test("all envelope and body reads enforce size bounds before loading bytes", async (t) => {
+  const root = await evidenceRoot(t, "bounded-reads");
+
+  const envelopeState = join(root, "envelope-read");
+  const envelopeSetup = createEvidenceStore({ stateDir: envelopeState });
+  const oversizedEnvelope = envelopeSetup.mint({ type: "bounds.envelope-read" });
+  writeFileSync(envelopePath(envelopeSetup, oversizedEnvelope.id), Buffer.alloc(16 * 1024 + 1));
+  let envelopeReads = 0;
+  const envelopeReader = createEvidenceStore({
+    stateDir: envelopeState,
+    fileOps: {
+      ...fs,
+      readFileSync(...args) {
+        envelopeReads += 1;
+        return fs.readFileSync(...args);
+      },
+    },
+  });
+  assert.throws(
+    () => envelopeReader.read(oversizedEnvelope.id),
+    expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_ENVELOPE_TOO_LARGE),
+  );
+  assert.equal(envelopeReads, 0);
+
+  const bodyState = join(root, "body-read");
+  const bodySetup = createEvidenceStore({ stateDir: bodyState, maxBodyBytes: 16 });
+  const oversizedBody = bodySetup.mint({ type: "bounds.body-read", body: "12345678" });
+  let bodyReads = 0;
+  const bodyReader = createEvidenceStore({
+    stateDir: bodyState,
+    maxBodyBytes: 4,
+    fileOps: {
+      ...fs,
+      readFileSync(...args) {
+        bodyReads += 1;
+        return fs.readFileSync(...args);
+      },
+    },
+  });
+  assert.throws(
+    () => bodyReader.readBody(oversizedBody.id),
+    expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_BODY_TOO_LARGE),
+  );
+  assert.equal(bodyReads, 1, "only the bounded envelope was loaded");
+
+  const objectConflictState = join(root, "object-conflict");
+  const objectConflict = createEvidenceStore({ stateDir: objectConflictState, maxBodyBytes: 4 });
+  const intended = Buffer.from("tiny");
+  const intendedDigest = `sha256:${createHash("sha256").update(intended).digest("hex")}`;
+  const occupiedObject = objectPath(objectConflict, intendedDigest);
+  mkdirSync(dirname(occupiedObject), { recursive: true });
+  writeFileSync(occupiedObject, "oversized");
+  let objectConflictReads = 0;
+  const boundedObjectConflict = createEvidenceStore({
+    stateDir: objectConflictState,
+    maxBodyBytes: 4,
+    fileOps: {
+      ...fs,
+      readFileSync(...args) {
+        objectConflictReads += 1;
+        return fs.readFileSync(...args);
+      },
+    },
+  });
+  assert.throws(
+    () => boundedObjectConflict.mint({ type: "bounds.object-conflict", body: intended }),
+    expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_BODY_TOO_LARGE),
+  );
+  assert.equal(objectConflictReads, 0);
+
+  const envelopeConflictState = join(root, "envelope-conflict");
+  const envelopeConflictSetup = createEvidenceStore({ stateDir: envelopeConflictState });
+  const envelopeConflictInput = { type: "bounds.envelope-conflict" };
+  const occupiedEnvelope = envelopeConflictSetup.mint(envelopeConflictInput);
+  writeFileSync(
+    envelopePath(envelopeConflictSetup, occupiedEnvelope.id),
+    Buffer.alloc(16 * 1024 + 1),
+  );
+  let envelopeConflictReads = 0;
+  const boundedEnvelopeConflict = createEvidenceStore({
+    stateDir: envelopeConflictState,
+    fileOps: {
+      ...fs,
+      readFileSync(...args) {
+        envelopeConflictReads += 1;
+        return fs.readFileSync(...args);
+      },
+    },
+  });
+  assert.throws(
+    () => boundedEnvelopeConflict.mint(envelopeConflictInput),
+    expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_ENVELOPE_TOO_LARGE),
+  );
+  assert.equal(envelopeConflictReads, 0);
 });
 
 test("an unreadable future schema reports the found and supported versions", async (t) => {
@@ -414,6 +679,19 @@ test("invalid ids are rejected before any filesystem access", async (t) => {
   assert.equal(existsSync(store.paths.root), false);
 });
 
+test("negative zero attributes are rejected without silent normalization", async (t) => {
+  const root = await evidenceRoot(t, "negative-zero");
+  const store = createEvidenceStore({ stateDir: root });
+
+  assert.throws(
+    () => store.mint({ type: "invalid.negative-zero", attributes: { offset: -0 } }),
+    (error) =>
+      expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_INVALID_ATTRIBUTES)(error) &&
+      /offset/.test(error.message),
+  );
+  assert.equal(existsSync(store.paths.root), false);
+});
+
 test("provenance resolution preserves resolved and unknown references in order", async (t) => {
   const root = await evidenceRoot(t, "provenance");
   const store = createEvidenceStore({ stateDir: root });
@@ -496,6 +774,33 @@ test("an envelope-write failure strands only a body and retry publishes the enve
   assert.equal(fileCount(store.paths.objects), 1);
   assert.equal(fileCount(store.paths.envelopes), 1);
   assert.equal(store.readBody(retried.id).toString(), "durable body");
+});
+
+test("mint replaces a legacy partial final object without weakening real conflicts", async (t) => {
+  const root = await evidenceRoot(t, "partial-final");
+  const store = createEvidenceStore({ stateDir: root });
+  const body = Buffer.from("complete durable body");
+  const digest = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+  const path = objectPath(store, digest);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, body.subarray(0, 5));
+
+  const minted = store.mint({ type: "durability.partial-retry", body });
+  assert.equal(minted.contentDigest, digest);
+  assert.deepEqual(store.readBody(minted.id), body);
+  assert.equal(
+    readdirSync(dirname(path)).some((name) => name.endsWith(".tmp")),
+    false,
+    "successful retry removed its temporary file",
+  );
+
+  const conflictingBody = Buffer.alloc(body.byteLength, 0x78);
+  assert.equal(conflictingBody.byteLength, body.byteLength);
+  writeFileSync(path, conflictingBody);
+  assert.throws(
+    () => store.mint({ type: "durability.partial-retry", body }),
+    expectCode(EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT),
+  );
 });
 
 test(
