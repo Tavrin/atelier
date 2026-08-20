@@ -115,8 +115,13 @@ const run = spawnSync(process.execPath, ["test-system/run-tests.mjs"], {
   encoding: "utf8",
   env: { ...process.env, ATELIER_TEST_NO_REAL_PROVIDER: "1" },
 });
+// Trust the EXIT CODE, not the output shape. Parsing for "# fail 0" depends on
+// the reporter, and Node 22 emits TAP while Node 24 emits `spec` - so on the
+// Node 24 job this read a passing golden suite as FAILED. Same trap the mutation
+// matrix hit; the lesson is that a harness should not infer a result it can be
+// told directly.
 const suiteOutput = `${run.stdout ?? ""}${run.stderr ?? ""}`;
-const suitePassed = /^# fail 0$/m.test(suiteOutput);
+const suitePassed = run.status === 0;
 
 const after = { processes: processes(), temp: tempEntries() };
 

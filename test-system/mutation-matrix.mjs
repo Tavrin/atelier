@@ -157,13 +157,19 @@ requireCleanTree();
 for (const mutant of MUTANTS) {
   process.stdout.write(`\n=== ${mutant.id} ===\n`);
 
+  // Measure the DELTA, do not assume a green baseline. A gate file can carry an
+  // unrelated flaky red on a contended runner - CI hit exactly that, with a convoy
+  // contention test reddening dispatch.test.mjs before any mutation and turning a
+  // real result into INCONCLUSIVE. Subtracting the baseline reds keeps the verdict
+  // about the mutant. Baseline reds are still reported, because a gate file that
+  // is red for unrelated reasons is worth knowing about.
   const baseline = gateResult(mutant.gateFile);
-  if (baseline.failed.length > 0) {
-    results.push({
-      mutant, verdict: "INCONCLUSIVE",
-      detail: `gate file already red before mutation: ${baseline.failed.join("; ")}`,
-    });
-    continue;
+  const baselineRed = new Set(baseline.failed);
+  if (baselineRed.size > 0) {
+    process.stdout.write(
+      `note: ${baselineRed.size} unrelated test(s) already red before mutation, ` +
+        `excluded from this verdict: ${[...baselineRed].join("; ")}\n`,
+    );
   }
 
   const restore = applyMutant(mutant);
@@ -174,15 +180,16 @@ for (const mutant of MUTANTS) {
     restore();
   }
 
-  const caught = mutated.failed.filter((name) => name.includes(mutant.gateName));
-  const sameGuard = mutated.failed.filter((name) => !name.includes(mutant.gateName));
+  const attributable = mutated.failed.filter((name) => !baselineRed.has(name));
+  const caught = attributable.filter((name) => name.includes(mutant.gateName));
+  const sameGuard = attributable.filter((name) => !name.includes(mutant.gateName));
   // Everything measured here comes from the gate's OWN file, so co-firing tests
   // are same-guard coverage. A blanket break would surface as the whole file red.
-  const wholeFileRed = mutated.passed.length === 0 && mutated.failed.length > 1;
+  const wholeFileRed = mutated.passed.length === 0 && attributable.length > 1;
 
   let verdict;
   let detail;
-  if (mutated.failed.length === 0) {
+  if (attributable.length === 0) {
     // The guard can be removed and nothing notices.
     verdict = "UNGUARDED";
     detail = "no gate turned red - this guard is not asserted anywhere";
@@ -195,7 +202,7 @@ for (const mutant of MUTANTS) {
   } else {
     verdict = "CAUGHT";
     detail =
-      `localized to ${mutated.failed.length} test(s) of this guard, ` +
+      `localized to ${attributable.length} test(s) of this guard, ` +
       `${mutated.passed.length} unrelated test(s) in the file still green` +
       (sameGuard.length > 0 ? `; co-firing: ${sameGuard.join("; ")}` : "");
   }
