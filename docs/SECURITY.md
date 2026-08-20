@@ -44,11 +44,50 @@ to `trusted-local`.
 
 ### What the worktree does and does not give you
 
-A dispatch worktree is a real boundary for *file writes to tracked content*: the
-agent edits its own working tree, and your primary checkout's files are not
-modified. It is not a process, network, credential, or permission boundary, and
-the worktrees share the repository's Git metadata — creating and removing them
-writes to the primary repository's `.git`, and branches are visible repository-wide.
+A dispatch worktree is where the agent is *directed* to work, and under normal
+operation that is where its edits land: it has its own working tree, so ordinary
+agent activity does not modify your primary checkout's files, and five agents can
+work on one repository without colliding. The worktrees share the repository's
+Git metadata — creating and removing them writes to the primary repository's
+`.git`, and branches are visible repository-wide.
+
+Be clear about the nature of that boundary. It is **directional, not enforced**.
+It is not a process, network, credential, or permission boundary.
+
+### What `trusted-local` does not protect — read this one
+
+Under the default profile the agent is a process running as you, with your
+permissions. Nothing at the OS level stops it from acting outside the paths
+Atelier points it at. Concretely, Atelier does not, and under this profile
+*cannot*, prevent a sufficiently determined or compromised agent from:
+
+- writing directly to your primary checkout, or to any other repository, or
+  anywhere else your user can write;
+- rewriting Git refs, or pushing;
+- reading your SSH keys, browser profile, cloud credential files, and any secret
+  that lives in a file rather than an environment variable;
+- modifying Atelier's own state — dispatch records, the event log, attestations —
+  none of which is tamper-evident against a same-user process. "Append-only"
+  describes how Atelier writes that log, not a guarantee enforced against
+  everything else on the machine;
+- reaching the loopback API and obtaining a `human-ui` session through the
+  unauthenticated session bootstrap, which is the same authority a browser has.
+  The refusal of `force: true` to automation bearers distinguishes credential
+  labels; it is not proof that a hostile local process cannot acquire the
+  browser-labelled one.
+
+So the honest summary of the gates: **verification, attestation and the merge
+gate are controls over Atelier's own workflow, not a containment boundary around
+the agent.** They give you evidence about work that came through Atelier's path.
+They are not a defence against a process that has decided to go around it.
+
+This is why the recommendation is blunt: run Atelier where you would be willing
+to hand the machine and the repository to the agent directly, because under the
+default profile that is materially what you are doing. If that is not acceptable
+for a given repository — production credentials, a machine you share, work you
+cannot afford to have exfiltrated — use a VM, a dedicated account, or a
+throwaway machine. The sandboxed profiles exist precisely to lift this
+restriction and, as described above, cannot yet be used with the shipped lanes.
 
 ### Verification containment
 
@@ -70,7 +109,8 @@ at its site.
 Note also that under `trusted-local` — the default — the read-only tested tree and
 scratch-directory redirection are *requested* through the same profile-aware
 wrapper the sandbox uses, but nothing enforces them at the OS level. They are
-real hygiene, not a containment guarantee.
+real hygiene, not a containment guarantee: your verification commands run with
+your full filesystem and network authority, because they are your commands.
 
 ## Enforced controls
 

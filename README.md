@@ -9,8 +9,12 @@ its own Git worktree, runs your real test suite before anything is allowed to
 merge, and lets you talk to a running agent mid-task instead of waiting for it
 to finish being wrong.
 
-It runs entirely on your machine. Zero runtime dependencies, no build step, no
-account, no telemetry, and it binds to `127.0.0.1` only.
+Atelier itself runs entirely on your machine: zero runtime dependencies, no
+build step, no account, no telemetry, and it binds to `127.0.0.1` only. The
+agents it drives are a different matter — `claude` and `codex` are your own
+provider CLIs, under your own account, and they send your code to their provider
+like they do when you run them by hand. Atelier adds no telemetry of its own and
+takes no copy; what those CLIs transmit and retain is between you and them.
 
 ---
 
@@ -33,10 +37,10 @@ append-only event log, and a merge gate that refuses work without proof.
 ## How a piece of work moves through it
 
 ```
-  ticket ──▶ dispatch ──▶ agent works ──▶ verify ──▶ review ──▶ you merge
-             │            in isolated     your real   optional   the only
-             │            git worktree    test suite  second     way work
-             │                                        opinion    reaches main
+  ticket ──▶ dispatch ──▶ agent works ──▶ verify ──▶ review ──▶ merge
+             │            in its own      your real   optional   gated on
+             │            git worktree    test suite  second     evidence,
+             │                                        opinion    not on a click
              └── you can reply mid-run, steering the session in place
 ```
 
@@ -47,15 +51,16 @@ a structured log you can read later.
 clean ref, so five agents can work on one repository at once without colliding
 and without editing the files in your primary checkout.
 
-Be precise about what that is: it separates working trees, not processes. By
-default an agent runs as you, with your permissions, your home directory, your
+Be precise about what that is: it separates working trees, not processes, and it
+is where the agent is *directed* to work rather than a fence it is *held* inside.
+By default an agent runs as you, with your permissions, your home directory, your
 credentials and your network — Atelier calls this posture `trusted-local`, and
 its own code labels it *"no isolation"*. The worktrees share the repository's
 Git metadata, so `git worktree` and branch state are common. Real OS containment
 is a separate, opt-in trust profile that is Linux-only and, today, cannot be used
 with either shipped agent CLI. [SECURITY.md](docs/SECURITY.md) has the full
-matrix, and you should read it before pointing Atelier at anything you would
-not hand to the agent directly.
+matrix and a blunt section on what the default does not protect; read it before
+pointing Atelier at anything you would not hand to the agent directly.
 
 **Verification is computed, never claimed.** When an agent finishes, Atelier
 runs the verification commands *you* configured for that project and records the
@@ -139,9 +144,11 @@ genuinely different capabilities (Codex, for instance, cannot be steered
 mid-run and does not report its cost), and Atelier models those differences
 explicitly rather than pretending they are interchangeable.
 
-**Verification.** Project-configured commands run in the dispatch worktree
-after the agent exits. This is the gate, and it is the environment's verdict,
-not the agent's.
+**Verification.** Project-configured commands run after the agent exits —
+normally against a detached checkout of the finalized result commit, and in the
+dispatch worktree only in the pre-finalization case that cannot produce a
+mergeable attestation. This is the gate, and it is the environment's verdict, not
+the agent's.
 
 **Review.** An optional adversarial second pass over the diff, with recorded
 dispositions — what you accepted, what you refuted, and why.
@@ -185,8 +192,11 @@ one to understand before you start:
 
 **The default posture is `trusted-local`: no OS containment.** A dispatched agent
 runs as your user, with your files, your credentials and your network. The
-worktree keeps it out of your primary working tree; it is not a sandbox. Atelier
-does implement enforced confinement — namespace isolation with the user's home
+worktree is where it works, not a sandbox it is confined to, and the verification
+and merge gates are controls over Atelier's own workflow rather than a fence
+around the agent — they give you evidence about work that came through Atelier's
+path, not a defence against a process that goes around it. Atelier does implement
+enforced confinement — namespace isolation with the user's home
 and `/tmp` masked, network unshared, and daemon access narrowed to an allowlisted
 unix socket — but it is Linux-only, `bwrap` is the only backend that actually
 wraps a process, and it denies network, so neither shipped agent CLI can run

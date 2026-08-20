@@ -32,10 +32,13 @@ program. Reports are most useful when they respect that boundary.
 - **Any path that reaches a shell.** Subprocesses are executed with argv
   arrays; a shell being invoked on user-influenced input is a bug regardless of
   whether you can demonstrate an exploit.
-- Secrets surviving redaction — appearing in the event log, persisted dispatch
-  records, streamed events, or a dispatch's environment. Dispatch environments
-  are meant to strip secret-shaped variables including `ANTHROPIC_API_KEY` and
-  `OPENAI_API_KEY`.
+- A credential that Atelier's redaction and environment-hygiene patterns are
+  meant to catch surviving into the event log, persisted dispatch records,
+  streamed events, or a dispatch's environment — `ANTHROPIC_API_KEY` and
+  `OPENAI_API_KEY` among them. Both mechanisms are pattern denylists by design,
+  so a *novel* credential format slipping through is a gap to widen the patterns
+  for rather than a vulnerability; a value the existing patterns should have
+  matched and did not is a bug.
 - A dispatch escaping its worktree to modify the primary checkout, or the merge
   gate accepting work it should refuse — merging without a finalized result, an
   attestation bound to that exact commit and result version, or a matching branch
