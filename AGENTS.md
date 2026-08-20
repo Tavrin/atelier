@@ -23,8 +23,15 @@ Design record: docs/ARCHITECTURE.md. Registry: ~/.config/atelier/projects.json.
 - **Lift, don't rewrite.** The security core (415 Content-Type gate, 256KB
   body cap, leading-dash rejection, execFile argv arrays - never a shell)
   came verbatim from a verified seed. Never weaken or reimplement it.
-- **Loopback only.** The server binds 127.0.0.1 explicitly. No auth exists;
-  adding remote exposure without auth is forbidden.
+- **Loopback only, authenticated.** The server binds 127.0.0.1 explicitly.
+  Local clients authenticate: a 0600 installation secret under the state dir
+  mints purpose-labelled bearers (api/cli/mcp/sandboxed-agent) and signed
+  8-hour browser sessions; mutations enforce exact loopback Host, same-origin
+  Origin, and a session-bound CSRF token for browsers. This is surface
+  discipline against hostile pages and stray clients, NOT a boundary against
+  another process running as the same OS user - the session bootstrap is
+  reachable by anything local that can talk to the port. Remote exposure stays
+  forbidden regardless.
 - **br runs against the configured tracker directory, never a dispatch worktree.**
   The default is the PRIMARY checkout; `trackerPath` may instead select an
   external Atelier-owned directory. Tracker state is per-directory and worktree
@@ -37,14 +44,21 @@ Design record: docs/ARCHITECTURE.md. Registry: ~/.config/atelier/projects.json.
   selected tracker-only folder outside XDG is also Atelier-owned.
 - **Dispatches never touch primary checkouts.** Worktree per dispatch, based
   on a clean ref. Respect per-project `warn` fields (forbidden commands).
-- **Agent/UI parity (the Moss principle).** AI agents get FULL control:
-  every UI capability has an MCP/API equivalent - oversight is alerts,
-  audit trails, and gates that bind everyone equally (budget, verify,
-  the human merge click), NEVER capability asymmetry. Consequential
-  tools carry honest annotations; none are withheld.
+- **Agent/UI parity (the Moss principle).** AI agents get the working
+  surface, including ordinary gated merge - oversight is alerts, audit
+  trails, and gates that bind everyone equally (budget, verify, attestation),
+  NEVER asymmetry in ordinary capability. Consequential tools carry honest
+  annotations. The ONLY withheld powers are the ones that weaken those gates:
+  minting break-glass and forcing a merge require a human browser session and
+  are refused to automation bearers and to the sandbox broker. That is C2
+  human root authority, not capability hiding.
 - **No secrets** in the registry, logs, or streamed events (redact tool
   inputs before emit). Dispatch env strips inherited secret-shaped variables,
   including ANTHROPIC_API_KEY and OPENAI_API_KEY (subscription billing guard).
+  Both are pattern DENYLISTS - redaction happens at write time through the one
+  shared redactor in stream.mjs, and envHygiene() removes matching keys and
+  leaves the rest. Neither is a guarantee of absence; new observed formats go
+  into the shared patterns, and no doc may promise more than a denylist does.
 
 ## Working here
 
@@ -52,7 +66,11 @@ Design record: docs/ARCHITECTURE.md. Registry: ~/.config/atelier/projects.json.
   `br update --claim`). This repository does not ship a committed `.beads`.
 - Windows-portable: node:path everywhere, no symlinks, POSIX+win32 branches
   for process-group kill and XDG paths.
-- Verify: `node --test` (from the repo root) plus the injection probe in docs/SECURITY.md
-  before any change to request handling, exec, or dispatch surfaces.
+- Verify: `npm test` (from the repo root) - the enumerated batch in
+  scripts/test-batch.mjs, exactly what CI gates on. NEVER bare `node --test`:
+  it discovers the browser and theme suites and HANGS instead of failing.
+  Plus the injection probe in docs/SECURITY.md before any change to request
+  handling, exec, or dispatch surfaces. Some dispatch tests need `claude` and
+  `br` on PATH (CI installs stubs; the repo ships none).
 - Lessons: durable traps go to docs/lessons/ (one-line INDEX entry, payload
   in the file) - same compound loop as the Moss repo that birthed this tool.
