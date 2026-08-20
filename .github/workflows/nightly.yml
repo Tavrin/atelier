@@ -1,0 +1,160 @@
+name: Nightly adversarial matrix
+
+# ATT-011's nightly. Its job is MEASUREMENT, not another pass/fail stamp.
+#
+# ci.yml proves the gate can pass once per push. That is not a rate, and this
+# campaign has repeatedly found low-rate flakes that each survived a green run:
+# a transient-state sampler, two immediate-only pollers, a shell race, and a
+# golden-suite failure inside the leak report that is still unexplained. The
+# declaration bundle should be able to say "N of M runs passed, here is what
+# flaked and how often" rather than showing a screenshot of one green tick.
+#
+# Two classes of lane, deliberately separated:
+#
+#   GATED     - the configuration ci.yml actually gates on (hermetic, serialised).
+#               Any failure across the repeats fails this workflow, because an
+#               intermittent failure THERE is a broken gate.
+#   TOLERATED - deliberately hostile configurations, e.g. full concurrency on a
+#               small runner. Failures are measured and reported, never gated:
+#               the point is to characterise behaviour under contention, and
+#               gating on a hostile lane would just train people to ignore red.
+
+on:
+  schedule:
+    # 03:17 UTC - an odd minute, to avoid the top-of-hour scheduling crush that
+    # delays cron runs on shared infrastructure.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Repeats per lane"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+env:
+  ATELIER_TEST_NO_REAL_PROVIDER: "1"
+
+jobs:
+  repeat-batch:
+    name: batch x${{ github.event.inputs.runs || 5 }} (${{ matrix.lane }}, node ${{ matrix.node-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22.x", "24.x"]
+        lane: [gated, contended]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install provider stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          stub_dir="$RUNNER_TEMP/provider-stubs"
+          mkdir -p "$stub_dir"
+          for name in claude br; do
+            printf '#!/bin/sh\nprintf "%%s stub 1.0\\n" "$(basename "$0")"\n' >"$stub_dir/$name"
+            chmod +x "$stub_dir/$name"
+          done
+          echo "$stub_dir" >>"$GITHUB_PATH"
+      - name: Repeat the campaign batch
+        shell: bash
+        env:
+          RUNS: ${{ github.event.inputs.runs || '5' }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.lane }}" = "gated" ]; then
+            # Exactly what ci.yml gates on. A flake here is a broken gate.
+            ATELIER_TEST_CONCURRENCY=1 node scripts/flake-rate.mjs \
+              --runs "$RUNS" --label "batch-gated-${{ matrix.node-version }}" \
+              -- node scripts/test-batch.mjs
+          else
+            # Deliberately hostile: Node's default concurrency on a ~4-core runner
+            # is what surfaced the boot/convoy/claim contention class in the first
+            # place. Measured, never gated.
+            node scripts/flake-rate.mjs \
+              --runs "$RUNS" --label "batch-contended-${{ matrix.node-version }}" --tolerate \
+              -- node scripts/test-batch.mjs
+          fi
+      - name: Upload flake report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: flake-rate-batch-${{ matrix.lane }}-${{ matrix.node-version }}
+          path: flake-rate-*.json
+          if-no-files-found: warn
+
+  repeat-golden:
+    name: golden x${{ github.event.inputs.runs || 5 }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.x
+      # Gated: the golden suite is the P0 proof rail. It also failed once inside
+      # the leak-report job while passing standalone in the same run, and that has
+      # not been explained - repeating it is how that gets a rate instead of a
+      # shrug.
+      - name: Repeat the golden suite
+        env:
+          RUNS: ${{ github.event.inputs.runs || '5' }}
+        run: node scripts/flake-rate.mjs --runs "$RUNS" --label golden -- node test-system/run-tests.mjs
+      - name: Upload flake report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: flake-rate-golden
+          path: flake-rate-*.json
+          if-no-files-found: warn
+
+  repeat-proofs:
+    name: mutation matrix + leak report x3
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.x
+      - name: Install provider stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          stub_dir="$RUNNER_TEMP/provider-stubs"
+          mkdir -p "$stub_dir"
+          for name in claude br; do
+            printf '#!/bin/sh\nprintf "%%s stub 1.0\\n" "$(basename "$0")"\n' >"$stub_dir/$name"
+            chmod +x "$stub_dir/$name"
+          done
+          echo "$stub_dir" >>"$GITHUB_PATH"
+      # The proof harnesses are themselves code that can flake, and both have
+      # already shipped a version that reported confidently while broken. Repeat
+      # them too rather than assuming the instruments are the stable part.
+      - name: Repeat the mutation matrix
+        run: node scripts/flake-rate.mjs --runs 3 --label mutation-matrix -- node test-system/mutation-matrix.mjs
+      - name: Repeat the leak report
+        run: node scripts/flake-rate.mjs --runs 3 --label leak-report -- node test-system/leak-report.mjs
+      - name: Upload flake reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: flake-rate-proofs
+          path: flake-rate-*.json
+          if-no-files-found: warn
