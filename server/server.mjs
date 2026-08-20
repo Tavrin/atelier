@@ -42,7 +42,12 @@ import {
 } from "./lib/http.mjs";
 import { createEventLog, fieldDiff } from "./lib/event-log.mjs";
 import { configDir, stateDir } from "./lib/paths.mjs";
-import { deepRecoveryFor, recoveryFor, RECOVERY_LIMIT } from "./lib/recovery.mjs";
+import {
+  deepRecoveryFor,
+  recoveryFor,
+  RECOVERY_LIMIT,
+  redactGcResult,
+} from "./lib/recovery.mjs";
 import {
   addProject,
   projectOwnDispatchProfile,
@@ -1027,12 +1032,16 @@ export function createServer({
           throw new HttpError(400, `Unknown doctor GC fields: ${rejected.join(", ")}`);
         }
         try {
-          jsonResponse(response, 200, await dispatcher.gc(dispatchActionContext(request, {
-            ...(postBody.olderThanDays !== undefined
-              ? { olderThanDays: postBody.olderThanDays }
-              : {}),
-            ...(postBody.dryRun !== undefined ? { dryRun: postBody.dryRun } : {}),
-          })));
+          jsonResponse(
+            response,
+            200,
+            redactGcResult(await dispatcher.gc(dispatchActionContext(request, {
+              ...(postBody.olderThanDays !== undefined
+                ? { olderThanDays: postBody.olderThanDays }
+                : {}),
+              ...(postBody.dryRun !== undefined ? { dryRun: postBody.dryRun } : {}),
+            }))),
+          );
         } catch (error) {
           throw dispatchHttpError(error);
         }
@@ -1521,7 +1530,7 @@ export function createServer({
             // (dispatch.mjs:10443-10452, 10472). The literal is what makes a
             // dry run safe to reach from a GET; never source it from the request.
             const gcResult = await dispatcher.gc({ dryRun: true, actor: requestActor(request) });
-            deep = deepRecoveryFor(gcResult, options);
+            deep = deepRecoveryFor(redactGcResult(gcResult), options);
           } catch (error) {
             throw dispatchHttpError(error);
           }

@@ -195,7 +195,7 @@ export const RECOVERY_LIMITS = Object.freeze([
   }),
   Object.freeze({
     topic: "deep_scan_structural_fields",
-    limit: "Deep recovery keeps diagnostic process IDs and worktree paths that already flow through the existing doctor GC route; free text is redacted.",
+    limit: "Deep recovery and doctor GC retain diagnostic process IDs and worktree paths by policy; free text is redacted on both surfaces.",
   }),
 ]);
 
@@ -447,6 +447,10 @@ function deepCondition(code, subject, detail, evidence, options) {
     ...projected,
     reportOnly: projected.reportOnly == null ? null : redactText(projected.reportOnly),
   };
+}
+
+export function redactGcResult(gcResult) {
+  return redactValue(gcResult);
 }
 
 function diagnosticText(item, fallback) {
