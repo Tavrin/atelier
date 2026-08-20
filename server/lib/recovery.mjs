@@ -1,3 +1,5 @@
+import { redactText, redactValue } from "./stream.mjs";
+
 const severityRank = Object.freeze({ high: 3, medium: 2, low: 1 });
 
 function freezeTable(table) {
@@ -142,6 +144,14 @@ export const RECOVERY_ACTIONS = freezeTable({
     humanOnly: false,
     idempotent: "state-refused",
   },
+  queue_set: {
+    label: "Retry queue persistence",
+    http: "POST /api/projects/:project/queue",
+    mcp: "atelier_queue_set",
+    cli: null,
+    humanOnly: false,
+    idempotent: "effect",
+  },
   doctor_gc: {
     label: "Run doctor GC",
     http: "POST /api/doctor/gc",
@@ -182,6 +192,10 @@ export const RECOVERY_LIMITS = Object.freeze([
   Object.freeze({
     topic: "deep_scan_freshness",
     limit: "The deep tier is a point-in-time scan and goes stale as soon as an action runs.",
+  }),
+  Object.freeze({
+    topic: "deep_scan_structural_fields",
+    limit: "Deep recovery keeps diagnostic process IDs and worktree paths that already flow through the existing doctor GC route; free text is redacted.",
   }),
 ]);
 
@@ -225,7 +239,7 @@ function reviewRounds(record) {
 }
 
 function condition(code, subject, detail, evidence, { actions = [], reportOnly = null,
-  confirmed = true } = {}) {
+  confirmed = true, restartSurvival } = {}) {
   const vocabulary = RECOVERY_CONDITIONS[code];
   return {
     code,
@@ -235,14 +249,17 @@ function condition(code, subject, detail, evidence, { actions = [], reportOnly =
     evidence,
     durable: vocabulary.durable,
     confirmed,
-    restartSurvival: vocabulary.restartSurvival,
+    restartSurvival: restartSurvival ?? vocabulary.restartSurvival,
     actions: reportOnly ? [] : [...actions],
     reportOnly,
   };
 }
 
-function persistenceDetail(target) {
-  return `Writes to ${target} are degraded. Merge and unattended queue drain are blocked, but other dispatcher operations remain available. Because this signal is in memory, its absence after a restart is not proof that the underlying write failure was repaired.`;
+function persistenceDetail(target, { queueRetry = false } = {}) {
+  const retry = queueRetry
+    ? " Posting the queue's current enabled value re-attempts the queue.json write."
+    : "";
+  return `Writes to ${target} are degraded. Merge and unattended queue drain are blocked, but other dispatcher operations remain available.${retry} Because this signal is in memory, its absence after a restart is not proof that the underlying write failure was repaired.`;
 }
 
 function countsFor(conditions) {
@@ -284,18 +301,41 @@ function convoyPersistenceTarget(target) {
   return /(^|[\\/])convoys\.json(?:$|\s|\()/.test(String(target));
 }
 
-export function recoveryFor({ records = [], projects: _projects = [], convoys = [],
+function queuePersistenceTarget(target) {
+  return /(^|[\\/])queue\.json(?:$|\s|\()/.test(String(target));
+}
+
+function persistenceCondition(target) {
+  const queueRetry = queuePersistenceTarget(target);
+  return condition(
+    "persistence_degraded",
+    { kind: "persistence", id: String(target) },
+    persistenceDetail(target, { queueRetry }),
+    { target },
+    queueRetry
+      ? { actions: ["queue_set"] }
+      : { reportOnly: "No clear existing command repairs this write failure." },
+  );
+}
+
+export function recoveryFor({ records = [], projects = [], convoys = [],
   persistence = {} } = {}, { now = new Date(), limit = RECOVERY_LIMIT } = {}) {
   const conditions = [];
+  const projectNames = new Set(projects.map((project) => project?.name));
   for (const record of records) {
     const subject = recordSubject(record);
     if (record.mergeRecoveryPending === true) {
+      const projectPresent = projectNames.has(record.project);
       conditions.push(condition(
         "merge_recovery_pending",
         subject,
-        "A durable merge intent has not yet reconciled to a completed merge.",
+        projectPresent
+          ? "A durable merge intent has not yet reconciled to a completed merge."
+          : "The dispatch project is no longer registered; dismiss this recovery condition or re-register the project.",
         { mergeRecoveryPending: true },
-        { actions: ["merge", "dismiss"] },
+        projectPresent
+          ? { actions: ["merge", "dismiss"] }
+          : { actions: ["dismiss"], restartSurvival: "manual" },
       ));
     }
     if (record.orphanUnresolved === true) {
@@ -332,7 +372,7 @@ export function recoveryFor({ records = [], projects: _projects = [], convoys = 
               followUpTicketId: followUp?.ticketId ?? null,
               attempts: Number.isInteger(followUp?.attempts) ? followUp.attempts : 0,
             },
-            { reportOnly: "No direct resolver exists; boot recovery and a repeat merge retry it." },
+            { reportOnly: "No direct resolver exists; boot recovery retries it." },
           ));
         }
       }
@@ -352,13 +392,7 @@ export function recoveryFor({ records = [], projects: _projects = [], convoys = 
     ? persistence.targets
     : [];
   for (const target of persistenceTargets) {
-    conditions.push(condition(
-      "persistence_degraded",
-      { kind: "persistence", id: String(target) },
-      persistenceDetail(target),
-      { target },
-      { reportOnly: "No clear existing command repairs this write failure." },
-    ));
+    conditions.push(persistenceCondition(target));
   }
   if (persistenceTargets.some(convoyPersistenceTarget)) {
     for (const convoy of convoys) {
@@ -401,13 +435,37 @@ function gcMeasurement(gcResult, now) {
   return gcResult.generatedAt ?? gcResult.measuredAt ?? gcResult.at ?? gcResult.now ?? now;
 }
 
+function deepCondition(code, subject, detail, evidence, options) {
+  const projected = condition(
+    code,
+    subject,
+    redactText(detail),
+    redactValue(evidence),
+    options,
+  );
+  return {
+    ...projected,
+    reportOnly: projected.reportOnly == null ? null : redactText(projected.reportOnly),
+  };
+}
+
+function diagnosticText(item, fallback) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return fallback;
+  return item.message ?? item.error ?? item.warning ?? item.reason ?? fallback;
+}
+
+function diagnosticId(item, fallback) {
+  return item && typeof item === "object" ? itemId(item, fallback) : fallback;
+}
+
 export function deepRecoveryFor(gcResult, { now = new Date(), limit = RECOVERY_LIMIT } = {}) {
   if (!gcResult || gcResult.dryRun !== true) {
     throw new TypeError("deep recovery classification requires a dry-run GC result");
   }
   const conditions = [];
   for (const item of gcResult.dismissed ?? []) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "stale_terminal_record",
       { kind: "dispatch", id: itemId(item, "unknown"), ...itemProject(item) },
       "Doctor GC found a terminal dispatch beyond the retention horizon.",
@@ -416,7 +474,7 @@ export function deepRecoveryFor(gcResult, { now = new Date(), limit = RECOVERY_L
     ));
   }
   for (const item of gcResult.orphans ?? []) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "orphan_worktree",
       { kind: "worktree", id: itemId(item, "unknown"), ...itemProject(item) },
       "Doctor GC found an Atelier worktree with no protected live owner.",
@@ -425,7 +483,7 @@ export function deepRecoveryFor(gcResult, { now = new Date(), limit = RECOVERY_L
     ));
   }
   for (const item of gcResult.codexJobs ?? []) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "stale_codex_job",
       { kind: "codex-job", id: itemId(item, "unknown") },
       "Doctor GC found a terminal Codex job artifact beyond the retention horizon.",
@@ -434,7 +492,7 @@ export function deepRecoveryFor(gcResult, { now = new Date(), limit = RECOVERY_L
     ));
   }
   for (const item of gcResult.breakGlassAuthorizations ?? []) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "terminal_break_glass",
       { kind: "break-glass", id: itemId(item, "unknown") },
       "Doctor GC found a terminal break-glass authorization beyond the retention horizon.",
@@ -443,16 +501,16 @@ export function deepRecoveryFor(gcResult, { now = new Date(), limit = RECOVERY_L
     ));
   }
   for (const item of gcResult.codexProcesses?.reported ?? []) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "unproven_process",
       { kind: "process", id: itemId(item, "unknown"), ...itemProject(item) },
-      "A Codex-shaped process was reported, but Atelier could not corroborate ownership and may not signal it.",
+      `A Codex-shaped process was reported, but Atelier could not corroborate ownership and may not signal it. ${diagnosticText(item, "")}`.trim(),
       { process: item },
       { reportOnly: "Process ownership is not corroborated; no Atelier command may signal it." },
     ));
   }
   for (const item of gcResult.advisoryDebts ?? []) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "advisory_debt",
       {
         kind: "dispatch",
@@ -461,32 +519,26 @@ export function deepRecoveryFor(gcResult, { now = new Date(), limit = RECOVERY_L
       },
       "A merged review advisory has not finished filing in the tracker.",
       { debt: item },
-      { reportOnly: "No direct resolver exists; boot recovery and a repeat merge retry it." },
+      { reportOnly: "No direct resolver exists; boot recovery retries it." },
     ));
   }
   for (const target of gcResult.persistenceFailureTargets ?? []) {
-    conditions.push(condition(
-      "persistence_degraded",
-      { kind: "persistence", id: String(target) },
-      persistenceDetail(target),
-      { target },
-      { reportOnly: "No clear existing command repairs this write failure." },
-    ));
+    conditions.push(persistenceCondition(target));
   }
   for (const [index, warning] of (gcResult.warnings ?? []).entries()) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "retained_candidate",
-      { kind: "gc-warning", id: itemId(warning, `warning-${index + 1}`) },
-      "Doctor GC deliberately retained a candidate because its identity or filesystem safety checks did not pass.",
+      { kind: "gc-warning", id: diagnosticId(warning, `warning-${index + 1}`) },
+      `Doctor GC retained a candidate: ${diagnosticText(warning, "identity or filesystem safety checks did not pass")}`,
       { warning },
       { reportOnly: "The candidate failed GC safety checks; force deletion is not offered." },
     ));
   }
   for (const [index, error] of (gcResult.errors ?? []).entries()) {
-    conditions.push(condition(
+    conditions.push(deepCondition(
       "scan_error",
-      { kind: "gc-scan", id: itemId(error, `error-${index + 1}`) },
-      "Part of the recovery inventory could not be scanned.",
+      { kind: "gc-scan", id: diagnosticId(error, `error-${index + 1}`) },
+      `Part of the recovery inventory could not be scanned: ${diagnosticText(error, "unknown error")}`,
       { error },
       { reportOnly: "The scan did not establish a safe recovery action." },
     ));

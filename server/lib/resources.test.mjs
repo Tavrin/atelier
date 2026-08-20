@@ -135,9 +135,34 @@ test("exact fixtures project every Tier-1 and Tier-2 byte total", async (t) => {
     { root: "merge-worktrees", count: 1, truncated: false },
   ]);
   assert.equal(projection.processes.relevantCount.value, 2);
-  assert.equal(projection.processes.directRunners.value, 2);
-  assert.match(projection.worktrees.recordBackedCount.detail, /record-backed.*orphan/i);
-  assert.match(projection.processes.directRunners.detail, /in-memory.*distinct.*\/proc/i);
+  assert.equal(projection.processes.directRunners.value, null);
+  assert.equal(projection.processes.directRunners.supported, true);
+  assert.match(projection.worktrees.recordBackedCount.detail, /total dispatch history.*orphan/i);
+  assert.equal(
+    projection.processes.directRunners.detail,
+    "in-memory child handles are not exposed to record projections",
+  );
+});
+
+test("direct runner counts are unavailable from empty and populated record projections", async (t) => {
+  const root = await resourceRoot(t, "direct-runners");
+  const projector = createResourceProjector({ stateDir: root, processOps: procOps([]) });
+  for (const records of [[], [{ child: {} }, { verifyChild: {}, postMergeChild: {} }]]) {
+    const direct = projector.measure({ records }).processes.directRunners;
+    assert.equal(direct.value, null);
+    assert.equal(direct.supported, true);
+    assert.equal(direct.detail, "in-memory child handles are not exposed to record projections");
+  }
+});
+
+test("record-backed worktree counts disclose their history-proportional cost", async (t) => {
+  const root = await resourceRoot(t, "record-history");
+  const projection = createResourceProjector({ stateDir: root, processOps: procOps([]) })
+    .measure({ records: [{ worktreePath: join(root, "worktrees", "one") }] });
+  assert.equal(projection.worktrees.recordBackedCount.bounded, false);
+  assert.match(projection.worktrees.recordBackedCount.detail, /proportional to total dispatch history/i);
+  const cost = RESOURCE_COST_MODEL.find(({ key }) => key === "worktrees.recordBackedCount");
+  assert.match(cost.bound, /proportional to total dispatch history/i);
 });
 
 test("worktree counting stops at the advertised per-root read cap", async (t) => {
@@ -205,6 +230,35 @@ test("Tier-1 refreshes every call while Tier-2 keeps its measurement time until 
   assert.equal(refreshed.logs.transcripts.value, 7);
   assert.notEqual(refreshed.logs.transcripts.measuredAt, first.logs.transcripts.measuredAt);
   assert.equal(refreshed.logs.transcripts.ageMs, 0);
+});
+
+test("fresh Tier-2 measurements are stamped after their scan completes", async (t) => {
+  const root = await resourceRoot(t, "completion-time");
+  const dispatches = join(root, "dispatches");
+  await sizedFile(join(dispatches, "one.jsonl"), 3);
+  let clock = Date.parse("2026-08-20T10:00:00.000Z");
+  let advanced = false;
+  const fileOps = {
+    ...fs,
+    opendirSync(path, options) {
+      const directory = fs.opendirSync(path, options);
+      if (path === dispatches && !advanced) {
+        clock += 5_000;
+        advanced = true;
+      }
+      return directory;
+    },
+  };
+  const projection = createResourceProjector({
+    stateDir: root,
+    fileOps,
+    processOps: procOps([]),
+    now: () => new Date(clock),
+  }).measure();
+
+  assert.equal(projection.logs.transcripts.measuredAt, "2026-08-20T10:00:05.000Z");
+  assert.equal(projection.logs.transcripts.ageMs, 0);
+  assert.equal(projection.generatedAt, "2026-08-20T10:00:05.000Z");
 });
 
 test("recursive worktree and evidence bytes run only on explicit deep requests", async (t) => {

@@ -152,6 +152,10 @@ export const ATTENTION_EXCLUSIONS = Object.freeze([
     reason: "Dismissal resolves ordinary dispatch attention.",
   }),
   Object.freeze({
+    condition: "unresolved_orphan",
+    reason: "An unresolved orphan belongs to Recovery Center, where reply is refused until fencing is resolved.",
+  }),
+  Object.freeze({
     condition: "review_dispatch",
     reason: "Review-target dispatches are audit evidence, not merge candidates.",
   }),
@@ -228,6 +232,25 @@ function addReason(situation, code, detail, since, evidence, actions) {
   situation.actions.push(...actions);
 }
 
+function addMainHealthReason(situation, record, recordAt, evidence) {
+  if (
+    record.postMerge?.state !== "failed" ||
+    record.postMerge.resolvedAt ||
+    record.postMerge.acknowledgedAt
+  ) return;
+  addReason(
+    situation,
+    "main_health_failed",
+    record.postMerge.error || record.postMerge.evidenceTail || "Post-merge verification failed.",
+    validTimestamp(record.postMerge.endedAt, record.postMerge.startedAt, recordAt),
+    {
+      ...evidence,
+      commit: record.postMerge.commit ?? record.merged?.commit ?? null,
+    },
+    ["main_health_ack"],
+  );
+}
+
 function recordSituations(records, projectsByName) {
   const situations = new Map();
   const mergeReady = new Set();
@@ -236,13 +259,18 @@ function recordSituations(records, projectsByName) {
     if (
       !record ||
       typeof record.id !== "string" ||
-      record.dismissed != null ||
       record.reviewOf != null
     ) continue;
     const project = projectsByName.get(record.project) ?? {};
     const situation = makeEntry(`dispatch:${record.id}`, dispatchSubject(record));
     const recordAt = validTimestamp(record.endedAt, record.startedAt);
     const evidence = { dispatchId: record.id, state: record.state ?? null };
+
+    if (record.dismissed != null) {
+      addMainHealthReason(situation, record, recordAt, evidence);
+      if (situation.reasons.length > 0) situations.set(record.id, situation);
+      continue;
+    }
 
     if (record.state === "needs_input") {
       const question = typeof record.outcome?.question === "string"
@@ -277,7 +305,7 @@ function recordSituations(records, projectsByName) {
         ["reply", "dismiss"],
       );
     }
-    if (FAILURE_STATES.has(record.state)) {
+    if (FAILURE_STATES.has(record.state) && record.orphanUnresolved !== true) {
       addReason(
         situation,
         "failed_unresolved",
@@ -411,23 +439,7 @@ function recordSituations(records, projectsByName) {
       );
     }
 
-    if (
-      record.postMerge?.state === "failed" &&
-      !record.postMerge.resolvedAt &&
-      !record.postMerge.acknowledgedAt
-    ) {
-      addReason(
-        situation,
-        "main_health_failed",
-        record.postMerge.error || record.postMerge.evidenceTail || "Post-merge verification failed.",
-        validTimestamp(record.postMerge.endedAt, record.postMerge.startedAt, recordAt),
-        {
-          ...evidence,
-          commit: record.postMerge.commit ?? record.merged?.commit ?? null,
-        },
-        ["main_health_ack"],
-      );
-    }
+    addMainHealthReason(situation, record, recordAt, evidence);
 
     if (record.executionProfileRefusal != null) {
       addReason(
@@ -540,7 +552,10 @@ export function attentionFor(input = {}, options = {}) {
       )],
       ["convoy_resume", "convoy_cancel"],
     );
-    if (typeof convoy.currentDispatchId === "string") {
+    if (
+      typeof convoy.currentDispatchId === "string" &&
+      !absorbed.has(convoy.currentDispatchId)
+    ) {
       absorbed.add(convoy.currentDispatchId);
       appendDispatchSituation(entry, situations.get(convoy.currentDispatchId));
     }

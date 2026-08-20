@@ -9,6 +9,7 @@ import {
   deepRecoveryFor,
   recoveryFor,
 } from "./recovery.mjs";
+import { REDACT_TEXT_PATTERNS, redactText } from "./stream.mjs";
 
 const NOW = new Date("2026-08-20T10:00:00.000Z");
 
@@ -25,7 +26,10 @@ function onlyCode(projection, code) {
 const cheapCases = [
   {
     code: "merge_recovery_pending",
-    input: { records: [{ id: "merge", project: "one", mergeRecoveryPending: true }] },
+    input: {
+      records: [{ id: "merge", project: "one", mergeRecoveryPending: true }],
+      projects: [{ name: "one" }],
+    },
     durable: true,
     restartSurvival: "reconciles",
     reportOnly: null,
@@ -193,6 +197,75 @@ test("deep recovery refuses a mutating GC result", () => {
   );
 });
 
+test("merge recovery offers merge only while its project remains registered", () => {
+  const record = { id: "merge", project: "one", mergeRecoveryPending: true };
+  const removed = onlyCode(cheap({ records: [record], projects: [] }), "merge_recovery_pending");
+  assert.deepEqual(removed.actions, ["dismiss"]);
+  assert.equal(removed.restartSurvival, "manual");
+  assert.match(removed.detail, /dismiss.*re-register/i);
+
+  const present = onlyCode(cheap({ records: [record], projects: [{ name: "one" }] }),
+    "merge_recovery_pending");
+  assert.deepEqual(present.actions, ["merge", "dismiss"]);
+  assert.equal(present.restartSurvival, "reconciles");
+});
+
+test("only queue persistence degradation offers the existing queue retry", () => {
+  const projection = cheap({
+    persistence: {
+      degraded: true,
+      targets: ["/state/queue.json", "/state/dispatch/index.jsonl"],
+    },
+  });
+  const queue = projection.conditions.find((item) => item.subject.id === "/state/queue.json");
+  const index = projection.conditions.find(
+    (item) => item.subject.id === "/state/dispatch/index.jsonl",
+  );
+  assert.deepEqual(queue.actions, ["queue_set"]);
+  assert.equal(queue.reportOnly, null);
+  assert.equal(queue.durable, false);
+  assert.match(queue.detail, /re-attempts the queue\.json write/i);
+  assert.match(queue.detail, /absence after a restart is not proof/i);
+  assert.deepEqual(index.actions, []);
+  assert.equal(typeof index.reportOnly, "string");
+  assert.equal(index.durable, false);
+});
+
+test("advisory debt says only boot recovery retries it", () => {
+  const advisory = onlyCode(cheap({
+    records: [{
+      id: "advisory",
+      merged: { commit: "abc123" },
+      review: {
+        current: {
+          advisoryFollowUps: [{ findingRef: "round-1:finding-1", filedAt: null }],
+        },
+      },
+    }],
+  }), "advisory_debt");
+  assert.match(advisory.reportOnly, /boot recovery/i);
+  assert.doesNotMatch(advisory.reportOnly, /repeat merge/i);
+});
+
+test("deep recovery redacts GC free text with the shared redactor", () => {
+  const secret = "sk-ABCDEFGHIJKLMNOP";
+  assert.ok(REDACT_TEXT_PATTERNS.length > 0);
+  assert.equal(redactText(secret), "[redacted]");
+  const projection = deepRecoveryFor({
+    dryRun: true,
+    codexProcesses: {
+      reported: [{ pid: 4321, reason: `worker reported ${secret}` }],
+    },
+    warnings: [`candidate retained with ${secret}`],
+    errors: [`scan failed with ${secret}`],
+  }, { now: NOW });
+  const error = onlyCode(projection, "scan_error");
+  assert.match(error.detail, /\[redacted\]/);
+  assert.doesNotMatch(JSON.stringify(projection), new RegExp(secret));
+  assert.ok(RECOVERY_LIMITS.some(({ topic, limit }) =>
+    topic === "deep_scan_structural_fields" && /process IDs and worktree paths/i.test(limit)));
+});
+
 test("every report-only condition has an empty action list", () => {
   const shallow = cheap({
     records: [{
@@ -236,6 +309,7 @@ test("actions name only the specified existing routes", () => {
       verify_rerun: "POST /api/dispatch/:id/verify",
       queue_resume: "POST /api/projects/:project/queue",
       convoy_resume: "POST /api/convoys/:id/resume",
+      queue_set: "POST /api/projects/:project/queue",
       doctor_gc: "POST /api/doctor/gc",
     },
   );
@@ -266,6 +340,7 @@ test("actions declare their mechanism-specific repeat semantics", () => {
       verify_rerun: "state-refused",
       queue_resume: "state-refused",
       convoy_resume: "state-refused",
+      queue_set: "effect",
       doctor_gc: "effect",
     },
   );
