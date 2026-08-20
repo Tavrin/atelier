@@ -106,6 +106,7 @@ function dispatcherStub() {
   }];
   const queueDraining = new Set();
   const codexSweeps = [];
+  const gcCalls = [];
   const records = ["dispatch-1", "dispatch-2"].map((id, index) => ({
     id,
     project: "tracked",
@@ -128,6 +129,7 @@ function dispatcherStub() {
     _resumedQueueTickets: resumedQueueTickets,
     _convoys: convoys,
     _queueDraining: queueDraining,
+    _gcCalls: gcCalls,
     list: () => records,
     get: (id) => records.find((record) => id === record.id),
     getEvents: (id, since = 0) =>
@@ -281,13 +283,17 @@ function dispatcherStub() {
         parkedTickets: [],
       };
     },
-    gc: async ({ olderThanDays = 7, dryRun = false } = {}) => ({
-      dryRun,
-      olderThanDays,
-      dismissed: dryRun ? ["dispatch-old"] : [],
-      orphans: [],
-      errors: [],
-    }),
+    gc: async ({ olderThanDays = 7, dryRun = false, actor } = {}) => {
+      gcCalls.push({ olderThanDays, dryRun, actor });
+      return {
+        dryRun,
+        olderThanDays,
+        dismissed: dryRun ? ["dispatch-old"] : [],
+        orphans: [],
+        errors: [],
+      };
+    },
+    persistenceStatus: () => ({ degraded: false, targets: [] }),
     drainQueuesOnce: async () => {},
     _codexSweeps: codexSweeps,
     sweepCodexProcesses: async () => {
@@ -3407,6 +3413,90 @@ test("rollup route returns the dispatcher aggregation", async (t) => {
     days: [{ day: "2026-07-21", runs: 2, costUSD: 0.25 }],
     totals: { runs: 2, turns: 4, costUSD: 0.25 },
   });
+});
+
+test("Wave 1B projection routes return their bounded top-level shapes", async (t) => {
+  const setup = await serverFixture(t);
+  setup.dispatcher._records[0].state = "needs_input";
+  setup.dispatcher._records[0].outcome = { question: "Choose a recovery path" };
+  setup.dispatcher._records[0].mergeRecoveryPending = true;
+
+  const [attentionResponse, recoveryResponse, resourcesResponse] = await Promise.all([
+    send(setup.port, { path: "/api/attention" }),
+    send(setup.port, { path: "/api/recovery" }),
+    send(setup.port, { path: "/api/resources" }),
+  ]);
+  assert.equal(attentionResponse.status, 200);
+  assert.equal(recoveryResponse.status, 200);
+  assert.equal(resourcesResponse.status, 200);
+
+  const attention = JSON.parse(attentionResponse.text);
+  assert.ok(Array.isArray(attention.entries));
+  assert.equal(typeof attention.counts.total, "number");
+  assert.ok(Array.isArray(attention.excluded));
+
+  const recovery = JSON.parse(recoveryResponse.text);
+  assert.ok(Array.isArray(recovery.conditions));
+  assert.equal(typeof recovery.counts.total, "number");
+  assert.ok(Array.isArray(recovery.limits));
+  assert.equal(recovery.deep, null);
+
+  const resources = JSON.parse(resourcesResponse.text);
+  assert.equal(typeof resources.generatedAt, "string");
+  assert.equal(typeof resources.logs, "object");
+  assert.equal(typeof resources.worktrees, "object");
+  assert.equal(typeof resources.processes, "object");
+  assert.ok(Array.isArray(resources.costModel));
+  assert.equal(resources.worktrees.deepBytes, null);
+});
+
+test("attention and recovery limits accept zero, reject invalid values, and clamp high values", async (t) => {
+  const setup = await serverFixture(t);
+  setup.dispatcher._records[0].state = "needs_input";
+  setup.dispatcher._records[0].outcome = { question: "Choose a recovery path" };
+  setup.dispatcher._records[0].mergeRecoveryPending = true;
+
+  const empty = await send(setup.port, { path: "/api/attention?limit=0" });
+  assert.equal(empty.status, 200);
+  assert.deepEqual(JSON.parse(empty.text).entries, []);
+  assert.equal(JSON.parse(empty.text).truncated, true);
+
+  for (const route of ["attention", "recovery"]) {
+    for (const limit of ["nope", "-1", "1.5", ""]) {
+      const response = await send(setup.port, { path: `/api/${route}?limit=${limit}` });
+      assert.equal(response.status, 400, `${route} accepted ${JSON.stringify(limit)}`);
+      assert.match(response.text, /non-negative integer/);
+    }
+    const clamped = await send(setup.port, { path: `/api/${route}?limit=999999` });
+    assert.equal(clamped.status, 200);
+  }
+});
+
+test("GET recovery only runs doctor GC for deep=1 and pins every scan to a literal dry run", async (t) => {
+  const setup = await serverFixture(t);
+
+  for (const path of ["/api/recovery", "/api/recovery?dryRun=false"]) {
+    const response = await send(setup.port, { path });
+    assert.equal(response.status, 200);
+    assert.equal(JSON.parse(response.text).deep, null);
+  }
+  assert.deepEqual(setup.dispatcher._gcCalls, []);
+
+  for (const path of ["/api/recovery?deep=1", "/api/recovery?deep=1&dryRun=false"]) {
+    const response = await send(setup.port, { path });
+    assert.equal(response.status, 200);
+    assert.equal(JSON.parse(response.text).deep.dryRun, true);
+  }
+  assert.equal(setup.dispatcher._gcCalls.length, 2);
+  assert.ok(setup.dispatcher._gcCalls.every((call) => call.dryRun === true));
+});
+
+test("Wave 1B projection routes require authentication", async (t) => {
+  const { port } = await serverFixture(t);
+  for (const path of ["/api/attention", "/api/recovery", "/api/resources"]) {
+    const response = await send(port, { path, authenticated: false });
+    assert.equal(response.status, 401, `${path} did not require authentication`);
+  }
 });
 
 test("agents route exposes registered adapter metadata and composer options", async (t) => {

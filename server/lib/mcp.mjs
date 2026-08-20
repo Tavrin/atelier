@@ -346,6 +346,50 @@ export const MCP_TOOLS = Object.freeze([
     true,
   ),
   tool(
+    "atelier_attention",
+    "Atelier Attention Inbox",
+    "Read the bounded needs-a-human inbox, deduplicated across dispatches, queues and convoys. Returns at most 200 entries and reports truncation and deliberate exclusions.",
+    objectSchema({
+      limit: {
+        type: "integer",
+        minimum: 0,
+        description: "Maximum entries to return; values above 200 are clamped.",
+      },
+    }),
+    true,
+  ),
+  tool(
+    "atelier_recovery",
+    "Atelier Recovery Centre",
+    "Read bounded recovery conditions over existing durable and in-memory state. Returns at most 200 conditions; deep performs an expensive on-demand worktree and process scan and is false by default.",
+    objectSchema({
+      limit: {
+        type: "integer",
+        minimum: 0,
+        description: "Maximum conditions to return; values above 200 are clamped.",
+      },
+      deep: {
+        type: "boolean",
+        default: false,
+        description: "Run the expensive on-demand deep recovery scan.",
+      },
+    }),
+    true,
+  ),
+  tool(
+    "atelier_resources",
+    "Atelier Resource Usage",
+    "Read bounded and freshness-labelled worktree, process and log measurements. deep performs an expensive on-demand recursive size scan and is false by default.",
+    objectSchema({
+      deep: {
+        type: "boolean",
+        default: false,
+        description: "Run the expensive on-demand recursive resource scan.",
+      },
+    }),
+    true,
+  ),
+  tool(
     "atelier_ticket_create",
     "Create Atelier Ticket",
     "Create a ticket in a project's configured tracker.",
@@ -997,6 +1041,21 @@ async function invokeTool(client, name, args) {
         (args.project === undefined || convoy.project === args.project) &&
         (args.id === undefined || convoy.id === args.id)
       );
+    }
+    case "atelier_attention": {
+      const query = args.limit === undefined ? "" : `?limit=${args.limit}`;
+      return client.json(`/api/attention${query}`);
+    }
+    case "atelier_recovery": {
+      const query = new URLSearchParams(withoutUndefined({
+        limit: args.limit === undefined ? undefined : String(args.limit),
+        deep: args.deep === true ? "1" : undefined,
+      }));
+      const suffix = query.size > 0 ? `?${query}` : "";
+      return client.json(`/api/recovery${suffix}`);
+    }
+    case "atelier_resources": {
+      return client.json(`/api/resources${args.deep === true ? "?deep=1" : ""}`);
     }
     case "atelier_ticket_create": {
       return client.json(`/api/projects/${encoded(args.project)}/create`, {

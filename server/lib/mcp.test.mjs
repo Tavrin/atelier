@@ -139,6 +139,46 @@ test("MCP tool inventory and annotations match the shared agent/UI parity manife
   }
 });
 
+test("Wave 1B projection tools are present and read-only", () => {
+  for (const name of ["atelier_attention", "atelier_recovery", "atelier_resources"]) {
+    const projection = MCP_TOOLS.find((tool) => tool.name === name);
+    assert.ok(projection, `${name} is missing`);
+    assert.equal(projection.annotations.readOnlyHint, true);
+    assert.equal(projection.annotations.destructiveHint, false);
+  }
+});
+
+test("Wave 1B projection tools return their corresponding route payloads", async () => {
+  const requests = [];
+  const responses = await exchange(handshake(
+    toolCall(2, "atelier_attention", { limit: 12 }),
+    toolCall(3, "atelier_recovery", { limit: 5, deep: true }),
+    toolCall(4, "atelier_resources", { deep: true }),
+  ), async (url, options) => {
+    requests.push({ url, options });
+    const target = new URL(url);
+    return new Response(JSON.stringify({ route: `${target.pathname}${target.search}` }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  assert.deepEqual(requests.map(({ url, options }) => ({
+    route: `${new URL(url).pathname}${new URL(url).search}`,
+    method: options.method,
+  })), [
+    { route: "/api/attention?limit=12", method: "GET" },
+    { route: "/api/recovery?limit=5&deep=1", method: "GET" },
+    { route: "/api/resources?deep=1", method: "GET" },
+  ]);
+  assert.deepEqual(responses.slice(1).map((response) =>
+    JSON.parse(response.result.content[0].text)), [
+    { route: "/api/attention?limit=12" },
+    { route: "/api/recovery?limit=5&deep=1" },
+    { route: "/api/resources?deep=1" },
+  ]);
+});
+
 test("atelier_settings_patch fields schema covers every MUTABLE_SETTINGS key (atelier-def anti-drift)", async () => {
   const responses = await exchange(handshake({
     jsonrpc: "2.0",
