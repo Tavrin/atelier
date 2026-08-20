@@ -278,6 +278,33 @@ export async function createGoldenHarness(t, {
         }
       }
 
+      // Let post-merge work finish before killing the daemon.
+      //
+      // A MERGED record is deliberately skipped by the dismiss loop above, but a
+      // merge spawns a SECOND, post-merge verification worktree whose removal
+      // happens after the merge response has already returned. SIGTERMing the
+      // daemon while that is in flight truncates the removal, and the assertion
+      // below then reports "leaked a dispatch worktree, 2 !== 1" - the harness
+      // blaming Atelier for a shutdown the harness itself cut short. Measured at
+      // roughly 1 in 10 CI runs (atelier-h2g) and never reproduced locally.
+      //
+      // Bounded, and deliberately NOT fatal on timeout: if post-merge work is
+      // genuinely stuck, the leak assertions below should be the thing that says
+      // so, rather than this wait masking it with a different error.
+      if (daemon && processExists(daemon.pid)) {
+        const settleDeadline = Date.now() + 15_000;
+        while (Date.now() < settleDeadline) {
+          const pending = await rawApi("/api/dispatches").then(
+            ({ value }) => (Array.isArray(value) ? value : []).some(
+              (record) => record?.postMerge?.worktreePath,
+            ),
+            () => false,
+          );
+          if (!pending) break;
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        }
+      }
+
       const scenarioPids = await childPids();
       for (const pid of scenarioPids) await terminatePid(pid);
 
