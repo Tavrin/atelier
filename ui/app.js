@@ -31,6 +31,7 @@ import {
 import {
   timelineEvidenceHref,
   timelineGroups,
+  timelineLinkHref,
   timelineStageLabel,
 } from "./timeline-view.mjs";
 import {
@@ -6852,6 +6853,12 @@ function renderTimelineStep(item) {
         element("strong", "", `${link.relation || "relationship"} [${link.proof || "unknown"}]`),
         document.createTextNode(` — ${link.detail || "No relationship detail reported."}`),
       );
+      const targetHref = timelineLinkHref(link);
+      if (targetHref) {
+        const target = element("a", "", String(link.to.id));
+        target.href = targetHref;
+        row.append(document.createTextNode(" Target: "), target);
+      }
       links.append(row);
     }
     card.append(links);

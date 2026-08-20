@@ -9,6 +9,7 @@ import { RECOVERY_ACTIONS } from "./recovery.mjs";
 import {
   TIMELINE_COVERAGE,
   TIMELINE_LIMIT,
+  TIMELINE_LIMITS,
   TIMELINE_PROOFS,
   TIMELINE_STAGES,
   dispatchTimelineFor,
@@ -160,6 +161,52 @@ const journeys = [
   },
 ];
 
+const linkageFixtures = [
+  {
+    name: "convoy pair",
+    input: input([
+      record("convoy-a", { ticketId: "convoy-ticket-a", batchId: "convoy-1", batchKind: "convoy" }),
+      record("convoy-b", { ticketId: "convoy-ticket-b", batchId: "convoy-1", batchKind: "convoy" }),
+    ], {
+      convoys: [{
+        id: "convoy-1",
+        currentDispatchId: "convoy-b",
+        ticketIds: ["convoy-ticket-a", "convoy-ticket-b"],
+      }],
+    }),
+  },
+  {
+    name: "bakeoff batch",
+    input: input([
+      record("bakeoff-a", { batchId: "bakeoff-1", batchKind: "bakeoff" }),
+      record("bakeoff-b", { batchId: "bakeoff-1", batchKind: "bakeoff" }),
+    ]),
+  },
+  {
+    name: "parked queue ticket",
+    input: input([record("parked", { ticketId: "ticket-parked" })], {
+      queues: [{
+        project: "fixture",
+        queue: {
+          parkedTickets: [{ ticketId: "ticket-parked", lastDispatchId: "parked" }],
+        },
+      }],
+    }),
+  },
+  {
+    name: "batch without kind",
+    input: input([
+      record("batch-a", { batchId: "batch-1", batchKind: null }),
+      record("batch-b", { batchId: "batch-1", batchKind: null }),
+    ]),
+  },
+];
+
+const projectionFixtures = [
+  ...journeys.map(({ name, input: fixtureInput }) => ({ name, input: fixtureInput })),
+  ...linkageFixtures,
+];
+
 for (const journey of journeys) {
   test(`operator journey: ${journey.name}`, () => {
     const result = timelineFor(journey.input, { now: NOW });
@@ -210,7 +257,7 @@ test("attention and recovery evidence reaches the record and event stream that j
   }
 });
 
-test("no-fabrication canary keeps shared ticket, branch and adjacent time non-causal", () => {
+test("no-fabrication canary covers every dangerous sibling branch", () => {
   const records = [
     record("first", {
       ticketId: "ticket-shared",
@@ -231,13 +278,45 @@ test("no-fabrication canary keeps shared ticket, branch and adjacent time non-ca
   assert.ok(links.every((link) => /not causal/i.test(link.detail)));
   assert.equal(links.some((link) =>
     ["containment", "stored-identifier", "content-identity"].includes(link.proof)), false);
+
+  for (const link of links) {
+    assert.deepEqual(link.evidence.map(({ kind }) => kind), [
+      "dispatch-record",
+      "dispatch-events",
+    ]);
+    assert.ok(link.evidence.every(({ http }) => http.includes(link.to.id)));
+  }
+
+  const projected = Object.fromEntries(linkageFixtures.map((fixture) => [
+    fixture.name,
+    timelineFor(fixture.input, { now: NOW }),
+  ]));
+  const convoyLinks = projected["convoy pair"].items.flatMap((item) => item.links)
+    .filter(({ relation }) => relation === "convoy-member");
+  assert.equal(convoyLinks.length, 2);
+  assert.ok(convoyLinks.every(({ proof }) => proof === "stored-identifier"));
+  assert.equal(projected["convoy pair"].items.some((item) =>
+    item.unknown.some((unknown) => /past membership is unknown/.test(unknown))), false);
+
+  const bakeoffLinks = projected["bakeoff batch"].items.flatMap((item) => item.links)
+    .filter(({ relation }) => relation === "bakeoff-sibling");
+  assert.equal(bakeoffLinks.length, 2);
+  assert.ok(bakeoffLinks.every(({ proof }) => proof === "stored-identifier"));
+
+  assert.ok(projected["parked queue ticket"].items.flatMap((item) => item.links)
+    .some(({ relation, proof }) => relation === "queue-last-dispatch" && proof === "stored-identifier"));
+
+  const sameBatchLinks = projected["batch without kind"].items.flatMap((item) => item.links)
+    .filter(({ relation }) => relation === "same-batch");
+  assert.equal(sameBatchLinks.length, 2);
+  assert.ok(sameBatchLinks.every(({ detail }) => /no more specific batch relationship/.test(detail)));
 });
 
-test("every journey link uses the closed proof vocabulary", () => {
-  for (const journey of journeys) {
-    for (const item of timelineFor(journey.input, { now: NOW }).items) {
+test("every fixture link uses the closed proof vocabulary", () => {
+  for (const fixture of projectionFixtures) {
+    for (const item of timelineFor(fixture.input, { now: NOW }).items) {
       for (const link of item.links) {
-        assert.equal(Object.hasOwn(TIMELINE_PROOFS, link.proof), true, link.proof);
+        assert.equal(Object.hasOwn(TIMELINE_PROOFS, link.proof), true, `${fixture.name}: ${link.proof}`);
       }
     }
   }
@@ -290,16 +369,113 @@ test("projection is pure by construction and does not admit hidden probe depende
   assert.match(source, /recoveryFor\(/);
 });
 
-test("timeline is bounded, reports full counts, and clamps over-limit callers", () => {
+test("timeline bounds construction and clamps over-limit callers", () => {
   const records = Array.from({ length: TIMELINE_LIMIT + 1 }, (_, index) =>
     record(`dispatch-${String(index).padStart(3, "0")}`));
   const result = timelineFor(input(records), { now: NOW, limit: TIMELINE_LIMIT + 500 });
   assert.equal(result.items.length, TIMELINE_LIMIT);
-  assert.equal(result.counts.total, (TIMELINE_LIMIT + 1) * 2);
+  assert.equal(result.counts.total, TIMELINE_LIMIT * 2);
   assert.equal(result.truncated, true);
   const empty = timelineFor(input(records), { now: NOW, limit: 0 });
   assert.deepEqual(empty.items, []);
   assert.equal(empty.truncated, true);
+});
+
+test("timeline indexes siblings once and selects newest records before building steps", () => {
+  let ticketReads = 0;
+  const records = Array.from({ length: 300 }, (_, index) => {
+    const candidate = record(`dispatch-${String(index).padStart(3, "0")}`);
+    Object.defineProperty(candidate, "ticketId", {
+      enumerable: true,
+      get() {
+        ticketReads += 1;
+        return "shared-ticket";
+      },
+    });
+    return candidate;
+  });
+  const empty = timelineFor(input(records), { now: NOW, limit: 0 });
+  assert.deepEqual(empty.items, []);
+  assert.equal(empty.truncated, true);
+  assert.ok(ticketReads < records.length * 10, `ticketId read ${ticketReads} times`);
+
+  const newest = record("newest", { startedAt: "2026-08-20T11:00:00.000Z" });
+  const endedFallback = record("ended-fallback", {
+    startedAt: null,
+    endedAt: "2026-08-20T10:30:00.000Z",
+  });
+  const old = record("old", { startedAt: "2026-08-20T09:00:00.000Z" });
+  const bounded = timelineFor(input([old, endedFallback, newest]), { now: NOW, limit: 4 });
+  assert.deepEqual(bounded.items.map((item) => item.subject.id), [
+    "newest",
+    "newest",
+    "ended-fallback",
+    "ended-fallback",
+  ]);
+  assert.deepEqual(bounded.items.map((item) => item.stage), [
+    "work",
+    "execution",
+    "work",
+    "execution",
+  ]);
+});
+
+test("an attempt-less attestation never fabricates attempt-specific links", () => {
+  const legacy = record("legacy-attestation", {
+    result: { commit: "result-head" },
+    verify: {
+      state: "passed",
+      attempts: [
+        { attempt: 1, state: "failed", endedAt: "2026-08-20T10:03:00.000Z" },
+        { attempt: 2, state: "passed", endedAt: "2026-08-20T10:04:00.000Z" },
+      ],
+    },
+    attestation: { resultCommit: "result-head", resultTree: "tree-head" },
+    review: {
+      rounds: [{ round: 1, verdict: "pass", reviewedHead: "result-head" }],
+    },
+  });
+  const result = project([legacy]);
+  const relations = result.items.flatMap((item) => item.links.map((link) => link.relation));
+  assert.equal(relations.filter((relation) => relation === "verification-result").length, 0);
+  assert.equal(relations.filter((relation) => relation === "review-verification").length, 0);
+  assert.ok(result.items.flatMap((item) => item.unknown)
+    .some((unknown) => /does not record which verification attempt produced it/.test(unknown)));
+});
+
+test("a running top-level verification rerun is projected after its archived attempt", () => {
+  const result = project([record("rerun", {
+    state: "verifying",
+    verify: {
+      attempt: 2,
+      state: "running",
+      startedAt: "2026-08-20T10:04:00.000Z",
+      attempts: [{ attempt: 1, state: "failed", endedAt: "2026-08-20T10:03:00.000Z" }],
+    },
+  })]);
+  assert.deepEqual(result.items.filter(({ stage }) => stage === "verification")
+    .map(({ code, state }) => ({ code, state })), [
+    { code: "verification-attempt-1", state: "failed" },
+    { code: "verification-attempt-2", state: "pending" },
+  ]);
+});
+
+test("dispatch drill-down keeps target attention and recovery beyond unrelated inner limits", () => {
+  const unrelated = Array.from({ length: TIMELINE_LIMIT }, (_, index) => record(
+    `a-${String(index).padStart(3, "0")}`,
+    { state: "needs_input", outcome: { question: "Continue?" } },
+  ));
+  const target = record("z-target", {
+    state: "needs_input",
+    outcome: { question: "Repair?" },
+    mergeRecoveryPending: true,
+  });
+  const result = dispatchTimelineFor(input([...unrelated, target]), {
+    now: NOW,
+    dispatchId: "z-target",
+  });
+  assert.ok(result.items.some(({ stage }) => stage === "attention"));
+  assert.ok(result.items.some(({ stage }) => stage === "recovery"));
 });
 
 test("dispatch drill-down filters by stored id and returns null for an unknown id", () => {
@@ -318,6 +494,18 @@ test("vocabularies and coverage disclosures are frozen and MCP parity is read-on
   assert.ok(Object.values(TIMELINE_PROOFS).every(Object.isFrozen));
   assert.equal(Object.isFrozen(TIMELINE_COVERAGE), true);
   assert.ok(TIMELINE_COVERAGE.every(Object.isFrozen));
+  assert.equal(Object.isFrozen(TIMELINE_LIMITS), true);
+  assert.ok(TIMELINE_LIMITS.every(Object.isFrozen));
+  assert.deepEqual(TIMELINE_LIMITS.map(({ topic }) => topic), [
+    "full_history_read",
+    "credential_shaped_path_redaction",
+    "sibling_scan_cost",
+    "immutable_evidence_store",
+  ]);
+  assert.match(
+    TIMELINE_COVERAGE.find(({ relation }) => relation === "convoy-member").detail,
+    /Wave 1C adversarial review/,
+  );
   assert.deepEqual(
     [...new Set(TIMELINE_COVERAGE.map(({ proof }) => proof))].sort(),
     ["association", "containment", "content-identity", "stored-identifier", "unknown"],

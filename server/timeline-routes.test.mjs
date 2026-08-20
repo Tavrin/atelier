@@ -31,10 +31,18 @@ function boardEventsStub() {
 
 function dispatcherStub(records) {
   let gcCalls = 0;
+  let getCalls = 0;
+  let listCalls = 0;
   let persistenceCalls = 0;
   return {
-    list: () => records,
-    get: (id) => records.find((candidate) => candidate.id === id),
+    list() {
+      listCalls += 1;
+      return records;
+    },
+    get(id) {
+      getCalls += 1;
+      return records.find((candidate) => candidate.id === id);
+    },
     listConvoys: () => [],
     persistenceStatus() {
       persistenceCalls += 1;
@@ -45,7 +53,7 @@ function dispatcherStub(records) {
       throw new Error("timeline must not call gc");
     },
     onEvent() { return () => {}; },
-    counts: () => ({ gcCalls, persistenceCalls }),
+    counts: () => ({ gcCalls, getCalls, listCalls, persistenceCalls }),
   };
 }
 
@@ -105,21 +113,32 @@ test("timeline routes are authenticated bounded reads with an unknown-id 404", a
   assert.equal(index.body.items.length, TIMELINE_LIMIT);
   assert.equal(index.body.counts.total, 202);
   assert.equal(index.body.truncated, true);
+  assert.ok(index.body.limits.some(({ topic }) => topic === "full_history_read"));
 
   const empty = await send(port, "/api/timeline?limit=0", token);
   assert.equal(empty.status, 200);
   assert.deepEqual(empty.body.items, []);
   assert.equal(empty.body.truncated, true);
 
+  const beforeDrillDown = dispatcher.counts();
   const drillDown = await send(port, "/api/timeline/dispatch-000", token);
   assert.equal(drillDown.status, 200);
   assert.equal(drillDown.body.dispatchId, "dispatch-000");
   assert.deepEqual(drillDown.body.items.map(({ stage }) => stage), ["work", "execution"]);
+  const afterDrillDown = dispatcher.counts();
+  assert.equal(afterDrillDown.listCalls - beforeDrillDown.listCalls, 1);
+  assert.equal(afterDrillDown.getCalls - beforeDrillDown.getCalls, 0);
+  assert.equal(afterDrillDown.persistenceCalls - beforeDrillDown.persistenceCalls, 1);
 
   const missing = await send(port, "/api/timeline/missing", token);
   assert.equal(missing.status, 404);
   assert.match(missing.body.error, /Unknown dispatch: missing/);
-  assert.deepEqual(dispatcher.counts(), { gcCalls: 0, persistenceCalls: 3 });
+  assert.deepEqual(dispatcher.counts(), {
+    gcCalls: 0,
+    getCalls: 0,
+    listCalls: 5,
+    persistenceCalls: 3,
+  });
 });
 
 test("timeline limit validation matches the other bounded projections", async (t) => {
@@ -129,4 +148,11 @@ test("timeline limit validation matches the other bounded projections", async (t
     assert.equal(response.status, 400);
     assert.match(response.body.error, /limit must be a non-negative integer/);
   }
+});
+
+test("timeline drill-down returns 400 for malformed percent encoding", async (t) => {
+  const { port, token } = await fixture(t);
+  const response = await send(port, "/api/timeline/%", token);
+  assert.equal(response.status, 400);
+  assert.match(response.body.error, /Malformed timeline dispatch id/);
 });

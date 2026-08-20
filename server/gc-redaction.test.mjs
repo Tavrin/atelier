@@ -10,7 +10,7 @@ import {
   daemonBrokerDecision,
   DEFAULT_SANDBOX_BROKER_ALLOWLIST,
 } from "./lib/execution/daemon-broker.mjs";
-import { redactGcResult } from "./lib/recovery.mjs";
+import { RECOVERY_LIMITS, redactGcResult } from "./lib/recovery.mjs";
 import { REDACT_TEXT_PATTERNS } from "./lib/stream.mjs";
 import { createServer, listenLoopback } from "./server.mjs";
 
@@ -72,6 +72,7 @@ async function fixture(t, initialGcResult) {
     persistenceStatus: () => ({ degraded: false, targets: [] }),
     async gc(options = {}) {
       gcCalls.push(options);
+      if (gcResult instanceof Error) throw gcResult;
       return gcResult;
     },
   };
@@ -187,6 +188,47 @@ test("doctor GC output equals the Recovery Center's shared GC redaction", async 
 
   assert.equal(response.status, 200);
   assert.deepEqual(response.body, redactGcResult(rawResult));
+});
+
+test("GC failures redact credential-shaped messages on both routes without changing status", async (t) => {
+  const leaked = "sk-1234567890abcdef";
+  const error = new Error(`scan failed: ${leaked}`);
+  error.status = 503;
+  const state = await fixture(t, error);
+
+  const doctor = await requestJson(state.port, state.tokens.api, {
+    method: "POST",
+    path: "/api/doctor/gc",
+    body: { dryRun: true },
+  });
+  const recovery = await requestJson(state.port, state.tokens.api, {
+    path: "/api/recovery?deep=1",
+  });
+
+  for (const response of [doctor, recovery]) {
+    assert.equal(response.status, 503);
+    assert.equal(response.text.includes(leaked), false);
+    assert.match(response.body.error, /scan failed: \[redacted\]/);
+  }
+});
+
+test("credential-shaped orphan path segments are redacted on doctor and recovery surfaces", async (t) => {
+  const leaked = "sk-1234567890abcdef";
+  const state = await fixture(t, gcResultWithText(leaked));
+  const doctor = await requestJson(state.port, state.tokens.api, {
+    method: "POST",
+    path: "/api/doctor/gc",
+    body: { dryRun: true },
+  });
+  const recovery = await requestJson(state.port, state.tokens.api, {
+    path: "/api/recovery?deep=1",
+  });
+
+  assert.deepEqual(doctor.body.orphans, ["/tmp/atelier-worktrees/[redacted]/orphan"]);
+  assert.equal(JSON.stringify(recovery.body.deep).includes(leaked), false);
+  assert.match(JSON.stringify(recovery.body.deep), /atelier-worktrees\/\[redacted\]\/orphan/);
+  assert.ok(RECOVERY_LIMITS.some(({ topic, limit }) =>
+    topic === "deep_scan_structural_fields" && /path segment matching a credential shape/.test(limit)));
 });
 
 test("doctor GC preserves every actionable id, path, pid, and count byte-for-byte", async (t) => {
