@@ -720,8 +720,12 @@ convoy cursors: `~/.local/state/atelier/convoys.json`
 (in-memory Map is the live view; boot marks orphaned process-active work as failed and
 logs the count of terminal, non-merged records still available for dismissal).
 Registry: ~/.config/atelier/projects.json. Structured event log:
-append-only, size-rotated JSONL under ~/.local/state/atelier/logs/. Atelier's own
-development tracker: the committed .beads in this repo.
+append-only, size-rotated JSONL under ~/.local/state/atelier/logs/. Immutable
+evidence store: content-addressed write-once bodies and reference envelopes under
+~/.local/state/atelier/evidence/ (see EVIDENCE-STORE.md) - nothing reads it yet.
+Atelier's own development tracker: an Atelier-owned directory outside the
+repository. This repository ships no committed .beads, so the maintainer's
+backlog is machine-local rather than a repository fact a contributor can read.
 
 ## What Atelier deliberately is not
 

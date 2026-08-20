@@ -5,12 +5,16 @@ work on.**
 
 Atelier is the room you sit in while several coding agents work for you. It
 gives you one board across all your repositories, sends each piece of work into
-an isolated Git worktree, runs your real test suite before anything is allowed
-to merge, and lets you talk to a running agent mid-task instead of waiting for
-it to finish being wrong.
+its own Git worktree, runs your real test suite before anything is allowed to
+merge, and lets you talk to a running agent mid-task instead of waiting for it
+to finish being wrong.
 
-It runs entirely on your machine. Zero runtime dependencies, no build step, no
-account, no telemetry, and it binds to `127.0.0.1` only.
+Atelier itself runs entirely on your machine: zero runtime dependencies, no
+build step, no account, no telemetry, and it binds to `127.0.0.1` only. The
+agents it drives are a different matter — `claude` and `codex` are your own
+provider CLIs, under your own account, and they send your code to their provider
+like they do when you run them by hand. Atelier adds no telemetry of its own and
+takes no copy; what those CLIs transmit and retain is between you and them.
 
 ---
 
@@ -26,36 +30,55 @@ problem, and it fails in specific ways:
   killing the run and starting over.
 - Something merged, main broke, and there is **no record of why the decision was made**.
 
-Atelier's answer to each is structural rather than advisory: isolation by
-construction, verification computed from your own test suite, an append-only
-event log, and a merge that a human clicks.
+Atelier's answer to each is structural rather than advisory: a separate
+workspace per dispatch, verification computed from your own test suite, an
+append-only event log, and a merge gate that refuses work without proof.
 
 ## How a piece of work moves through it
 
 ```
-  ticket ──▶ dispatch ──▶ agent works ──▶ verify ──▶ review ──▶ you merge
-             │            in isolated     your real   optional   the only
-             │            git worktree    test suite  second     way work
-             │                                        opinion    reaches main
+  ticket ──▶ dispatch ──▶ agent works ──▶ verify ──▶ review ──▶ merge
+             │            in its own      your real   optional   gated on
+             │            git worktree    test suite  second     evidence,
+             │                                        opinion    not on a click
              └── you can reply mid-run, steering the session in place
 ```
 
 Every stage is a real state on a real record, and every transition is a line in
 a structured log you can read later.
 
-**Isolation.** Each dispatch gets its own Git worktree cut from a clean ref.
-Your primary checkout is never touched, so five agents can work on one
-repository at once without colliding.
+**Separate workspaces.** Each dispatch gets its own Git worktree cut from a
+clean ref, so five agents can work on one repository at once without colliding
+and without editing the files in your primary checkout.
+
+Be precise about what that is: it separates working trees, not processes, and it
+is where the agent is *directed* to work rather than a fence it is *held* inside.
+By default an agent runs as you, with your permissions, your home directory, your
+credentials and your network — Atelier calls this posture `trusted-local`, and
+its own code labels it *"no isolation"*. The worktrees share the repository's
+Git metadata, so `git worktree` and branch state are common. Real OS containment
+is a separate, opt-in trust profile that is Linux-only and, today, cannot be used
+with either shipped agent CLI. [SECURITY.md](docs/SECURITY.md) has the full
+matrix and a blunt section on what the default does not protect; read it before
+pointing Atelier at anything you would not hand to the agent directly.
 
 **Verification is computed, never claimed.** When an agent finishes, Atelier
-runs the verification commands *you* configured for that project, in that
-worktree, and records the exit codes. An agent saying "all tests pass" changes
-nothing. A dispatch that produced no diff is recorded as `empty`, which is a
-distinct state from success and from failure — an agent that stopped to ask a
-question has not failed.
+runs the verification commands *you* configured for that project and records the
+exit codes. An agent saying "all tests pass" changes nothing. Normally this runs
+against a fresh detached checkout of the finalized result commit, and a passing
+run produces an attestation bound to that exact commit and tree. A dispatch that
+produced no diff is recorded as `empty`, which is a distinct state from success
+and from failure — an agent that stopped to ask a question has not failed.
 
-**Merging is a human act.** Nothing reaches your main branch without a click,
-and the merge gate refuses dispatches that are unverified, empty, or stale.
+**The merge gate wants evidence, not a click.** An ordinary merge is refused
+unless there is a finalized result, an attestation bound to it, and a branch head
+that still matches both; empty dispatches can never merge. Two things follow that
+the word "gate" can hide. First, an ordinary merge is a normal capability, so an
+agent operating Atelier over MCP can perform one — what a human holds exclusively
+is *override* authority, not merge authority. Second, those evidence checks can
+be bypassed, but only by consuming a break-glass token that a human mints in the
+browser, bound to one dispatch and one commit, single-use, expiring, and written
+to the audit log.
 
 **Live steering.** A running agent can be replied to. The reply is queued into
 the same session, in the same worktree, and the transcript continues where it
@@ -65,12 +88,15 @@ was — you correct the course instead of restarting it.
 
 | | |
 |---|---|
-| **Node.js** | 18 or newer. Nothing else to install — Atelier's runtime is Node's standard library |
+| **Node.js** | 22 or newer (`engines` requires `>=22.0.0`; CI runs 22.x and 24.x). Nothing else to install — Atelier's runtime is Node's standard library |
 | **Git** | Any modern version, with worktree support |
 | **[`br`](https://github.com/Dicklesworthstone/beads_rust)** | The tracker CLI (a Rust port of [Steve Yegge's Beads](https://github.com/steveyegge/beads)). Install with `cargo install --git https://github.com/Dicklesworthstone/beads_rust.git beads_rust --locked`, or the project's [install script](https://github.com/Dicklesworthstone/beads_rust/blob/main/docs/INSTALLING.md) |
 | **An agent CLI** | At least one of [Claude Code](https://claude.com/claude-code) (`claude`) or [Codex](https://github.com/openai/codex) (`codex`) |
 
-Linux is the developed-against platform and macOS should work. The code is
+Linux is the developed-against platform and the only one any CI job runs on.
+macOS is expected to work for the ordinary foreground workflow but is not
+verified end to end, and two things are known to be missing there: service
+installation is refused on Darwin, and no sandbox backend exists. The code is
 written to be Windows-portable, but Windows has **not** been verified end to
 end — [`docs/WINDOWS.md`](docs/WINDOWS.md) is the checklist for closing that
 gap, and working through it is a genuinely useful contribution.
@@ -118,9 +144,11 @@ genuinely different capabilities (Codex, for instance, cannot be steered
 mid-run and does not report its cost), and Atelier models those differences
 explicitly rather than pretending they are interchangeable.
 
-**Verification.** Project-configured commands run in the dispatch worktree
-after the agent exits. This is the gate, and it is the environment's verdict,
-not the agent's.
+**Verification.** Project-configured commands run after the agent exits —
+normally against a detached checkout of the finalized result commit, and in the
+dispatch worktree only in the pre-finalization case that cannot produce a
+mergeable attestation. This is the gate, and it is the environment's verdict, not
+the agent's.
 
 **Review.** An optional adversarial second pass over the diff, with recorded
 dispositions — what you accepted, what you refuted, and why.
@@ -138,9 +166,13 @@ Atelier exposes the same capabilities three ways, deliberately:
 - **[MCP](docs/MCP.md)** — `atelier mcp` bridges MCP-capable agents to the
   running cockpit over loopback, so an agent can operate the board itself.
 
-Agents get full control through MCP, not a reduced subset. Oversight comes from
-gates that bind everyone equally — budget caps, the verification gate, the human
-merge click — never from hiding capabilities from the agent.
+Agents get the working surface through MCP rather than a reduced subset of it,
+including ordinary gated merges. Oversight comes from gates that bind everyone
+equally — budget caps, the verification gate, the attestation checks — never from
+hiding ordinary capabilities from the agent. The deliberate exceptions are the
+powers that *weaken* those gates: minting a break-glass token and forcing a merge
+require a human browser session and are refused to automation credentials
+outright. That is human root authority, not capability asymmetry.
 
 ## Themes
 
@@ -155,7 +187,24 @@ exists. See the [theme author handbook](docs/THEMES.md).
 ## Security boundaries
 
 Atelier runs agents that execute code on your machine, so its boundaries are
-deliberate and documented in [SECURITY.md](docs/SECURITY.md):
+deliberate and documented in [SECURITY.md](docs/SECURITY.md). The most important
+one to understand before you start:
+
+**The default posture is `trusted-local`: no OS containment.** A dispatched agent
+runs as your user, with your files, your credentials and your network. The
+worktree is where it works, not a sandbox it is confined to, and the verification
+and merge gates are controls over Atelier's own workflow rather than a fence
+around the agent — they give you evidence about work that came through Atelier's
+path, not a defence against a process that goes around it. Atelier does implement
+enforced confinement — namespace isolation with the user's home
+and `/tmp` masked, network unshared, and daemon access narrowed to an allowlisted
+unix socket — but it is Linux-only, `bwrap` is the only backend that actually
+wraps a process, and it denies network, so neither shipped agent CLI can run
+under it today. Both declare that they need their provider's remote API, and
+Atelier refuses that combination rather than pretending to confine it. In
+practice, every dispatch of `claude` or `codex` today runs `trusted-local`.
+
+The boundaries that ARE enforced on every install:
 
 - Binds `127.0.0.1` explicitly and authenticates local API clients with a
   state-directory bearer or signed browser session. Remote exposure remains unsupported.
@@ -164,16 +213,25 @@ deliberate and documented in [SECURITY.md](docs/SECURITY.md):
 - The HTTP core enforces a JSON content-type gate, a 256 KB body cap, and
   leading-dash argument rejection.
 - Secret-shaped environment variables (including `ANTHROPIC_API_KEY` and
-  `OPENAI_API_KEY`) are stripped from dispatch environments, and secrets are
-  redacted from events before they are emitted or persisted.
+  `OPENAI_API_KEY`) are stripped from dispatch environments, and credential-shaped
+  values are redacted at write time — before an event is persisted or streamed,
+  never at read time. Both mechanisms are pattern denylists doing real work, not
+  proofs of absence: an unknown format, an encoded value, a short token or a
+  secret split across events can pass through. Treat dispatch records, the event
+  log and UI output as sensitive.
 
 ## Status
 
 Atelier is **working software in active single-maintainer use**, not a 1.0. Be
 aware that:
 
-- Authentication is local and single-user; it is not a remote-access design.
-- Windows support is written for but not verified end to end.
+- Authentication is local and single-user; it is not a remote-access design, and
+  it does not defend against another process running as the same OS user.
+- Agent execution is `trusted-local` by default, and the sandboxed profiles
+  cannot currently be used with the shipped agent CLIs (see above).
+- Secret redaction is a best-effort pattern denylist, not a guarantee. Treat
+  dispatch records, the event log, and UI output as sensitive.
+- macOS is unverified; Windows support is written for but not verified end to end.
 - The `cozy-village` theme's optional Moss WebGPU renderer is a preview build
   and is opt-in; the default renderer is three.js.
 - The API surface may still change between versions.
@@ -210,9 +268,12 @@ Security issues go through [private reporting](SECURITY.md), not public issues.
 
 [MIT](LICENSE).
 
-The `cozy-village` theme vendors two MIT-licensed libraries in-repo, frozen,
-with provenance and SHA-256 manifests recorded next to them:
-[three.js](https://threejs.org), and a preview build of the Moss web renderer —
-a WebGPU engine by the same author, which is **not currently public**, so that
-vendored copy cannot be checked against its upstream source. Its MIT license is
-included verbatim alongside it.
+The `cozy-village` theme vendors two MIT-licensed libraries in-repo, frozen.
+The preview build of the Moss web renderer — a WebGPU engine by the same author,
+which is **not currently public**, so that vendored copy cannot be checked
+against its upstream source — carries its MIT license verbatim and a `VENDOR.md`
+recording provenance and hashes, including an explicit note about which formal
+package evidence was not regenerated. [three.js](https://threejs.org) is frozen
+at the revision named in its file header and carries its SPDX license header, but
+has no adjacent provenance or SHA-256 manifest; adding one is a welcome
+contribution.
