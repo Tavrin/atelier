@@ -61,8 +61,19 @@ test("golden production path onboards, dispatches, verifies, and merges fake-age
   const harness = await createGoldenHarness(t, { scenario: committedScenario() });
   const admitted = await harness.dispatch({ prompt: "implement the golden result" });
   const completed = await harness.waitRecord(admitted.id);
-  assert.equal(completed.state, "completed");
-  assert.equal(completed.verify.state, "passed");
+  // waitRecord resolves on ANY terminal state, so a run that lands on failed or
+  // completed_empty arrives here and produces a bare string mismatch with none of
+  // the reason attached. This test flaked once in nine observed CI runs (~11%)
+  // and never locally, and that failure told us only its own name - so carry the
+  // record's own account of what happened into the message.
+  const why = () => JSON.stringify({
+    state: completed.state,
+    exitSummary: completed.exitSummary,
+    verify: completed.verify,
+    warnings: completed.warnings,
+  });
+  assert.equal(completed.state, "completed", `dispatch did not complete: ${why()}`);
+  assert.equal(completed.verify.state, "passed", `verification did not pass: ${why()}`);
 
   const merged = await harness.api(`/api/dispatch/${admitted.id}/merge`, {
     method: "POST",
