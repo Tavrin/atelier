@@ -171,7 +171,13 @@ for (const entry of environmental) process.stdout.write(`  OBSERVED  ${entry.id}
 process.stdout.write(`report written to ${OUT}\n`);
 
 if (!suitePassed) {
-  process.stdout.write("\nthe golden suite did not pass, so this report describes a failed run\n");
+  // Print WHY. A leak report that says "the suite failed" without the failure is
+  // a dead end for whoever reads the job log, and the standalone golden job
+  // passing the same suite makes the difference the interesting part.
+  process.stdout.write(
+    `\nthe golden suite did not pass (exit ${run.status}), so this report describes a failed run\n`,
+  );
+  process.stdout.write(`--- golden suite output (tail) ---\n${suiteOutput.slice(-4000)}\n`);
   process.exit(1);
 }
 process.exit(leaked.length === 0 && tempLeaked.length === 0 ? 0 : 1);
