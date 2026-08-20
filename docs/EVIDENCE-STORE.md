@@ -23,22 +23,29 @@ Schema version 1 envelopes have exactly this shape:
 
 `type` and attribute keys match `/^[a-z][a-z0-9._-]{0,63}$/`.
 `attributes` is a flat plain object with at most 32 keys. Each value is `null`,
-a boolean, a finite number, or a string no longer than 512 characters. Nested
-values, non-finite numbers, arrays, and other objects are rejected rather than
-silently normalized. `provenanceRefs` contains at most 32 unique syntactically
-valid envelope ids; its order is meaningful and preserved. The canonical
-serialized envelope is limited to 16 KiB.
+a boolean, a finite number other than `-0`, or a string no longer than 512
+characters. Nested values, `-0`, non-finite numbers, arrays, and other objects
+are rejected rather than silently normalized. `provenanceRefs` contains at most
+32 unique syntactically valid envelope ids; its order is meaningful and
+preserved. The canonical serialized envelope is limited to 16 KiB. Reads stat
+the stored envelope and reject anything larger with
+`EVIDENCE_ENVELOPE_TOO_LARGE` before loading its bytes.
 
 A `null` `contentDigest` means the envelope is a pure marker with no body. An
 empty body is different: it has the SHA-256 digest of zero bytes and can be read
 back as a zero-length `Buffer`. Bodies default to an 8 MiB limit and are
 rejected before any filesystem write when they exceed the configured limit.
+Body reads and existing-object comparisons stat first and raise
+`EVIDENCE_BODY_TOO_LARGE` before loading bytes that exceed the same configured
+limit.
 
 ## Storage layout
 
-The store is rooted at `join(stateDir, "evidence")`, where `stateDir` follows
-Atelier's XDG/Windows rules and `ATELIER_STATE_DIR` override unless explicitly
-passed to `createEvidenceStore`.
+The store is rooted at `join(resolve(stateDir), "evidence")`, where `stateDir`
+follows Atelier's XDG/Windows rules and `ATELIER_STATE_DIR` override unless
+explicitly passed to `createEvidenceStore`. A relative `stateDir` is resolved
+against the current working directory once, when the handle is constructed;
+later working-directory changes cannot redirect that handle.
 
 ```text
 evidence/
@@ -50,7 +57,12 @@ Directories are created lazily and on demand with mode `0700`; object and
 envelope files use mode `0600`. The two-character shards bound directory
 fan-out. Every path component derived from an id or digest is sliced only after
 the complete caller- or envelope-supplied string passes its strict regular
-expression. Reads refuse symlinks and non-regular files.
+expression. Before a shard is used for a read or write, every existing
+store-owned directory component from `evidence/` through that shard is checked
+with `lstat` and must be a real directory, not a symlink. Final reads also
+refuse symlinks and non-regular files. These checks raise the cost of a
+same-user redirection attack; they do not eliminate it, because another process
+running as the owner can race the checks or rewrite state the owner controls.
 
 ## Identity and canonical serialization
 
@@ -69,7 +81,9 @@ ev1_ + sha256hex(canonicalJson({
 Canonical JSON sorts object keys by JavaScript code unit, emits no whitespace,
 uses `JSON.stringify` rules for strings and finite numbers, and rejects values
 JSON would silently discard: `undefined`, functions, symbols, non-finite
-numbers, `BigInt`, cycles, and non-plain objects. Array order is retained.
+numbers, `BigInt`, cycles, and non-plain objects. Attribute validation also
+rejects `-0`, whose JSON spelling would otherwise collide with `0`. Array order
+is retained.
 
 Minting the same semantic fields twice therefore produces the same id. If the
 canonical envelope and any body already exist intact, the second mint is an
@@ -94,12 +108,15 @@ Verification is not circular:
    the reference the caller supplied.
 
 `read` parses and validates the exact v1 shape, recomputes the identity from the
-envelope fields, and compares both the recomputed id and the embedded id with
-the requested id. This is the load-bearing check. `readBody` first performs
-that envelope verification, then hashes the no-follow body read and compares it
-with `contentDigest`. Any malformed data, mismatch, unsupported schema, or
-unsafe file fails closed with a typed error; no read repairs data, returns
-`null`, or falls back to unverified content.
+envelope fields, compares both the recomputed id and the embedded id with the
+requested id, and requires the stored bytes to equal the canonical serialization
+exactly. Semantically equivalent but reformatted, key-reordered, escaped, or
+duplicate-key JSON is therefore `EVIDENCE_MALFORMED`. This is the load-bearing
+check. `readBody` first performs that envelope verification, then hashes the
+bounded no-follow body read and compares it with `contentDigest`. Any malformed
+data, mismatch, unsupported schema, or unsafe file fails closed with a typed
+error; no read repairs data, returns `null`, or falls back to unverified
+content.
 
 ## API
 
@@ -121,7 +138,10 @@ The returned frozen handle contains exactly:
 - `resolveProvenance(id)` returns one ordered result per direct reference:
   `{ ref, status: "resolved", type }` when present and valid, or
   `{ ref, status: "unknown" }` when absent. Unknown evidence is a normal state.
-  A present but corrupt reference still throws.
+  A present but corrupt reference still throws. `resolved` means only that this
+  store holds an identity-valid envelope for the reference; it says nothing
+  about the presence or integrity of that envelope's body. `readBody` makes the
+  body-presence and body-integrity assertion.
 - `paths` exposes `{ root, objects, envelopes }` for diagnostics and tests.
 
 All module-defined failures use `EvidenceStoreError` and an exported code from
@@ -130,13 +150,26 @@ the frozen `EVIDENCE_ERROR_CODES` map. Missing evidence is distinguishable as
 
 ## Write-once durability and crash behavior
 
-Bodies and envelopes are created exclusively and durably: create with
-`O_EXCL`/`O_NOFOLLOW`, correct the mode on the open descriptor, write, fsync,
-and then best-effort fsync the containing shard directory. Existing bodies are
-rehash-verified. An equal digest is an idempotent success; different bytes at
-the expected digest path are `EVIDENCE_CONFLICT`. Existing envelope bytes must
-equal the newly computed canonical bytes exactly or minting also fails with
-`EVIDENCE_CONFLICT`. No existing store file is overwritten.
+Bodies and envelopes are created through a temp-then-link sequence in the
+destination shard: create a unique temporary file with
+`O_EXCL`/`O_NOFOLLOW`, correct the mode on its open descriptor, write, fsync,
+close, atomically hard-link it to the final write-once path, remove the
+temporary name, and then best-effort fsync the shard directory. An existing
+final path makes the link fail with `EEXIST` and enters bounded idempotency
+verification. Existing bodies are rehash-verified. An equal digest is an
+idempotent success; complete different bytes at the expected digest path are
+`EVIDENCE_CONFLICT`. Existing envelope bytes must equal the newly computed
+canonical bytes exactly or minting also fails with `EVIDENCE_CONFLICT`. A
+strictly shorter mismatching final file left by the former direct-to-final
+writer is recognized as an interrupted write and replaced with the complete
+temp file; equal- or greater-length mismatches remain conflicts. No complete
+existing store file is overwritten.
+
+A crash during the new write sequence can leave at most an orphan temporary
+file in a shard, never a partial file at the final digest or envelope name.
+Normal success and failure paths attempt to remove their temporary file. A
+future collector should sweep stale temporary files; this package does not yet
+implement that garbage collection.
 
 Mint writes the body before the envelope. A crash after the body write and
 before envelope publication can leave an unreferenced immutable object. That is

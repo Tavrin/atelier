@@ -7,25 +7,27 @@
 // envelope id; and (5) nothing stored here is self-certifying. Reads must verify
 // both links against the caller's reference.
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   openSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   fsyncDirectoryBestEffort,
   readFileNoFollowSync,
-  writeFileExclusiveDurable,
 } from "./fs-integrity.mjs";
 import { ensureDir, stateDir as atelierStateDir } from "./paths.mjs";
 
@@ -71,9 +73,11 @@ const DEFAULT_FILE_OPS = Object.freeze({
   fchmodSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   openSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 });
 
@@ -170,6 +174,9 @@ function validateAttributes(
       throw evidenceError(code, `Invalid evidence attribute key: ${key}`);
     }
     const value = descriptor.value;
+    if (typeof value === "number" && Object.is(value, -0)) {
+      throw evidenceError(code, `Evidence attribute ${key} must not be -0`);
+    }
     const scalar =
       value === null ||
       typeof value === "boolean" ||
@@ -209,7 +216,7 @@ function bodyBuffer(body) {
   if (body === undefined) return undefined;
   if (typeof body === "string") return Buffer.from(body, "utf8");
   if (body instanceof Uint8Array) {
-    return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+    return Buffer.from(body);
   }
   throw evidenceError(
     EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
@@ -249,7 +256,7 @@ export function createEvidenceStore({
   }
 
   const ops = { ...DEFAULT_FILE_OPS, ...(fileOps || {}) };
-  const root = join(stateDir, "evidence");
+  const root = join(resolve(stateDir), "evidence");
   const objects = join(root, "objects", "sha256");
   const envelopes = join(root, "envelopes");
   const paths = Object.freeze({ root, objects, envelopes });
@@ -271,8 +278,51 @@ export function createEvidenceStore({
     return join(envelopes, hex.slice(0, 2), `${id}.json`);
   }
 
+  function inspectStoreDirectory(path, { allowMissing = false } = {}) {
+    let details;
+    try {
+      details = ops.lstatSync(path);
+    } catch (error) {
+      if (allowMissing && error?.code === "ENOENT") return false;
+      throw evidenceError(
+        EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
+        `Evidence store directory cannot be inspected safely: ${path}`,
+        error,
+      );
+    }
+    let isDirectory;
+    let isSymbolicLink;
+    try {
+      isDirectory = details.isDirectory();
+      isSymbolicLink = details.isSymbolicLink();
+    } catch (error) {
+      throw evidenceError(
+        EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
+        `Evidence store directory cannot be inspected safely: ${path}`,
+        error,
+      );
+    }
+    if (!isDirectory || isSymbolicLink) {
+      throw evidenceError(
+        EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
+        `Evidence store path is not a real directory: ${path}`,
+      );
+    }
+    return true;
+  }
+
   function ensurePrivateDirectory(path) {
-    ensureDir(path);
+    if (!inspectStoreDirectory(path, { allowMissing: true })) {
+      try {
+        ensureDir(path);
+      } catch (error) {
+        // A racing replacement is reported as an integrity failure, not as a
+        // platform-specific mkdir error.
+        inspectStoreDirectory(path);
+        throw error;
+      }
+    }
+    inspectStoreDirectory(path);
     if (process.platform !== "win32") ops.chmodSync(path, 0o700);
   }
 
@@ -289,68 +339,184 @@ export function createEvidenceStore({
     ensurePrivateDirectory(dirname(path));
   }
 
-  function safeRead(path, code, message) {
+  function guardObjectShard(path) {
+    for (const directory of [root, join(root, "objects"), objects, dirname(path)]) {
+      inspectStoreDirectory(directory, { allowMissing: true });
+    }
+  }
+
+  function guardEnvelopeShard(path) {
+    for (const directory of [root, envelopes, dirname(path)]) {
+      inspectStoreDirectory(directory, { allowMissing: true });
+    }
+  }
+
+  function boundedRead(path, { maxBytes, tooLargeCode, failureCode, failureMessage }) {
+    let details;
     try {
-      return readFileNoFollowSync(path, undefined, { fileOps: ops });
+      details = ops.lstatSync(path);
     } catch (error) {
       if (error instanceof EvidenceStoreError) throw error;
-      throw evidenceError(code, message, error);
+      throw evidenceError(failureCode, failureMessage, error);
     }
+    let isRegularFile;
+    try {
+      isRegularFile = details.isFile() && !details.isSymbolicLink();
+    } catch (error) {
+      throw evidenceError(failureCode, failureMessage, error);
+    }
+    if (!isRegularFile) {
+      throw evidenceError(failureCode, failureMessage);
+    }
+    if (typeof details.size !== "number" || details.size > maxBytes) {
+      throw evidenceError(
+        tooLargeCode,
+        `Evidence file exceeds the ${maxBytes}-byte read limit: ${path}`,
+      );
+    }
+    try {
+      return { bytes: readFileNoFollowSync(path, undefined, { fileOps: ops }), size: details.size };
+    } catch (error) {
+      if (error instanceof EvidenceStoreError) throw error;
+      throw evidenceError(failureCode, failureMessage, error);
+    }
+  }
+
+  function writeTempThenLink(path, contents, verifyExisting) {
+    const directory = dirname(path);
+    const temporary = join(
+      directory,
+      `.${basename(path)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
+    );
+    const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
+    let descriptor;
+    let result;
+    let failure;
+    try {
+      descriptor = ops.openSync(
+        temporary,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow,
+        0o600,
+      );
+      try {
+        ops.fchmodSync(descriptor, 0o600);
+        ops.writeFileSync(descriptor, contents, { encoding: "utf8" }, temporary);
+        ops.fsyncSync(descriptor);
+      } finally {
+        const openDescriptor = descriptor;
+        descriptor = undefined;
+        ops.closeSync(openDescriptor);
+      }
+      try {
+        ops.linkSync(temporary, path);
+        result = true;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        result = verifyExisting(temporary);
+      }
+    } catch (error) {
+      failure = error;
+    } finally {
+      if (descriptor !== undefined) {
+        try {
+          ops.closeSync(descriptor);
+        } catch (error) {
+          if (!failure) failure = error;
+        }
+      }
+      try {
+        ops.unlinkSync(temporary);
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !failure) failure = error;
+      }
+      fsyncDirectoryBestEffort(directory, { fileOps: ops });
+    }
+    if (failure) throw failure;
+    return result;
   }
 
   function writeBodyOnce(path, contents, expectedDigest) {
     prepareObjectShard(path);
-    try {
-      writeFileExclusiveDurable(path, contents, { mode: 0o600, fileOps: ops });
-      fsyncDirectoryBestEffort(dirname(path), { fileOps: ops });
-      return true;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      let existing;
-      try {
-        existing = readFileNoFollowSync(path, undefined, { fileOps: ops });
-      } catch (readError) {
-        throw evidenceError(
-          EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
-          `Existing evidence object cannot be verified: ${path}`,
-          readError,
-        );
+    return writeTempThenLink(path, contents, (temporary) => {
+      const existing = boundedRead(path, {
+        maxBytes: maxBodyBytes,
+        tooLargeCode: EVIDENCE_ERROR_CODES.EVIDENCE_BODY_TOO_LARGE,
+        failureCode: EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
+        failureMessage: `Existing evidence object cannot be verified: ${path}`,
+      });
+      if (`sha256:${sha256(existing.bytes)}` === expectedDigest) return false;
+
+      // The old direct-to-final writer could strand a strict prefix after a
+      // crash. A complete mismatching file remains an immutable conflict.
+      if (existing.size < contents.byteLength) {
+        try {
+          ops.unlinkSync(path);
+          ops.linkSync(temporary, path);
+          return true;
+        } catch (error) {
+          if (error?.code === "EEXIST") {
+            const raced = boundedRead(path, {
+              maxBytes: maxBodyBytes,
+              tooLargeCode: EVIDENCE_ERROR_CODES.EVIDENCE_BODY_TOO_LARGE,
+              failureCode: EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
+              failureMessage: `Existing evidence object cannot be verified: ${path}`,
+            });
+            if (`sha256:${sha256(raced.bytes)}` === expectedDigest) return false;
+          }
+          throw evidenceError(
+            EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
+            `Interrupted evidence object cannot be replaced safely: ${path}`,
+            error,
+          );
+        }
       }
-      if (`sha256:${sha256(existing)}` === expectedDigest) return false;
       throw evidenceError(
         EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
         `Existing evidence object conflicts with digest ${expectedDigest}`,
       );
-    }
+    });
   }
 
   function writeEnvelopeOnce(path, contents) {
     prepareEnvelopeShard(path);
-    try {
-      writeFileExclusiveDurable(path, contents, { mode: 0o600, fileOps: ops });
-      fsyncDirectoryBestEffort(dirname(path), { fileOps: ops });
-      return true;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      let existing;
-      try {
-        existing = readFileNoFollowSync(path, undefined, { fileOps: ops });
-      } catch (readError) {
-        throw evidenceError(
-          EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
-          `Existing evidence envelope cannot be verified: ${path}`,
-          readError,
-        );
+    return writeTempThenLink(path, contents, (temporary) => {
+      const existing = boundedRead(path, {
+        maxBytes: MAX_ENVELOPE_BYTES,
+        tooLargeCode: EVIDENCE_ERROR_CODES.EVIDENCE_ENVELOPE_TOO_LARGE,
+        failureCode: EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
+        failureMessage: `Existing evidence envelope cannot be verified: ${path}`,
+      });
+      if (existing.bytes.equals(contents)) return false;
+      if (existing.size < contents.byteLength) {
+        try {
+          ops.unlinkSync(path);
+          ops.linkSync(temporary, path);
+          return true;
+        } catch (error) {
+          if (error?.code === "EEXIST") {
+            const raced = boundedRead(path, {
+              maxBytes: MAX_ENVELOPE_BYTES,
+              tooLargeCode: EVIDENCE_ERROR_CODES.EVIDENCE_ENVELOPE_TOO_LARGE,
+              failureCode: EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
+              failureMessage: `Existing evidence envelope cannot be verified: ${path}`,
+            });
+            if (raced.bytes.equals(contents)) return false;
+          }
+          throw evidenceError(
+            EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
+            `Interrupted evidence envelope cannot be replaced safely: ${path}`,
+            error,
+          );
+        }
       }
-      if (existing.equals(contents)) return false;
       throw evidenceError(
         EVIDENCE_ERROR_CODES.EVIDENCE_CONFLICT,
         `Existing evidence envelope conflicts at ${path}`,
       );
-    }
+    });
   }
 
-  function validateStoredEnvelope(parsed, requestedId, byteLength) {
+  function validateStoredEnvelope(parsed, requestedId) {
     if (!isPlainObject(parsed)) {
       throw evidenceError(
         EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
@@ -377,10 +543,7 @@ export function createEvidenceStore({
       "schemaVersion",
       "type",
     ];
-    if (
-      Object.keys(parsed).sort().join("\0") !== expectedKeys.join("\0") ||
-      byteLength > MAX_ENVELOPE_BYTES
-    ) {
+    if (Object.keys(parsed).sort().join("\0") !== expectedKeys.join("\0")) {
       throw evidenceError(
         EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
         `Evidence envelope ${requestedId} has an invalid shape`,
@@ -393,7 +556,11 @@ export function createEvidenceStore({
       );
     }
     validateType(parsed.type, EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED);
-    if (parsed.contentDigest !== null && !DIGEST_PATTERN.test(parsed.contentDigest)) {
+    if (
+      parsed.contentDigest !== null &&
+      (typeof parsed.contentDigest !== "string" ||
+        !DIGEST_PATTERN.test(parsed.contentDigest))
+    ) {
       throw evidenceError(
         EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
         `Evidence envelope ${requestedId} contains an invalid content digest`,
@@ -464,23 +631,26 @@ export function createEvidenceStore({
   function read(id) {
     assertId(id);
     const path = envelopePath(id);
-    let bytes;
+    guardEnvelopeShard(path);
+    let stored;
     try {
-      bytes = readFileNoFollowSync(path, undefined, { fileOps: ops });
+      stored = boundedRead(path, {
+        maxBytes: MAX_ENVELOPE_BYTES,
+        tooLargeCode: EVIDENCE_ERROR_CODES.EVIDENCE_ENVELOPE_TOO_LARGE,
+        failureCode: EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
+        failureMessage: `Evidence envelope cannot be read safely: ${id}`,
+      });
     } catch (error) {
-      if (error?.code === "ENOENT") {
+      if (error?.cause?.code === "ENOENT") {
         throw evidenceError(
           EVIDENCE_ERROR_CODES.EVIDENCE_NOT_FOUND,
           `Evidence envelope not found: ${id}`,
-          error,
+          error.cause,
         );
       }
-      throw evidenceError(
-        EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
-        `Evidence envelope cannot be read safely: ${id}`,
-        error,
-      );
+      throw error;
     }
+    const { bytes } = stored;
     let parsed;
     try {
       parsed = JSON.parse(bytes.toString("utf8"));
@@ -491,7 +661,15 @@ export function createEvidenceStore({
         error,
       );
     }
-    return validateStoredEnvelope(parsed, id, bytes.byteLength);
+    const envelope = validateStoredEnvelope(parsed, id);
+    const canonicalBytes = Buffer.from(canonicalJson(envelope), "utf8");
+    if (!bytes.equals(canonicalBytes)) {
+      throw evidenceError(
+        EVIDENCE_ERROR_CODES.EVIDENCE_MALFORMED,
+        `Stored evidence envelope is not in canonical form: ${id}`,
+      );
+    }
+    return envelope;
   }
 
   function readBody(id) {
@@ -503,11 +681,13 @@ export function createEvidenceStore({
       );
     }
     const path = objectPath(envelope.contentDigest);
-    const body = safeRead(
-      path,
-      EVIDENCE_ERROR_CODES.EVIDENCE_DIGEST_MISMATCH,
-      `Evidence body cannot be read safely: ${id}`,
-    );
+    guardObjectShard(path);
+    const { bytes: body } = boundedRead(path, {
+      maxBytes: maxBodyBytes,
+      tooLargeCode: EVIDENCE_ERROR_CODES.EVIDENCE_BODY_TOO_LARGE,
+      failureCode: EVIDENCE_ERROR_CODES.EVIDENCE_DIGEST_MISMATCH,
+      failureMessage: `Evidence body cannot be read safely: ${id}`,
+    });
     if (`sha256:${sha256(body)}` !== envelope.contentDigest) {
       throw evidenceError(
         EVIDENCE_ERROR_CODES.EVIDENCE_DIGEST_MISMATCH,
@@ -518,7 +698,9 @@ export function createEvidenceStore({
   }
 
   function has(id) {
-    return ops.existsSync(envelopePath(assertId(id)));
+    const path = envelopePath(assertId(id));
+    guardEnvelopeShard(path);
+    return ops.existsSync(path);
   }
 
   function resolveProvenance(id) {
