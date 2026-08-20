@@ -70,6 +70,31 @@ const TERMINAL_STATES = new Set([
   "prepare_failed",
   "rejected",
 ]);
+const ATTENTION_ACTION_LABELS = Object.freeze({
+  reply: "Reply",
+  plan_approve: "Approve plan",
+  plan_revise: "Revise plan",
+  review: "Run review",
+  review_disposition: "Disposition findings",
+  verify_rerun: "Re-run verification",
+  merge: "Merge",
+  dismiss: "Dismiss",
+  main_health_ack: "Acknowledge main health failure",
+  queue_resume: "Resume queued ticket",
+  queue_enable: "Enable queue",
+  convoy_resume: "Resume convoy",
+  convoy_cancel: "Cancel convoy",
+  reply_accept_profile: "Accept execution profile and reply",
+});
+const RECOVERY_ACTION_DETAILS = Object.freeze({
+  merge: { label: "Merge", idempotent: "effect" },
+  dismiss: { label: "Dismiss", idempotent: "effect" },
+  reply: { label: "Reply and resume", idempotent: "no" },
+  verify_rerun: { label: "Rerun verification", idempotent: "state-refused" },
+  queue_resume: { label: "Resume queue ticket", idempotent: "state-refused" },
+  convoy_resume: { label: "Resume convoy", idempotent: "state-refused" },
+  doctor_gc: { label: "Run doctor GC", idempotent: "effect" },
+});
 
 const app = document.querySelector("#app");
 const sidebar = document.querySelector("#sidebar-nav");
@@ -845,6 +870,9 @@ function parseRoute(hash = location.hash) {
     }
     if (parts[0] === "styleguide") return { kind: "styleguide" };
     if (parts[0] === "logs") return { kind: "logs" };
+    if (parts[0] === "inbox") return { kind: "inbox" };
+    if (parts[0] === "recovery") return { kind: "recovery" };
+    if (parts[0] === "resources") return { kind: "resources" };
     if (parts[0] === "dispatches") return { kind: "dispatches" };
   } catch {
     return { kind: "not-found" };
@@ -858,6 +886,9 @@ function routeHref(route) {
   if (route.kind === "group") return `#/group/${encoded(route.name)}`;
   if (route.kind === "styleguide") return "#/styleguide";
   if (route.kind === "logs") return "#/logs";
+  if (route.kind === "inbox") return "#/inbox";
+  if (route.kind === "recovery") return "#/recovery";
+  if (route.kind === "resources") return "#/resources";
   return "#/dispatches";
 }
 
@@ -941,6 +972,23 @@ function renderSidebar() {
       { kind: "logs" },
       "Event log",
       (meta) => meta.append(element("span", "", "queue, dispatch, settings")),
+    ),
+  );
+  overview.list.append(
+    navLink(
+      { kind: "inbox" },
+      "Attention Inbox",
+      (meta) => meta.append(element("span", "", "needs a human")),
+    ),
+    navLink(
+      { kind: "recovery" },
+      "Recovery Centre",
+      (meta) => meta.append(element("span", "", "diagnose and act")),
+    ),
+    navLink(
+      { kind: "resources" },
+      "Resources",
+      (meta) => meta.append(element("span", "", "bounded measurements")),
     ),
   );
   fragment.append(overview.section);
@@ -4999,6 +5047,39 @@ function openDismissConfirmation(record, onConfirm) {
   body.append(actions);
 }
 
+function openDoctorGcConfirmation(onConfirm) {
+  const body = modalFrame("Recovery cleanup", "Run doctor GC?");
+  body.append(
+    element(
+      "p",
+      "confirm-copy",
+      "Atelier will run its existing recovery command and may dismiss stale records or remove orphaned worktrees that pass its safety checks.",
+    ),
+  );
+  const status = element("span", "form-status");
+  status.setAttribute("aria-live", "polite");
+  const cancel = button("Cancel");
+  const confirm = button("Run doctor GC", "button danger");
+  cancel.addEventListener("click", closeModal);
+  confirm.addEventListener("click", async () => {
+    cancel.disabled = true;
+    confirm.disabled = true;
+    status.textContent = "Running doctor GC…";
+    try {
+      await onConfirm();
+      closeModal();
+    } catch (error) {
+      status.textContent = error.message;
+      showToast(error.message);
+      cancel.disabled = false;
+      confirm.disabled = false;
+    }
+  });
+  const actions = element("div", "modal-actions");
+  actions.append(status, cancel, confirm);
+  body.append(actions);
+}
+
 function diffPathFromHeader(line) {
   const boundary = line.lastIndexOf(" b/");
   if (boundary === -1) return "Unknown file";
@@ -6533,6 +6614,342 @@ function renderNotFound(message = "This Atelier view does not exist") {
   );
 }
 
+function projectionSubjectLabel(subject = {}) {
+  const kind = String(subject.kind || "item").replaceAll("_", " ");
+  const id = subject.ticketId || subject.id || "unknown";
+  return `${kind}: ${id}`;
+}
+
+function projectionSubjectRoute(subject = {}, evidence = {}) {
+  const dispatchId = subject.kind === "dispatch" ? subject.id : evidence.dispatchId;
+  if (dispatchId) return { kind: "dispatch", id: dispatchId };
+  if (subject.project) return { kind: "project", name: subject.project };
+  return { kind: "dispatches" };
+}
+
+function projectionActionLink(label, subject, evidence) {
+  const link = element("a", "button compact", label);
+  link.href = routeHref(projectionSubjectRoute(subject, evidence));
+  return link;
+}
+
+async function renderInbox(_route, token) {
+  const payload = await api("/api/attention");
+  if (!viewIsCurrent(token)) return;
+  const fragment = document.createDocumentFragment();
+  fragment.append(viewHeader({
+    eyebrow: "Operator attention",
+    title: "Attention Inbox",
+    description: "One bounded, deduplicated view of the work that currently needs a human decision.",
+  }));
+  if (payload.truncated === true) {
+    fragment.append(banner(
+      `This inbox is truncated: showing ${payload.entries.length} of ${payload.counts?.total ?? "unknown"} entries.`,
+    ));
+  }
+  const entries = element("section", "projection-list");
+  for (const entry of payload.entries || []) {
+    const card = element("article", "summary-card projection-card");
+    const heading = element("div", "projection-heading");
+    heading.append(
+      element("h2", "", projectionSubjectLabel(entry.subject)),
+      badge(entry.severity || "unknown", `projection-severity ${entry.severity || "unknown"}`),
+    );
+    card.append(heading);
+    const reasons = element("ul", "projection-reasons");
+    for (const reason of entry.reasons || []) {
+      const item = element("li");
+      item.append(
+        element("strong", "", String(reason.code || "reason").replaceAll("_", " ")),
+        document.createTextNode(` — ${reason.detail || "No detail reported."}`),
+      );
+      reasons.append(item);
+    }
+    card.append(reasons);
+    if ((entry.actions || []).length > 0) {
+      const actions = element("div", "card-actions");
+      const evidence = (entry.reasons || []).find((reason) => reason.evidence?.dispatchId)
+        ?.evidence || {};
+      for (const action of entry.actions) {
+        actions.append(projectionActionLink(
+          ATTENTION_ACTION_LABELS[action] || String(action).replaceAll("_", " "),
+          entry.subject,
+          evidence,
+        ));
+      }
+      card.append(actions);
+    }
+    entries.append(card);
+  }
+  if (entries.childElementCount === 0) {
+    entries.append(element("p", "empty-state", "Nothing currently needs human attention."));
+  }
+  fragment.append(entries);
+  const excluded = element("details", "panel projection-details");
+  excluded.append(element("summary", "", "What the inbox deliberately does not show"));
+  const exclusions = element("ul", "projection-reasons");
+  for (const item of payload.excluded || []) {
+    const row = element("li");
+    row.append(
+      element("strong", "", String(item.condition || "condition").replaceAll("_", " ")),
+      document.createTextNode(` — ${item.reason || "No reason reported."}`),
+    );
+    exclusions.append(row);
+  }
+  excluded.append(exclusions);
+  fragment.append(excluded);
+  app.replaceChildren(fragment);
+}
+
+function recoveryConditions(payload) {
+  return [
+    ...(payload.conditions || []).map((condition) => ({ ...condition, scanTier: "routine" })),
+    ...(payload.deep?.conditions || []).map((condition) => ({ ...condition, scanTier: "deep" })),
+  ];
+}
+
+function renderRecoveryPayload(payload, reload) {
+  const fragment = document.createDocumentFragment();
+  const conditions = recoveryConditions(payload);
+  for (const severity of ["critical", "high", "medium", "low"]) {
+    const matching = conditions.filter((condition) => condition.severity === severity);
+    if (matching.length === 0) continue;
+    const group = element("section", "projection-group");
+    group.append(element("h2", "", `${severity[0].toUpperCase()}${severity.slice(1)} severity`));
+    const cards = element("div", "projection-list");
+    for (const condition of matching) {
+      const card = element("article", "summary-card projection-card");
+      const heading = element("div", "projection-heading");
+      heading.append(
+        element("h3", "", projectionSubjectLabel(condition.subject)),
+        badge(condition.code || "condition"),
+        badge(`${condition.scanTier} scan`),
+      );
+      card.append(heading, element("p", "", condition.detail || "No detail reported."));
+      if (condition.reportOnly) {
+        card.append(element("p", "projection-report-only", condition.reportOnly));
+      } else if ((condition.actions || []).length > 0) {
+        const actions = element("div", "card-actions");
+        for (const action of condition.actions) {
+          const details = RECOVERY_ACTION_DETAILS[action] || {
+            label: String(action).replaceAll("_", " "),
+            idempotent: "unknown",
+          };
+          let control;
+          if (action === "doctor_gc") {
+            control = button(details.label, "button compact");
+            control.addEventListener("click", () => {
+              openDoctorGcConfirmation(async () => {
+                await api("/api/doctor/gc", { method: "POST", body: {} });
+                await reload(true);
+              });
+            });
+          } else {
+            control = projectionActionLink(details.label, condition.subject, condition.evidence);
+          }
+          const wrapper = element("span", "projection-action");
+          wrapper.append(
+            control,
+            element("span", "projection-action-semantics", `Idempotence: ${details.idempotent}`),
+          );
+          actions.append(wrapper);
+        }
+        card.append(actions);
+      }
+      cards.append(card);
+    }
+    group.append(cards);
+    fragment.append(group);
+  }
+  if (conditions.length === 0) {
+    fragment.append(element("p", "empty-state", "No recovery conditions were reported."));
+  }
+  if (payload.truncated === true || payload.deep?.truncated === true) {
+    fragment.append(banner("Recovery results are truncated at their advertised limit."));
+  }
+  const limits = element("details", "panel projection-details");
+  limits.append(element("summary", "", "Recovery projection limits"));
+  const list = element("ul", "projection-reasons");
+  for (const item of payload.limits || []) {
+    const row = element("li");
+    row.append(
+      element("strong", "", String(item.topic || "limit").replaceAll("_", " ")),
+      document.createTextNode(` — ${item.limit || "No detail reported."}`),
+    );
+    list.append(row);
+  }
+  limits.append(list);
+  fragment.append(limits);
+  return fragment;
+}
+
+async function renderRecovery(_route, token) {
+  const deepScan = button("Run deep scan (expensive, on demand)", "button");
+  const host = element("div");
+  app.replaceChildren(
+    viewHeader({
+      eyebrow: "Recovery",
+      title: "Recovery Centre",
+      description: "Diagnose recovery debt and reach only the existing recovery controls.",
+      actions: [deepScan],
+    }),
+    host,
+  );
+
+  async function load(deep = false) {
+    deepScan.disabled = true;
+    deepScan.textContent = deep ? "Running expensive deep scan…" : "Loading…";
+    try {
+      const payload = await api(`/api/recovery${deep ? "?deep=1" : ""}`);
+      if (!viewIsCurrent(token)) return;
+      host.replaceChildren(renderRecoveryPayload(payload, load));
+    } finally {
+      if (viewIsCurrent(token)) {
+        deepScan.disabled = false;
+        deepScan.textContent = "Run deep scan (expensive, on demand)";
+      }
+    }
+  }
+  deepScan.addEventListener("click", () => void load(true));
+  await load();
+}
+
+function resourceMeasurementRows(payload) {
+  return [
+    ["logs.eventLog", payload.logs?.eventLog, 1, true],
+    ["logs.dispatchIndex", payload.logs?.dispatchIndex, 1, true],
+    ["logs.transcripts", payload.logs?.transcripts, 2, false],
+    ["logs.prompts", payload.logs?.prompts, 2, false],
+    ["logs.codexJobs", payload.logs?.codexJobs, 2, false],
+    ["logs.breakGlass", payload.logs?.breakGlass, 2, false],
+    ["logs.legacyCompanion", payload.logs?.legacyCompanion, 2, false],
+    ["worktrees.recordBackedCount", payload.worktrees?.recordBackedCount, 1, true],
+    ["worktrees.onDiskCount", payload.worktrees?.onDiskCount, 1, true],
+    ["worktrees.deepBytes", payload.worktrees?.deepBytes, 3, false],
+    ["processes.relevantCount", payload.processes?.relevantCount, 2, false],
+    ["processes.directRunners", payload.processes?.directRunners, 1, true],
+    ["evidence.deepBytes", payload.evidence?.deepBytes, 3, false],
+  ];
+}
+
+function resourceValue(measurement) {
+  if (!measurement) return "Not measured; run the expensive on-demand scan.";
+  if (measurement.supported === false) return "not measurable on this platform";
+  if (measurement.value === null) return measurement.detail || "Measurement unavailable.";
+  const value = typeof measurement.value === "number"
+    ? measurement.value.toLocaleString()
+    : String(measurement.value);
+  const withUnit = `${value}${measurement.unit ? ` ${measurement.unit}` : ""}`;
+  return measurement.truncated === true ? `at least ${withUnit}` : withUnit;
+}
+
+function renderResourcePayload(payload) {
+  const fragment = document.createDocumentFragment();
+  const measurements = element("div", "table-wrap");
+  const table = element("table", "data-table projection-table");
+  const head = element("thead");
+  const heading = element("tr");
+  for (const label of ["Measurement", "Value", "Tier", "Bounded", "Measured / age"]) {
+    heading.append(element("th", "", label));
+  }
+  head.append(heading);
+  const body = element("tbody");
+  for (const [name, measurement, fallbackTier, fallbackBounded] of resourceMeasurementRows(payload)) {
+    const row = element("tr");
+    const value = element("td", "", resourceValue(measurement));
+    if (measurement?.value !== null && measurement?.detail) {
+      value.append(element("span", "projection-detail", measurement.detail));
+    }
+    row.append(
+      element("td", "", name),
+      value,
+      element("td", "", `Tier ${measurement?.tier ?? fallbackTier}`),
+      element("td", "", (measurement?.bounded ?? fallbackBounded) ? "yes" : "no"),
+      element(
+        "td",
+        "",
+        measurement?.measuredAt
+          ? `${formatDate(measurement.measuredAt)} · ${formatDuration(measurement.ageMs)} old`
+          : "Not measured",
+      ),
+    );
+    body.append(row);
+  }
+  table.append(head, body);
+  measurements.append(table);
+  fragment.append(measurements);
+
+  const roots = element("details", "panel projection-details");
+  roots.append(element("summary", "", "Bounded worktree directory counts"));
+  const rootList = element("ul", "projection-reasons");
+  for (const root of payload.worktrees?.byRoot || []) {
+    rootList.append(element(
+      "li",
+      "",
+      `${root.root}: ${root.truncated === true ? "at least " : ""}${root.count ?? "unknown"}`,
+    ));
+  }
+  roots.append(rootList);
+  fragment.append(roots);
+
+  const costWrap = element("div", "table-wrap");
+  const costTable = element("table", "data-table projection-table");
+  const costHead = element("thead");
+  const costHeading = element("tr");
+  for (const label of ["Measurement", "Tier", "Bound", "Measured cost"]) {
+    costHeading.append(element("th", "", label));
+  }
+  costHead.append(costHeading);
+  const costBody = element("tbody");
+  for (const cost of payload.costModel || []) {
+    const row = element("tr");
+    row.append(
+      element("td", "", cost.key),
+      element("td", "", `Tier ${cost.tier}`),
+      element("td", "", cost.bound),
+      element("td", "", cost.measuredCost),
+    );
+    costBody.append(row);
+  }
+  costTable.append(costHead, costBody);
+  costWrap.append(costTable);
+  const costSection = element("section", "projection-group");
+  costSection.append(element("h2", "", "Resource cost model"), costWrap);
+  fragment.append(costSection);
+  return fragment;
+}
+
+async function renderResources(_route, token) {
+  const deepScan = button("Measure deep sizes (expensive, on demand)", "button");
+  const host = element("div");
+  app.replaceChildren(
+    viewHeader({
+      eyebrow: "Resource visibility",
+      title: "Resources",
+      description: "Freshness-labelled disk and process measurements with explicit bounds and platform support.",
+      actions: [deepScan],
+    }),
+    host,
+  );
+
+  async function load(deep = false) {
+    deepScan.disabled = true;
+    deepScan.textContent = deep ? "Measuring expensive deep sizes…" : "Loading…";
+    try {
+      const payload = await api(`/api/resources${deep ? "?deep=1" : ""}`);
+      if (!viewIsCurrent(token)) return;
+      host.replaceChildren(renderResourcePayload(payload));
+    } finally {
+      if (viewIsCurrent(token)) {
+        deepScan.disabled = false;
+        deepScan.textContent = "Measure deep sizes (expensive, on demand)";
+      }
+    }
+  }
+  deepScan.addEventListener("click", () => void load(true));
+  await load();
+}
+
 // Deliberately plain (atelier-e5x): a route and a table over GET /api/logs. The
 // activity-feed rendering of these same events is atelier-28n's job, and this view
 // exists so the mechanism is inspectable before that lands.
@@ -6657,6 +7074,9 @@ async function renderRoute() {
     else if (route.kind === "group") await renderGroup(route, token);
     else if (route.kind === "styleguide") renderStyleguide(token);
     else if (route.kind === "logs") await renderLogs(route, token);
+    else if (route.kind === "inbox") await renderInbox(route, token);
+    else if (route.kind === "recovery") await renderRecovery(route, token);
+    else if (route.kind === "resources") await renderResources(route, token);
     else if (route.kind === "dispatches") await renderAllDispatches(route, token);
     else renderNotFound();
     if (viewIsCurrent(token)) app.focus({ preventScroll: true });

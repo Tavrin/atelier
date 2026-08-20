@@ -13,6 +13,7 @@ import {
   trackerMode,
 } from "./lib/capabilities.mjs";
 import { agents } from "./lib/agents/index.mjs";
+import { attentionFor, ATTENTION_LIMIT } from "./lib/attention.mjs";
 import {
   createRequestAuth,
   ensureAuthSecret,
@@ -41,6 +42,7 @@ import {
 } from "./lib/http.mjs";
 import { createEventLog, fieldDiff } from "./lib/event-log.mjs";
 import { configDir, stateDir } from "./lib/paths.mjs";
+import { deepRecoveryFor, recoveryFor, RECOVERY_LIMIT } from "./lib/recovery.mjs";
 import {
   addProject,
   projectOwnDispatchProfile,
@@ -64,6 +66,7 @@ import { moveProjectTracker } from "./lib/tracker-move.mjs";
 import { snapshotThemeBundles } from "./lib/themes.mjs";
 import { createBootStamp } from "./lib/version.mjs";
 import { loadFencedReadySnapshot } from "./lib/ready.mjs";
+import { createResourceProjector } from "./lib/resources.mjs";
 import {
   aggregateChronicles,
   CHRONICLE_LIMIT,
@@ -773,6 +776,16 @@ function requirePathlessEditorBody(body) {
   }
 }
 
+function projectionLimit(url, maximum) {
+  const raw = url.searchParams.get("limit");
+  if (raw === null) return undefined;
+  const parsed = Number(raw);
+  if (raw.trim() === "" || !/^\d+$/.test(raw) || !Number.isInteger(parsed) || parsed < 0) {
+    throw new HttpError(400, "limit must be a non-negative integer");
+  }
+  return Math.min(parsed, maximum);
+}
+
 export function createServer({
   registry,
   dispatcher,
@@ -817,6 +830,7 @@ export function createServer({
   });
   const boardEvents = providedBoardEvents ?? createBoardEvents({ registry });
   const eventLog = providedEventLog ?? createEventLog({ stateDir: atelierStateDir });
+  const resourceProjector = createResourceProjector({ stateDir: atelierStateDir });
   const authSecret = ensureAuthSecret(atelierStateDir);
   const requestAuth = createRequestAuth({ directory: atelierStateDir });
   const requestAuthContexts = new WeakMap();
@@ -1474,6 +1488,52 @@ export function createServer({
       }
       if (request.method === "GET" && path === "/api/convoys") {
         jsonResponse(response, 200, dispatcher.listConvoys());
+        return;
+      }
+      if (request.method === "GET" && path === "/api/attention") {
+        // Bounded by construction: the optional limit is clamped to
+        // ATTENTION_LIMIT, including when the caller asks for more.
+        const limit = projectionLimit(url, ATTENTION_LIMIT);
+        jsonResponse(response, 200, attentionFor({
+          records: dispatcher.list(),
+          projects: registry.projects,
+          queues: registry.projects.map((project) => ({
+            project: project.name,
+            queue: dispatcher.getQueue(project.name),
+          })),
+          convoys: dispatcher.listConvoys(),
+        }, limit === undefined ? {} : { limit }));
+        return;
+      }
+      if (request.method === "GET" && path === "/api/recovery") {
+        const limit = projectionLimit(url, RECOVERY_LIMIT);
+        const options = limit === undefined ? {} : { limit };
+        const recovery = recoveryFor({
+          records: dispatcher.list(),
+          projects: registry.projects,
+          convoys: dispatcher.listConvoys(),
+          persistence: dispatcher.persistenceStatus(),
+        }, options);
+        let deep = null;
+        if (url.searchParams.get("deep") === "1") {
+          try {
+            // gc() guards every mutation behind if (!dryRun)
+            // (dispatch.mjs:10443-10452, 10472). The literal is what makes a
+            // dry run safe to reach from a GET; never source it from the request.
+            const gcResult = await dispatcher.gc({ dryRun: true, actor: requestActor(request) });
+            deep = deepRecoveryFor(gcResult, options);
+          } catch (error) {
+            throw dispatchHttpError(error);
+          }
+        }
+        jsonResponse(response, 200, { ...recovery, deep });
+        return;
+      }
+      if (request.method === "GET" && path === "/api/resources") {
+        jsonResponse(response, 200, resourceProjector.measure({
+          records: dispatcher.list(),
+          deep: url.searchParams.get("deep") === "1",
+        }));
         return;
       }
       if (request.method === "GET" && path === "/api/rollup") {
