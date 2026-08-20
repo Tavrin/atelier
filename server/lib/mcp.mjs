@@ -377,6 +377,20 @@ export const MCP_TOOLS = Object.freeze([
     true,
   ),
   tool(
+    "atelier_timeline",
+    "Atelier Timeline",
+    "Read the bounded causal operator timeline, or drill into one dispatch. Links disclose whether they are contained, stored identifiers, exact content identities, non-causal associations, or unknown.",
+    objectSchema({
+      dispatchId: dispatchIdProperty,
+      limit: {
+        type: "integer",
+        minimum: 0,
+        description: "Maximum timeline steps to return; values above 200 are clamped.",
+      },
+    }),
+    true,
+  ),
+  tool(
     "atelier_resources",
     "Atelier Resource Usage",
     "Read bounded and freshness-labelled worktree, process and log measurements. deep performs an expensive on-demand recursive size scan and is false by default.",
@@ -1053,6 +1067,13 @@ async function invokeTool(client, name, args) {
       }));
       const suffix = query.size > 0 ? `?${query}` : "";
       return client.json(`/api/recovery${suffix}`);
+    }
+    case "atelier_timeline": {
+      const query = args.limit === undefined ? "" : `?limit=${args.limit}`;
+      const path = args.dispatchId === undefined
+        ? "/api/timeline"
+        : `/api/timeline/${encoded(args.dispatchId)}`;
+      return client.json(`${path}${query}`);
     }
     case "atelier_resources": {
       return client.json(`/api/resources${args.deep === true ? "?deep=1" : ""}`);

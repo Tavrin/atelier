@@ -29,6 +29,11 @@ import {
   ticketCreationState,
 } from "./ready-projection.mjs";
 import {
+  timelineEvidenceHref,
+  timelineGroups,
+  timelineStageLabel,
+} from "./timeline-view.mjs";
+import {
   applyReviewDispositionEvent,
   applyReviewEvent,
   dismissAvailability,
@@ -872,6 +877,11 @@ function parseRoute(hash = location.hash) {
     if (parts[0] === "logs") return { kind: "logs" };
     if (parts[0] === "inbox") return { kind: "inbox" };
     if (parts[0] === "recovery") return { kind: "recovery" };
+    if (parts[0] === "timeline") {
+      return parts[1]
+        ? { kind: "timeline", id: decodeURIComponent(parts[1]) }
+        : { kind: "timeline" };
+    }
     if (parts[0] === "resources") return { kind: "resources" };
     if (parts[0] === "dispatches") return { kind: "dispatches" };
   } catch {
@@ -888,6 +898,9 @@ function routeHref(route) {
   if (route.kind === "logs") return "#/logs";
   if (route.kind === "inbox") return "#/inbox";
   if (route.kind === "recovery") return "#/recovery";
+  if (route.kind === "timeline") {
+    return route.id ? `#/timeline/${encoded(route.id)}` : "#/timeline";
+  }
   if (route.kind === "resources") return "#/resources";
   return "#/dispatches";
 }
@@ -984,6 +997,11 @@ function renderSidebar() {
       { kind: "recovery" },
       "Recovery Centre",
       (meta) => meta.append(element("span", "", "diagnose and act")),
+    ),
+    navLink(
+      { kind: "timeline" },
+      "Timeline",
+      (meta) => meta.append(element("span", "", "causal record and gaps")),
     ),
     navLink(
       { kind: "resources" },
@@ -6814,6 +6832,134 @@ async function renderRecovery(_route, token) {
   await load();
 }
 
+function renderTimelineStep(item) {
+  const card = element("article", "summary-card projection-card");
+  const heading = element("div", "projection-heading");
+  heading.append(
+    element("h3", "", item.label || String(item.code || "Timeline step")),
+    badge(timelineStageLabel(item.stage)),
+    badge(item.state || "unknown", `projection-severity ${item.state || "unknown"}`),
+  );
+  card.append(heading);
+  const at = item.at || "No timestamp stored";
+  card.append(element("p", "projection-report-only", at));
+
+  if ((item.links || []).length > 0) {
+    const links = element("ul", "projection-reasons");
+    for (const link of item.links) {
+      const row = element("li");
+      row.append(
+        element("strong", "", `${link.relation || "relationship"} [${link.proof || "unknown"}]`),
+        document.createTextNode(` — ${link.detail || "No relationship detail reported."}`),
+      );
+      links.append(row);
+    }
+    card.append(links);
+  }
+
+  const evidence = element("div", "card-actions");
+  for (const descriptor of item.evidence || []) {
+    const href = timelineEvidenceHref(descriptor);
+    if (!href) continue;
+    const link = element("a", "button compact", descriptor.label || descriptor.kind || "Evidence");
+    link.href = href;
+    evidence.append(link);
+  }
+  if (evidence.childElementCount > 0) card.append(evidence);
+
+  if ((item.actions || []).length > 0) {
+    const actions = element("div", "card-actions");
+    for (const action of item.actions) {
+      actions.append(projectionActionLink(
+        action.label || String(action.key || "action").replaceAll("_", " "),
+        item.subject,
+        {},
+      ));
+    }
+    card.append(actions);
+  }
+
+  if ((item.unknown || []).length > 0) {
+    const unknown = element("details", "projection-details");
+    unknown.append(element("summary", "", "Unknown or deliberately unlinked"));
+    const list = element("ul", "projection-reasons");
+    for (const detail of item.unknown) list.append(element("li", "", detail));
+    unknown.append(list);
+    card.append(unknown);
+  }
+  return card;
+}
+
+function renderTimelineCoverage(payload) {
+  const details = element("details", "panel projection-details");
+  details.append(element("summary", "", "Causal coverage and explicit gaps"));
+  const list = element("ul", "projection-reasons");
+  for (const entry of payload.coverage || []) {
+    const row = element("li");
+    row.append(
+      element("strong", "", `${entry.relation || "relationship"} [${entry.proof || "unknown"}]`),
+      document.createTextNode(` — ${entry.detail || "No detail reported."}`),
+    );
+    list.append(row);
+  }
+  details.append(list);
+  return details;
+}
+
+async function renderTimeline(route, token) {
+  const path = route.id
+    ? `/api/timeline/${encoded(route.id)}`
+    : "/api/timeline";
+  const payload = await api(path);
+  if (!viewIsCurrent(token)) return;
+  const fragment = document.createDocumentFragment();
+  fragment.append(viewHeader({
+    eyebrow: "Causal projection",
+    title: route.id ? `Timeline: ${route.id}` : "Operator timeline",
+    description: "Stored identifiers and containment form edges. Associations and unknowns remain visibly non-causal.",
+  }));
+  if (payload.truncated === true) {
+    fragment.append(banner(
+      `Timeline truncated: showing ${payload.items?.length ?? 0} of ${payload.counts?.total ?? "unknown"} steps.`,
+    ));
+  }
+  const groups = timelineGroups(payload);
+  if (route.id) {
+    const steps = element("section", "projection-list");
+    for (const item of groups[0]?.steps || []) steps.append(renderTimelineStep(item));
+    if (steps.childElementCount === 0) {
+      steps.append(element("p", "empty-state", "No timeline steps were reported."));
+    }
+    fragment.append(steps);
+  } else {
+    const list = element("section", "projection-list");
+    for (const group of groups) {
+      const card = element("article", "summary-card projection-card");
+      const heading = element("div", "projection-heading");
+      heading.append(
+        element("h2", "", `dispatch: ${group.id}`),
+        badge(group.state, `projection-severity ${group.state}`),
+      );
+      card.append(
+        heading,
+        element("p", "", `${group.steps.length} projected step${group.steps.length === 1 ? "" : "s"}.`),
+      );
+      const action = element("a", "button compact", "Open timeline");
+      action.href = routeHref({ kind: "timeline", id: group.id });
+      const actions = element("div", "card-actions");
+      actions.append(action);
+      card.append(actions);
+      list.append(card);
+    }
+    if (list.childElementCount === 0) {
+      list.append(element("p", "empty-state", "No dispatch timeline steps were reported."));
+    }
+    fragment.append(list);
+  }
+  fragment.append(renderTimelineCoverage(payload));
+  app.replaceChildren(fragment);
+}
+
 function resourceMeasurementRows(payload) {
   return [
     ["logs.eventLog", payload.logs?.eventLog, 1, true],
@@ -7076,6 +7222,7 @@ async function renderRoute() {
     else if (route.kind === "logs") await renderLogs(route, token);
     else if (route.kind === "inbox") await renderInbox(route, token);
     else if (route.kind === "recovery") await renderRecovery(route, token);
+    else if (route.kind === "timeline") await renderTimeline(route, token);
     else if (route.kind === "resources") await renderResources(route, token);
     else if (route.kind === "dispatches") await renderAllDispatches(route, token);
     else renderNotFound();
