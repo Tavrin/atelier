@@ -45,6 +45,30 @@ if (!Number.isInteger(runs) || runs < 1) {
   process.exit(2);
 }
 
+
+// Pull the failing blocks out of a test stream, rather than trusting a tail.
+// TAP: a "not ok" line plus its indented YAML diagnostic. spec: a "✖" line plus
+// the indented lines under it. Bounded so one pathological failure cannot bury
+// the summary.
+function failureBlocks(output, limit = 6000) {
+  const lines = output.split("\n");
+  const blocks = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!/^not ok \d+ - /.test(line) && !/^\s*✖ /.test(line)) continue;
+    const block = [line];
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const following = lines[next];
+      // Stop at the next test result; keep the indented diagnostic in between.
+      if (/^(not )?ok \d+ - /.test(following) || /^\s*[✔✖] /.test(following)) break;
+      block.push(following);
+      if (block.length > 40) break;
+    }
+    blocks.push(block.join("\n"));
+  }
+  return blocks.join("\n").slice(0, limit);
+}
+
 const attempts = [];
 for (let attempt = 1; attempt <= runs; attempt += 1) {
   const started = Date.now();
@@ -65,11 +89,12 @@ for (let attempt = 1; attempt <= runs; attempt += 1) {
     exitCode: result.status,
     durationMs: Date.now() - started,
     failedTests: [...new Set(failedTests)],
-    // Keep WHY, not just THAT. A rate without the assertion behind it cannot be
-    // diagnosed - especially for a flake that only reproduces on CI, where the
-    // job log is the single opportunity to see it. Failing attempts only, so a
-    // clean run stays readable.
-    ...(passed ? {} : { outputTail: output.slice(-6000) }),
+    // Keep WHY, not just THAT - and keep the RIGHT part. A raw tail is useless
+    // here: for a 1000+ test TAP stream the last few KB are trailing PASSING
+    // tests, and the failing blocks have long scrolled off. Extract the failure
+    // blocks instead. (Found because a peer session asked for gated-lane detail
+    // that this field was supposed to hold and did not.)
+    ...(passed ? {} : { failureDetail: failureBlocks(output) }),
   });
   process.stdout.write(
     `${label} ${attempt}/${runs}: ${passed ? "pass" : "FAIL"}` +
@@ -77,7 +102,10 @@ for (let attempt = 1; attempt <= runs; attempt += 1) {
       "\n",
   );
   if (!passed) {
-    process.stdout.write(`--- ${label} attempt ${attempt} output (tail) ---\n${output.slice(-4000)}\n---\n`);
+    const detail = failureBlocks(output);
+    process.stdout.write(
+      `--- ${label} attempt ${attempt} failure detail ---\n${detail || output.slice(-2000)}\n---\n`,
+    );
   }
 }
 
