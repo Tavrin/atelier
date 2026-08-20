@@ -33,6 +33,7 @@ export const AGENT_UI_CAPABILITY_MANIFEST = Object.freeze([
   capability("atelier_convoys", ["GET /api/convoys"], true),
   capability("atelier_attention", ["GET /api/attention"], true),
   capability("atelier_recovery", ["GET /api/recovery"], true),
+  capability("atelier_timeline", ["GET /api/timeline", "GET /api/timeline/:dispatchId"], true),
   capability("atelier_resources", ["GET /api/resources"], true),
   capability("atelier_ticket_create", ["POST /api/projects/:project/create"], false),
   capability("atelier_ticket_comment", ["POST /api/projects/:project/comment"], false),

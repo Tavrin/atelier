@@ -41,8 +41,14 @@ import {
   textResponse,
 } from "./lib/http.mjs";
 import { createEventLog, fieldDiff } from "./lib/event-log.mjs";
+import { redactText } from "./lib/stream.mjs";
 import { configDir, stateDir } from "./lib/paths.mjs";
-import { deepRecoveryFor, recoveryFor, RECOVERY_LIMIT } from "./lib/recovery.mjs";
+import {
+  deepRecoveryFor,
+  recoveryFor,
+  RECOVERY_LIMIT,
+  redactGcResult,
+} from "./lib/recovery.mjs";
 import {
   addProject,
   projectOwnDispatchProfile,
@@ -64,6 +70,11 @@ import {
 } from "./lib/tracker.mjs";
 import { moveProjectTracker } from "./lib/tracker-move.mjs";
 import { snapshotThemeBundles } from "./lib/themes.mjs";
+import {
+  dispatchTimelineFor,
+  timelineFor,
+  TIMELINE_LIMIT,
+} from "./lib/timeline.mjs";
 import { createBootStamp } from "./lib/version.mjs";
 import { loadFencedReadySnapshot } from "./lib/ready.mjs";
 import { createResourceProjector } from "./lib/resources.mjs";
@@ -101,6 +112,10 @@ const STATIC_ALLOWLIST = new Map([
   [
     "/ready-projection.mjs",
     { fileName: "ready-projection.mjs", contentType: "text/javascript; charset=utf-8" },
+  ],
+  [
+    "/timeline-view.mjs",
+    { fileName: "timeline-view.mjs", contentType: "text/javascript; charset=utf-8" },
   ],
   [
     "/notifications.mjs",
@@ -1027,14 +1042,21 @@ export function createServer({
           throw new HttpError(400, `Unknown doctor GC fields: ${rejected.join(", ")}`);
         }
         try {
-          jsonResponse(response, 200, await dispatcher.gc(dispatchActionContext(request, {
-            ...(postBody.olderThanDays !== undefined
-              ? { olderThanDays: postBody.olderThanDays }
-              : {}),
-            ...(postBody.dryRun !== undefined ? { dryRun: postBody.dryRun } : {}),
-          })));
+          jsonResponse(
+            response,
+            200,
+            redactGcResult(await dispatcher.gc(dispatchActionContext(request, {
+              ...(postBody.olderThanDays !== undefined
+                ? { olderThanDays: postBody.olderThanDays }
+                : {}),
+              ...(postBody.dryRun !== undefined ? { dryRun: postBody.dryRun } : {}),
+            }))),
+          );
         } catch (error) {
-          throw dispatchHttpError(error);
+          throw dispatchHttpError({
+            ...error,
+            message: redactText(error?.message ?? error),
+          });
         }
         return;
       }
@@ -1521,12 +1543,58 @@ export function createServer({
             // (dispatch.mjs:10443-10452, 10472). The literal is what makes a
             // dry run safe to reach from a GET; never source it from the request.
             const gcResult = await dispatcher.gc({ dryRun: true, actor: requestActor(request) });
-            deep = deepRecoveryFor(gcResult, options);
+            deep = deepRecoveryFor(redactGcResult(gcResult), options);
           } catch (error) {
-            throw dispatchHttpError(error);
+            throw dispatchHttpError({
+              ...error,
+              message: redactText(error?.message ?? error),
+            });
           }
         }
         jsonResponse(response, 200, { ...recovery, deep });
+        return;
+      }
+      if (request.method === "GET" && path === "/api/timeline") {
+        const limit = projectionLimit(url, TIMELINE_LIMIT);
+        jsonResponse(response, 200, timelineFor({
+          records: dispatcher.list(),
+          projects: registry.projects,
+          queues: registry.projects.map((project) => ({
+            project: project.name,
+            queue: dispatcher.getQueue(project.name),
+          })),
+          convoys: dispatcher.listConvoys(),
+          persistence: dispatcher.persistenceStatus(),
+        }, limit === undefined ? {} : { limit }));
+        return;
+      }
+      const timelineRoute = path.match(/^\/api\/timeline\/([^/]+)$/);
+      if (request.method === "GET" && timelineRoute) {
+        let dispatchId;
+        try {
+          dispatchId = decodeURIComponent(timelineRoute[1]);
+        } catch (error) {
+          if (error instanceof URIError) throw new HttpError(400, "Malformed timeline dispatch id");
+          throw error;
+        }
+        const records = dispatcher.list();
+        if (!records.some((record) => record?.id === dispatchId)) {
+          throw new HttpError(404, `Unknown dispatch: ${dispatchId}`);
+        }
+        const limit = projectionLimit(url, TIMELINE_LIMIT);
+        jsonResponse(response, 200, dispatchTimelineFor({
+          records,
+          projects: registry.projects,
+          queues: registry.projects.map((project) => ({
+            project: project.name,
+            queue: dispatcher.getQueue(project.name),
+          })),
+          convoys: dispatcher.listConvoys(),
+          persistence: dispatcher.persistenceStatus(),
+        }, {
+          dispatchId,
+          ...(limit === undefined ? {} : { limit }),
+        }));
         return;
       }
       if (request.method === "GET" && path === "/api/resources") {
