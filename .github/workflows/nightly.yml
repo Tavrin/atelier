@@ -29,7 +29,7 @@ on:
       runs:
         description: "Repeats per lane"
         required: false
-        default: "5"
+        default: "10"
 
 permissions:
   contents: read
@@ -39,7 +39,7 @@ env:
 
 jobs:
   repeat-batch:
-    name: batch x${{ github.event.inputs.runs || 5 }} (${{ matrix.lane }}, node ${{ matrix.node-version }})
+    name: batch x${{ github.event.inputs.runs || 10 }} (${{ matrix.lane }}, node ${{ matrix.node-version }})
     strategy:
       fail-fast: false
       matrix:
@@ -69,7 +69,7 @@ jobs:
       - name: Repeat the campaign batch
         shell: bash
         env:
-          RUNS: ${{ github.event.inputs.runs || '5' }}
+          RUNS: ${{ github.event.inputs.runs || '10' }}
         run: |
           set -euo pipefail
           if [ "${{ matrix.lane }}" = "gated" ]; then
@@ -94,7 +94,7 @@ jobs:
           if-no-files-found: warn
 
   repeat-golden:
-    name: golden x${{ github.event.inputs.runs || 5 }}
+    name: golden x${{ github.event.inputs.runs || 10 }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -111,7 +111,7 @@ jobs:
       # shrug.
       - name: Repeat the golden suite
         env:
-          RUNS: ${{ github.event.inputs.runs || '5' }}
+          RUNS: ${{ github.event.inputs.runs || '10' }}
         run: node scripts/flake-rate.mjs --runs "$RUNS" --label golden -- node test-system/run-tests.mjs
       - name: Upload flake report
         if: always()
