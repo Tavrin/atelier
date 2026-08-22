@@ -1,0 +1,74 @@
+{
+  "bytes": 180224,
+  "dry_run": true,
+  "jobs": [
+    {
+      "age_s": 0,
+      "bytes": 65536,
+      "job_id": "1d1d8576-98c5-4ac7-b330-2323828fe600",
+      "launch_artifacts": [
+        "<ABSOLUTE_PATH>/state/launch/1d1d8576-98c5-4ac7-b330-2323828fe600.json",
+        "<ABSOLUTE_PATH>/state/launch/1d1d8576-98c5-4ac7-b330-2323828fe600.out",
+        "<ABSOLUTE_PATH>/state/launch/1d1d8576-98c5-4ac7-b330-2323828fe600.err"
+      ],
+      "path": "<ABSOLUTE_PATH>/state/jobs/1d1d8576-98c5-4ac7-b330-2323828fe600",
+      "state": "died"
+    },
+    {
+      "age_s": 8,
+      "bytes": 28672,
+      "job_id": "a201ec76-2f42-4f4a-8416-d4fceef8b3d2",
+      "launch_artifacts": [
+        "<ABSOLUTE_PATH>/state/launch/a201ec76-2f42-4f4a-8416-d4fceef8b3d2.json",
+        "<ABSOLUTE_PATH>/state/launch/a201ec76-2f42-4f4a-8416-d4fceef8b3d2.out",
+        "<ABSOLUTE_PATH>/state/launch/a201ec76-2f42-4f4a-8416-d4fceef8b3d2.err"
+      ],
+      "path": "<ABSOLUTE_PATH>/state/jobs/a201ec76-2f42-4f4a-8416-d4fceef8b3d2",
+      "state": "dirty"
+    },
+    {
+      "age_s": 8,
+      "bytes": 28672,
+      "job_id": "498941a7-e522-45f0-8cd0-eb3f3882f888",
+      "launch_artifacts": [],
+      "path": "<ABSOLUTE_PATH>/state/jobs/498941a7-e522-45f0-8cd0-eb3f3882f888",
+      "state": "provider_error"
+    },
+    {
+      "age_s": 9,
+      "bytes": 28672,
+      "job_id": "5772e4ba-ee66-44ea-93f2-7fd026012c2c",
+      "launch_artifacts": [],
+      "path": "<ABSOLUTE_PATH>/state/jobs/5772e4ba-ee66-44ea-93f2-7fd026012c2c",
+      "state": "ok"
+    },
+    {
+      "age_s": 9,
+      "bytes": 28672,
+      "job_id": "c721204b-a25e-4075-b26a-62cee26ea163",
+      "launch_artifacts": [],
+      "path": "<ABSOLUTE_PATH>/state/jobs/c721204b-a25e-4075-b26a-62cee26ea163",
+      "state": "provider_error"
+    }
+  ],
+  "orphan_launch_records": [],
+  "protected": [
+    {
+      "job_id": "cde42356-6535-4c52-93ad-18921cca5446",
+      "reason": "awaiting external review",
+      "state": "awaiting_external_review"
+    },
+    {
+      "job_id": "19671455-91a4-419d-9fba-096464777c78",
+      "reason": "awaiting review",
+      "state": "awaiting_review"
+    },
+    {
+      "job_id": "f17e2883-e9c3-4a77-a8f6-5a6c90dd088d",
+      "reason": "awaiting review",
+      "state": "awaiting_review"
+    }
+  ],
+  "sessions": [],
+  "sessions_skipped": []
+}
