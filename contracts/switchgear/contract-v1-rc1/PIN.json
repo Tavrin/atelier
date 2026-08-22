@@ -1,0 +1,88 @@
+{
+  "_what": "Atelier-side pin of the Switchgear contract-v1-rc1 freeze. The files beside this one are a verbatim copy of the frozen corpus; sha256 lets a test prove that.",
+  "contract": "contract-v1-rc1",
+  "source": {
+    "repository": "Tavrin/switchgear",
+    "tag": "contract-v1-rc1",
+    "tag_object": "ff62b59679979a66b62bacc68090d76928de6804",
+    "commit": "7fce0fd836cc55fb2b2fb1aee5bdfebbd3e2b1ab",
+    "tag_verified_against_remote": "2026-08-22"
+  },
+  "atelier_baseline": "fe94036dfd7d4448d96d4edca35e89ca42e7c42a",
+  "component_versions": {
+    "result_schema": {
+      "current": 2,
+      "historical_readable": [
+        1
+      ]
+    },
+    "normalized_events": {
+      "current": 2,
+      "historical_readable": [
+        1
+      ]
+    },
+    "digest_projection": 1,
+    "session_binding": 1,
+    "contract_fixture_pack": 1
+  },
+  "vendored": {
+    "fixture_pack": "adapter-v1-contract-fixtures.v1",
+    "fixture_pack_source_path": "tests/fixtures/adapter-v1-contract-fixtures.v1",
+    "schemas_source_path": "python/switchgear/data/schemas",
+    "file_count": 51,
+    "sha256": {
+      "adapter-v1-contract-fixtures.v1/MANIFEST.json": "3b2cf721d3f292a37f658f7409cd60da7504c5d364ab8d561069628637a3c7a2",
+      "adapter-v1-contract-fixtures.v1/awaiting_external_review/events.v2.jsonl": "39e2608aa58f7a6c29210c3f7e8502474af765951bed548255f047a430cc564b",
+      "adapter-v1-contract-fixtures.v1/awaiting_external_review/jobs-row.json": "b268069727c6b2729c644cd1958b1e5b03da2740fba565b4a6e7709ef2b2fa1b",
+      "adapter-v1-contract-fixtures.v1/awaiting_external_review/logs-digest.json": "dbfdef0bb27a1ae92500d320e1a0c812a5209075485db01aa5b0457606144a35",
+      "adapter-v1-contract-fixtures.v1/awaiting_external_review/logs-normalized.json": "f958784329e86be2580a284041081014cc36176b4923594a0e477bb25a57e32f",
+      "adapter-v1-contract-fixtures.v1/awaiting_external_review/result.json": "b7cecfb513b05cfacb55d67247e41b429942d01da50e51884780119397cb7cba",
+      "adapter-v1-contract-fixtures.v1/awaiting_external_review/runner.json": "9d77965f344df189bd151c2c2542a3b424b63b328f8f9fa9529f701066d8a76e",
+      "adapter-v1-contract-fixtures.v1/crashed_launch_only/jobs-row.json": "0af9ea794c466fbd5dd510344f8150bb40f251d358547bd94d04e1a510f1a3bd",
+      "adapter-v1-contract-fixtures.v1/crashed_launch_only/runner.json": "47e65cc3572f9b6a21b1aeb37e8d738ed4323843b364ef8152f5a95d6b137cb0",
+      "adapter-v1-contract-fixtures.v1/dirty/events.v2.jsonl": "770649ed3cfb1978307d19410f2a31dc62846ecdb44391efbaa88007d19271e7",
+      "adapter-v1-contract-fixtures.v1/dirty/jobs-row.json": "2a340b68d54fa8aa2fa71f04890945db5f80d79d88691b4ce010eb3d2b8cddbe",
+      "adapter-v1-contract-fixtures.v1/dirty/logs-digest.json": "5a4dca4cb71505bcedd9d3b8750e7dd2469b569639cfa9c0b6c44adb7c812be7",
+      "adapter-v1-contract-fixtures.v1/dirty/logs-normalized.json": "ff5b1733421b7126b3bb0c578b7679b01ca1c03423b2dceb1cfd3c4e0a083972",
+      "adapter-v1-contract-fixtures.v1/dirty/result.json": "f4c955c676d262766b8acf2f786f5e3fc92146da3a0ec2578ed2f372d8466ef6",
+      "adapter-v1-contract-fixtures.v1/dirty/runner.json": "66f4e0f4206711fb9b460d88d25d3055cb954d8050a96e5cdf3dcc993fa61a7d",
+      "adapter-v1-contract-fixtures.v1/empty_final_text_with_change/events.v2.jsonl": "3ffccb68783158a5c7d614de7c0de4060aeeef953aa3534593734828889e1129",
+      "adapter-v1-contract-fixtures.v1/empty_final_text_with_change/jobs-row.json": "8252698701084364263bb1f0b3ba46259405e5d7880f12cea990d8084201fb1b",
+      "adapter-v1-contract-fixtures.v1/empty_final_text_with_change/logs-digest.json": "1a221828633b083f92b06a12704d271ac548672f930416302d27b80bf3a8920f",
+      "adapter-v1-contract-fixtures.v1/empty_final_text_with_change/logs-normalized.json": "5d29a5b53774d0900eb3ae4e5870f3f5e956c7a0b1521783cbf34e9b7bae9695",
+      "adapter-v1-contract-fixtures.v1/empty_final_text_with_change/result.json": "0152d96d6669c604236ee3b5209006564e850cc8535b8afe38aa7043930b3b98",
+      "adapter-v1-contract-fixtures.v1/empty_final_text_with_change/runner.json": "cc7ba2fc4ee48fa6ea5e21415389892178d34b4268e58397759abcb5838b0b48",
+      "adapter-v1-contract-fixtures.v1/gc_applied.json": "3369160179bc773f68741c2138467d54a9ebaadfc3fc446e514819cf632f0812",
+      "adapter-v1-contract-fixtures.v1/gc_plan.json": "af71d2fd5d8ab01771fbd0c18b8720bd93d8765de7961617f83a5649d032918c",
+      "adapter-v1-contract-fixtures.v1/legacy_v1/events.v1.jsonl": "ffec1d9b6875f99f011d67a92afaf0f586f233a6055946d3cf66a5b0ca0f0d23",
+      "adapter-v1-contract-fixtures.v1/legacy_v1/jobs-row.json": "d7d0585af24b14ca1d81d7d5d62559b3d6896e7ef77e1ed80407db04750b84d1",
+      "adapter-v1-contract-fixtures.v1/legacy_v1/logs-digest.json": "a315c1890d6f5775a23a0c704c6a35b6eebd145da2836514f6f4134d50d5dca0",
+      "adapter-v1-contract-fixtures.v1/legacy_v1/logs-normalized.json": "94b8cebd5cbd5ec4cea642b6b43f265f69161301e9b1e3f51d7202c9ce8035ba",
+      "adapter-v1-contract-fixtures.v1/legacy_v1/result.json": "7e9c52c12818e836ff01960a7b701bf46b83b2e1f9593e43d362ad4fa0e02238",
+      "adapter-v1-contract-fixtures.v1/legacy_v1/runner.json": "ba94a0f9dc0b64491cb7b06e998230508d551b50f0c8e0ae91798ce7aa9ae43f",
+      "adapter-v1-contract-fixtures.v1/needs_input/events.v2.jsonl": "0041c16623085160cd6301c745149326a6991e699519bde3e2fffe730385d1ae",
+      "adapter-v1-contract-fixtures.v1/needs_input/jobs-row.json": "dc6901b0dd03c9992624520786d4c46db7acaf15e92c7821dc1b79bf45a1dee8",
+      "adapter-v1-contract-fixtures.v1/needs_input/logs-digest.json": "1730e73a036f6e48b5aef26bd30ec6b5c250a5317a76e540f0193580b96000a1",
+      "adapter-v1-contract-fixtures.v1/needs_input/logs-normalized.json": "62cfed7f88a57cb83e37fe37829cb1e9308b5188d0da60cf73f04a863bc649e8",
+      "adapter-v1-contract-fixtures.v1/needs_input/result.json": "a8b3f938cff2e15aa9d906e021e7d2ee33719d9abe20813c8144b84309c7755b",
+      "adapter-v1-contract-fixtures.v1/needs_input/runner.json": "f1bbef817aac00eb97a93b511f5a417d3ef3fb981a1547d58ca29cfe0822cce4",
+      "adapter-v1-contract-fixtures.v1/ok/events.v2.jsonl": "39e2608aa58f7a6c29210c3f7e8502474af765951bed548255f047a430cc564b",
+      "adapter-v1-contract-fixtures.v1/ok/jobs-row.json": "63929f2ed4df40602b10a485c7c630be934cf6d4cd6d8dbf657d352181eba4e8",
+      "adapter-v1-contract-fixtures.v1/ok/logs-digest.json": "1810e104a85eb6aacf370b4e62b09d2713dd088f89ffde04554d99d6f1fe5f25",
+      "adapter-v1-contract-fixtures.v1/ok/logs-normalized.json": "a0281449f0f25d268c980b4d148d567a7510903d7e6b35de9c2d64239185e4f4",
+      "adapter-v1-contract-fixtures.v1/ok/result.json": "a7d7482e981a1b94304bc91f89a29153c9fdcb81b6a9956d258967b28fba5d55",
+      "adapter-v1-contract-fixtures.v1/ok/runner.json": "42ae4d6e15b2b54ae7b495e4f718e0343f766b5d49be548a8234d73dd1c20306",
+      "adapter-v1-contract-fixtures.v1/provider_error/events.v2.jsonl": "3ffccb68783158a5c7d614de7c0de4060aeeef953aa3534593734828889e1129",
+      "adapter-v1-contract-fixtures.v1/provider_error/jobs-row.json": "2dad6e986bbfc22c9aeedcf38288b260e3c6cfa141dfdb37930fa14acd39e884",
+      "adapter-v1-contract-fixtures.v1/provider_error/logs-digest.json": "47dad405d39235fcbefd9af7b63bf1e6d8ec9e2c095734c20cdd319bc51a9749",
+      "adapter-v1-contract-fixtures.v1/provider_error/logs-normalized.json": "bf3847235bb84a9e4c8e628e6fa031ac94c36998e7e1e6ad550431de82f9441f",
+      "adapter-v1-contract-fixtures.v1/provider_error/result.json": "a58340e9a9d51a8b1aaa8b0a4457c151f904f78c83133a4f08649de07fd5b69e",
+      "adapter-v1-contract-fixtures.v1/provider_error/runner.json": "18e56353e158d215bb2197fb49c255b4539926ede63089932c728e68f35de920",
+      "schemas/model.schema.json": "771c55c153c7f3ca0ced26ae8d246755ce4f91ae6e459f7e9ab2dd7d14854ac5",
+      "schemas/result-v1.schema.json": "38adde32620d08046d04749dd1a70e126d6ab392e797908d2fb369e77f1113ab",
+      "schemas/result.schema.json": "5957f810e47f0a9743934c039d7eef2803ff2f35b9921113a8ae6698618cbac1",
+      "schemas/session-binding.schema.json": "3c5e0aa00974f46bfd72053d4ace70c3715316770506dc1af989f3de20fe05df"
+    }
+  }
+}

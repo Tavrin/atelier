@@ -1,0 +1,458 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Job result v1 (historical)",
+  "type": "object",
+  "required": [
+    "job_id",
+    "status",
+    "mode",
+    "role",
+    "model",
+    "dir",
+    "exit",
+    "started",
+    "generation"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Historical v1 record. The field may be absent on records that predate explicit versioning."
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "correlation": {
+      "type": "object",
+      "description": "the caller's own identifiers, exactly as supplied on the envelope. Never interpreted by Switchgear.",
+      "maxProperties": 16,
+      "propertyNames": {
+        "maxLength": 64
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 512
+      }
+    },
+    "security": {
+      "type": "object",
+      "description": "containment ACTUALLY realized for this job, read back off the constructed sandbox argv and the capability probe -- not the requested policy. A caller states a requirement and tests it against this.",
+      "additionalProperties": false,
+      "required": [
+        "containment",
+        "identity",
+        "credential",
+        "network"
+      ],
+      "properties": {
+        "containment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mount_namespace": {
+              "type": "boolean"
+            },
+            "pid_namespace": {
+              "type": "boolean"
+            },
+            "ipc_namespace": {
+              "type": "boolean"
+            },
+            "uts_namespace": {
+              "type": "boolean"
+            },
+            "network_namespace": {
+              "type": "boolean"
+            }
+          }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "uid_boundary": {
+              "type": "string",
+              "enum": [
+                "subuid",
+                "same-user"
+              ]
+            },
+            "payload_uid": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        },
+        "credential": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "posture": {
+              "type": "string",
+              "enum": [
+                "brokered",
+                "in-sandbox-access-token",
+                "none"
+              ]
+            },
+            "enters_worker": {
+              "type": "boolean"
+            }
+          }
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "broker_only": {
+              "type": "boolean"
+            },
+            "direct": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "status": {
+      "type": "string",
+      "description": "the single outcome word, DERIVED from execution/integrity/change/acceptance. Kept as the primary field; see those four for the facts behind it.",
+      "enum": [
+        "ok",
+        "dirty",
+        "timeout",
+        "provider_error",
+        "awaiting_review",
+        "awaiting_external_review"
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "description": "did the process do its work? Independent of tree integrity and of acceptance.",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "provider_error",
+            "timeout"
+          ]
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "description": "is there a frozen delta from this job? `none` for a readonly job, which produces an answer rather than a change.",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "none",
+            "frozen"
+          ]
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "description": "has anything accepted this job's change? `not_required` for readonly. Switchgear's own gate only; a caller's project review and merge decision are not this field.",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "not_required",
+            "awaiting_review",
+            "accepted",
+            "awaiting_external_review"
+          ]
+        }
+      }
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "readonly",
+        "bounded-write"
+      ]
+    },
+    "role": {
+      "type": "string"
+    },
+    "model": {
+      "$ref": "model.schema.json"
+    },
+    "dir": {
+      "type": "string"
+    },
+    "exit": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "started": {
+      "type": "string"
+    },
+    "finished": {
+      "type": "string"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "integrity": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "dirty"
+          ],
+          "description": "the verdict over the digests below, so a caller need not recompute what this job already decided"
+        },
+        "git_identity_before": {
+          "type": "string"
+        },
+        "git_identity_after": {
+          "type": "string"
+        },
+        "tree_before": {
+          "type": "string"
+        },
+        "tree_after": {
+          "type": "string"
+        },
+        "identity_changed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "freeze": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the provider's own stdout, byte for byte. Forensic evidence, not a contract: its shape is whichever agent CLI ran."
+        },
+        "events_normalized": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the same run in Switchgear's provider-neutral vocabulary, one JSON object per line, each carrying `v`. This is the stream to consume. Null means it could not be written -- recompute with `logs --format normalized`."
+        },
+        "events_normalized_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "contract version of events_normalized"
+        }
+      },
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "review": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "process": {
+      "type": "object",
+      "properties": {
+        "pid": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      }
+    },
+    "policy_digest": {
+      "type": "string"
+    },
+    "profile_digest": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    },
+    "lease_uuid": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_calls": {
+      "type": "object",
+      "properties": {
+        "forwarded": {
+          "type": "integer"
+        },
+        "denied": {
+          "type": "integer"
+        },
+        "denied_detail": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "transport": {
+          "type": "integer"
+        }
+      }
+    },
+    "cost_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Measured cost of this job in USD, summed from the provider's own per-step figures. Not an estimate."
+    },
+    "resumed": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "from_job": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "description": "Set when this job continued a prior provider session. A resumed job is new work with its own evidence, but its model already held context from the named job."
+    },
+    "review_of": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The subject job this review was of, recorded on the REVIEWER's record before promotion is attempted. Without it an unpromoted review chain is invisible to retention."
+    },
+    "effort": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "reasoning-effort value sent to the provider, null if none"
+    },
+    "secrets_suspected": {
+      "type": "array",
+      "description": "advisory findings: worker output matched a secret-shaped pattern. Never contains the matched value. Does not affect status.",
+      "items": {
+        "type": "object",
+        "required": [
+          "pattern",
+          "where",
+          "count"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string"
+          },
+          "where": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "queued_s": {
+      "type": "number",
+      "description": "seconds spent waiting for a concurrency slot (0 when unlimited)"
+    },
+    "harness": {
+      "type": "string",
+      "description": "the agent CLI that ran this job -- claude, codex, grok, opencode. Distinct from model.provider, which names the POOL that served the model. Prefer this over the `provider` alias below."
+    },
+    "provider": {
+      "type": "string",
+      "description": "alias of `harness`, kept for callers written before the noun was settled. Same value, always."
+    },
+    "agent_directed_content": {
+      "type": "array",
+      "description": "advisory: content in this job's stream is shaped like instructions addressed at an agent. Blocks automatic promotion at the gate.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "spend_unrecorded": {
+      "type": "string",
+      "description": "set when this job's cost could not be appended to the ledger; the daily budget is under-counting by this job"
+    },
+    "delegation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "what this job's worker asked its in-sandbox delegation socket for, and what it was refused. Null when delegation was not enabled.",
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "denied_detail": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
