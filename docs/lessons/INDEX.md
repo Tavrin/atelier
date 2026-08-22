@@ -7,7 +7,7 @@
 - (moss) br-state-is-per-checkout — worktree agents' br writes strand in the worktree's own `.beads`; run br against the configured tracker directory (the PRIMARY checkout by default)
 - (moss) green-checks-that-cannot-see-the-failure — a check that structurally cannot see the failure is not evidence (bind-mounted container verify reflects the PRIMARY, not the worktree - hence advisory verifyMode)
 - (moss) non-isolated-agents-clobber-worktree — fan-out agents sharing a tree can revert uncommitted edits; isolate, re-check git status after
-- ungated-chains-mask-red-tests — test steps must gate chains on their OWN exit code; `| grep` gates on grep; canonical suite command is `node --test` from the root
+- ungated-chains-mask-red-tests — test steps must gate chains on their OWN exit code; `| grep` gates on grep; canonical suite command is `npm test` (NEVER bare `node --test`, which hangs)
 - shared-contract-files-during-parallel-writers — a concurrent job owns the test file? satisfy the old contract, queue the rename; never race a shared file
 - allowedtools-preapproves-not-restricts — claude -p --allowedTools only pre-approves; enforce restrictions with --disallowedTools (caught in V3-4 verification)
 - close-resources-before-server-close — `server.close()` waits for active SSE sockets, so end streams and watchers before awaiting `close` or shutdown deadlocks
@@ -22,3 +22,4 @@
 - [commit-before-falsifying](commit-before-falsifying.md) — fails-on-old reverts on uncommitted work: git checkout silently eats the fix; commit first (atelier-9dt round 2)
 - [a-list-driven-invariant-exempts-whatever-is-stored-differently](a-list-driven-invariant-exempts-whatever-is-stored-differently.md) — a rule enforced by iterating a list of field-name pairs cannot see a member persisted in a different shape; give the entries accessors so odd members JOIN the vocabulary, and prove completeness by asserting at the choke point (atelier-kaz: the post-merge fence sat outside FENCING_FIELDS through three review rounds)
 - [contract-output-parsing-precedes-display-truncation](contract-output-parsing-precedes-display-truncation.md) — parse machine-significant verdicts and findings from the complete captured agent result before deriving any bounded display summary
+- [unattacked-instruments-report-what-you-hoped](unattacked-instruments-report-what-you-hoped.md) — a test/harness/report nothing has attacked tells you what you hoped; break the guarded thing and require red before citing it as evidence (six instances in one campaign, incl. a contract test green through 14 of 25 mutations)
