@@ -313,8 +313,8 @@ describe("switchgear contract-v1-rc1 pin: provenance", () => {
     assert.equal(PIN.contract, "contract-v1-rc1");
     assert.equal(PIN.source.repository, "Tavrin/switchgear");
     assert.equal(PIN.source.tag, "contract-v1-rc1");
-    assert.equal(PIN.source.tag_object, "ff62b59679979a66b62bacc68090d76928de6804");
-    assert.equal(PIN.source.commit, "7fce0fd836cc55fb2b2fb1aee5bdfebbd3e2b1ab");
+    assert.equal(PIN.source.tag_object, "2f71dd076e7bbbfe2cbaffbb1ec62a00590b205f");
+    assert.equal(PIN.source.commit, "ef34954a60236545295c6bf7101066a3c2c47998");
     assert.deepEqual(PIN.component_versions, {
       result_schema: { current: 2, historical_readable: [1] },
       normalized_events: { current: 2, historical_readable: [1] },

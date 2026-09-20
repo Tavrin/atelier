@@ -17,10 +17,10 @@ of its foundation.
 |---|---|
 | Repository | `Tavrin/switchgear` |
 | Tag | `contract-v1-rc1` |
-| Tag object | `ff62b59679979a66b62bacc68090d76928de6804` (annotated) |
-| Peeled commit | `7fce0fd836cc55fb2b2fb1aee5bdfebbd3e2b1ab` |
-| Verified against the remote | 2026-08-22, via `git ls-remote origin 'refs/tags/contract-v1-rc1*'` |
-| Atelier baseline | `fe94036dfd7d4448d96d4edca35e89ca42e7c42a` |
+| Tag object | `2f71dd076e7bbbfe2cbaffbb1ec62a00590b205f` (annotated) |
+| Peeled commit | `ef34954a60236545295c6bf7101066a3c2c47998` |
+| Verified against the remote | 2026-09-20 (rewritten history; originally 2026-08-22), via `git ls-remote origin 'refs/tags/contract-v1-rc1*'` |
+| Atelier baseline | `c73f812ead7cc9bf1e245e95ba02d6faccb6055a` |
 
 Component versions, which are **separate axes** from the `contract-v1` name — there is no
 requirement that the numbers match, and none is implied:

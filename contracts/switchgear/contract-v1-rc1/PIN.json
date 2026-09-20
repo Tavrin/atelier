@@ -4,11 +4,11 @@
   "source": {
     "repository": "Tavrin/switchgear",
     "tag": "contract-v1-rc1",
-    "tag_object": "ff62b59679979a66b62bacc68090d76928de6804",
-    "commit": "7fce0fd836cc55fb2b2fb1aee5bdfebbd3e2b1ab",
+    "tag_object": "2f71dd076e7bbbfe2cbaffbb1ec62a00590b205f",
+    "commit": "ef34954a60236545295c6bf7101066a3c2c47998",
     "tag_verified_against_remote": "2026-08-22"
   },
-  "atelier_baseline": "fe94036dfd7d4448d96d4edca35e89ca42e7c42a",
+  "atelier_baseline": "c73f812ead7cc9bf1e245e95ba02d6faccb6055a",
   "component_versions": {
     "result_schema": {
       "current": 2,
