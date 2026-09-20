@@ -2,12 +2,8 @@
 
 ## Reporting a vulnerability
 
-Email **etienne.doux.pro@gmail.com**. Please do not open a public issue for a
-security problem.
-
-If GitHub's private vulnerability reporting is enabled on this repository, the
-**Report a vulnerability** button under the Security tab works too — but email
-is the channel that is always available.
+Please report privately, not as a public issue: open a
+[GitHub security advisory](https://github.com/Tavrin/atelier/security/advisories/new).
 
 Before reporting, it is worth reading the threat model below and the execution
 confinement section of [docs/SECURITY.md](docs/SECURITY.md) — several things that
