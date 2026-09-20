@@ -60,6 +60,14 @@ Design record: docs/ARCHITECTURE.md. Registry: ~/.config/atelier/projects.json.
   leaves the rest. Neither is a guarantee of absence; new observed formats go
   into the shared patterns, and no doc may promise more than a denylist does.
 
+- **This repository is public; planning material is not.** Specs, lane briefs,
+  review reports and audit bundles live in the private `atelier-internal`
+  repository, checked out locally and reached through the gitignored `specs/`
+  symlink. Never commit them here, never commit a Moss build
+  (`themes/cozy-village/vendor/moss-web-renderer/`), and never commit a path
+  from your own home directory. `test-system/public-hygiene.test.mjs` fails
+  the batch on any of the three.
+
 ## Working here
 
 - Tracker: an Atelier-owned tracker outside the repo (`br ready` /

@@ -3,7 +3,7 @@
 This directory is Atelier's frozen copy of Switchgear's first externally consumable
 execution contract. It exists so that Atelier's consumer expectations are testable in
 Atelier's own CI, hermetically, with no Switchgear checkout, no state root, no provider
-execution and no network — the arrangement `specs/PROGRAM-2026-08-20.md` §10 requires
+execution and no network — the arrangement the 2026-08-20 integration program requires
 ("contract tests with Switchgear are FIXTURES generated from recorded real records — no
 live SG in Atelier CI, no Atelier in SG CI; each repo pins the other's fixture set
 version").

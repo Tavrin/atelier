@@ -232,8 +232,10 @@ aware that:
 - Secret redaction is a best-effort pattern denylist, not a guarantee. Treat
   dispatch records, the event log, and UI output as sensitive.
 - macOS is unverified; Windows support is written for but not verified end to end.
-- The `cozy-village` theme's optional Moss WebGPU renderer is a preview build
-  and is opt-in; the default renderer is three.js.
+- The `cozy-village` theme's optional Moss WebGPU renderer is not bundled: Moss
+  is not yet public, so `?engine=moss` only works with a locally built
+  `@moss/web-renderer` dropped into the gitignored
+  `themes/cozy-village/vendor/moss-web-renderer/`. The default renderer is three.js.
 - The API surface may still change between versions.
 
 ## Documentation
@@ -268,12 +270,10 @@ Security issues go through [private reporting](SECURITY.md), not public issues.
 
 [MIT](LICENSE).
 
-The `cozy-village` theme vendors two MIT-licensed libraries in-repo, frozen.
-The preview build of the Moss web renderer — a WebGPU engine by the same author,
-which is **not currently public**, so that vendored copy cannot be checked
-against its upstream source — carries its MIT license verbatim and a `VENDOR.md`
-recording provenance and hashes, including an explicit note about which formal
-package evidence was not regenerated. [three.js](https://threejs.org) is frozen
-at the revision named in its file header and carries its SPDX license header, but
-has no adjacent provenance or SHA-256 manifest; adding one is a welcome
-contribution.
+The `cozy-village` theme vendors [three.js](https://threejs.org) in-repo, frozen
+at the revision named in its file header, carrying its SPDX license header; it
+has no adjacent provenance or SHA-256 manifest, and adding one is a welcome
+contribution. The optional Moss web renderer — a WebGPU engine by the same
+author, not yet public — is deliberately **not** vendored here; the adapter
+under `themes/cozy-village/world/engines/` expects a local build at the
+gitignored path named above.
