@@ -1,12 +1,12 @@
 # Lessons Index — known traps, one line each
 
 > Skim before working the matching area; open a lesson only on a match.
-> Format: copy `_TEMPLATE.md`. Inherited founding lessons from the Moss
-> harness (full files live there; summaries here are load-bearing):
+> Format: copy `_TEMPLATE.md`. Founding lessons inherited from the project
+> that birthed this tool (summaries here are load-bearing):
 
-- (moss) br-state-is-per-checkout — worktree agents' br writes strand in the worktree's own `.beads`; run br against the configured tracker directory (the PRIMARY checkout by default)
-- (moss) green-checks-that-cannot-see-the-failure — a check that structurally cannot see the failure is not evidence (bind-mounted container verify reflects the PRIMARY, not the worktree - hence advisory verifyMode)
-- (moss) non-isolated-agents-clobber-worktree — fan-out agents sharing a tree can revert uncommitted edits; isolate, re-check git status after
+- (inherited) br-state-is-per-checkout — worktree agents' br writes strand in the worktree's own `.beads`; run br against the configured tracker directory (the PRIMARY checkout by default)
+- (inherited) green-checks-that-cannot-see-the-failure — a check that structurally cannot see the failure is not evidence (bind-mounted container verify reflects the PRIMARY, not the worktree - hence advisory verifyMode)
+- (inherited) non-isolated-agents-clobber-worktree — fan-out agents sharing a tree can revert uncommitted edits; isolate, re-check git status after
 - ungated-chains-mask-red-tests — test steps must gate chains on their OWN exit code; `| grep` gates on grep; canonical suite command is `npm test` (NEVER bare `node --test`, which hangs)
 - shared-contract-files-during-parallel-writers — a concurrent job owns the test file? satisfy the old contract, queue the rename; never race a shared file
 - allowedtools-preapproves-not-restricts — claude -p --allowedTools only pre-approves; enforce restrictions with --disallowedTools (caught in V3-4 verification)

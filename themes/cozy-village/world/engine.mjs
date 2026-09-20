@@ -1,6 +1,6 @@
 /**
- * ENGINE REGISTRY — the renderer-factory/engine-registry seam RFC 053 §10.1
- * asks for (moss-web-renderer-requirements §0). `entry.mjs` used to import
+ * ENGINE REGISTRY — the renderer-factory/engine-registry seam the embed
+ * contract asks for. `entry.mjs` used to import
  * `createRenderer` and `createWorld` directly and wire them together itself;
  * that wiring is now behind one seam so a second engine can sit beside it
  * without `entry.mjs` knowing which one is live.
@@ -16,8 +16,8 @@
  * 'three' is the default and the only production path — a pass-through to
  * the existing `renderer.mjs` + `world.mjs`, byte-for-byte unchanged. 'moss'
  * is opt-in only (`?engine=moss` or `context.engine === "moss"`) and MVP-
- * scoped; see docs/design/moss-web-embed-requirements.md for the capability
- * gaps this MVP accepts (no shadows/GI/bloom/sky-sphere-texture yet).
+ * scoped; the MVP accepts known capability gaps (no shadows/GI/bloom/
+ * sky-sphere-texture yet).
  *
  * TIMING CONTRACT — the default path must reproduce, byte-for-byte, the
  * pre-seam sequencing `entry.mjs` used to own directly: `await

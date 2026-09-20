@@ -22,7 +22,7 @@ contract is mostly a formalization, not an invention.
    deep integration reachable with minimal risk.
 4. **Core stays zero-dep; theme bundles are self-contained** and may ship
    their own dependencies (three.js sanctioned). 3D themes render through a
-   scene-adapter seam (§8) for future Moss-WebGPU interchangeability.
+   scene-adapter seam (§8) for future WebGPU-renderer interchangeability.
 5. **Progression never gates capability.** Delight layers (gamification
    dial, audio layers) are per-user opt-ins (§9).
 
@@ -148,11 +148,11 @@ Command palette: core-provided, always available, themes may summon it.
 Theme world-state = plain JS objects derived from §3/§4 (no renderer types
 in state). 3D themes talk to a thin scene interface (create/update/remove
 node, transform, material-key, animation-clip-key) implemented today by
-three.js, later by the Moss WebGPU web renderer — Atelier worlds double as
-its test bed. Renderer policy (maintainer, 2026-07-30): bake-off prototypes =
+three.js, later by a WebGPU web renderer — Atelier worlds double as its
+test bed. Renderer policy (maintainer, 2026-07-30): bake-off prototypes =
 WebGL (three.js default, compatibility/velocity); the FLAGSHIP build
 targets three.js WebGPURenderer with WebGL fallback, keeping the pipeline
-adjacent to Moss's WebGPU output from the first real slice. Manifest
+adjacent to that renderer's WebGPU output from the first real slice. Manifest
 adapter values: `2d | webgl | webgpu | moss-webgpu`. **EMPIRICAL**: the interface's exact shape is extracted from
 the 8 heroes' scene code (what they all actually needed).
 

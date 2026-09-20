@@ -5,7 +5,7 @@
 > hierarchy the system already runs. Descriptive, not normative: the contracts
 > live in [ARCHITECTURE.md](ARCHITECTURE.md) and the event-bus spec; this page
 > makes them legible in the current loop-engineering language. Source analysis:
-> the 2026-08-02 loop/graph-engineering survey (Moss research notes).
+> an internal 2026-08 loop/graph-engineering survey.
 
 ## The dispatch cycle as a five-field loop
 

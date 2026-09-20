@@ -26,4 +26,4 @@ in this trap rather than a different one.
 
 <!-- Keep the body ≤ ~30 lines. On recurrence, append a dated note instead of
      writing a duplicate lesson — recurrence is a promotion signal (see the
-     moss-compound skill). Delete this file when its code path dies. -->
+     compound step). Delete this file when its code path dies. -->

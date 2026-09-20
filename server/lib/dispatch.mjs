@@ -6019,7 +6019,7 @@ export function createDispatcher({
     // .beads change relative to the worktree's own checkout, uncommitted or
     // committed on the dispatch branch. Comparing file bytes against the
     // primary's working tree false-positives whenever the primary sits on a
-    // different branch than the dispatch base (caught live on moss).
+    // different branch than the dispatch base (caught live on a consuming project).
     const worktree = entry.record.worktreePath;
     const uncommitted = (
       await commandRunner("git", ["-C", worktree, "status", "--porcelain", "--", ".beads"])

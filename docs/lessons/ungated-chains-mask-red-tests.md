@@ -5,8 +5,8 @@ root-cause: `cmd | grep pattern && commit` gates on grep finding output lines, n
 prevention: Test steps must gate the chain on THEIR exit code (run separately or use pipefail + explicit rc capture); re-verify any verifier claim about tool behavior by execution BEFORE destructive action; canonical test command here is `npm test` (scripts/test-batch.mjs, the exact batch CI gates on) - NEVER bare `node --test`, which discovers the browser suites and HANGS rather than failing
 date: 2026-07-21
 ---
-Recurrence of the masked-exit-code class (Moss: commitlint-formatting-traps,
-piped git commit). Caught within minutes by re-reading the chain output;
+Recurrence of the masked-exit-code class (previously seen as commitlint
+formatting traps and a piped git commit). Caught within minutes by re-reading the chain output;
 commit amended, AGENTS.md verify line corrected.
 
 2026-08-22: the prevention line above still prescribed bare `node --test` long

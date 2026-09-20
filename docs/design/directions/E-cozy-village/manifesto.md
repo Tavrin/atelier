@@ -232,7 +232,7 @@ without changing OS settings.
 
 **Architecture** — `village.state.js` is pure: no DOM, no three.js, no imports. It turns
 Atelier records into a semantic village ("this plot is framed and unlit"). `village.world.js`
-is the only file containing a three.js call and owns all geometry. A Moss WebGPU adapter
+is the only file containing a three.js call and owns all geometry. A WebGPU adapter
 replaces the second file and touches nothing in the first.
 
 ---
@@ -242,7 +242,7 @@ replaces the second file and touches nothing in the first.
 - **60 fps is not measured.** The scene's *workload* is light and known: **398 draw calls,
   ~28k triangles**, three lights, one 2048² shadow map, Lambert only, no post-processing,
   and a **CPU scene update of 0.01 ms/frame** (measured). Draw calls were cut 644 → 398 by
-  a merge-by-material pass. But wall-clock fps could not be measured on this box: the
+  a merge-by-material pass. But wall-clock fps could not be measured in that setup: the
   automation tab is permanently `visibilityState:"hidden"` so `requestAnimationFrame`
   never fires, and headless Chrome **hangs on WebGL2 context creation**. Both paths are
   closed. Treat 60 fps as *expected from workload*, not as verified.

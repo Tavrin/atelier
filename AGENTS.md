@@ -44,7 +44,7 @@ Design record: docs/ARCHITECTURE.md. Registry: ~/.config/atelier/projects.json.
   selected tracker-only folder outside XDG is also Atelier-owned.
 - **Dispatches never touch primary checkouts.** Worktree per dispatch, based
   on a clean ref. Respect per-project `warn` fields (forbidden commands).
-- **Agent/UI parity (the Moss principle).** AI agents get the working
+- **Agent/UI parity.** AI agents get the working
   surface, including ordinary gated merge - oversight is alerts, audit
   trails, and gates that bind everyone equally (budget, verify, attestation),
   NEVER asymmetry in ordinary capability. Consequential tools carry honest
@@ -63,8 +63,8 @@ Design record: docs/ARCHITECTURE.md. Registry: ~/.config/atelier/projects.json.
 - **This repository is public; planning material is not.** Specs, lane briefs,
   review reports and audit bundles live in the private `atelier-internal`
   repository, checked out locally and reached through the gitignored `specs/`
-  symlink. Never commit them here, never commit a Moss build
-  (`themes/cozy-village/vendor/moss-web-renderer/`), and never commit a path
+  symlink. Never commit them here, never commit the unpublished renderer
+  package (`themes/cozy-village/vendor/moss-web-renderer/`), and never commit a path
   from your own home directory. `test-system/public-hygiene.test.mjs` fails
   the batch on any of the three.
 
@@ -81,4 +81,4 @@ Design record: docs/ARCHITECTURE.md. Registry: ~/.config/atelier/projects.json.
   handling, exec, or dispatch surfaces. Some dispatch tests need `claude` and
   `br` on PATH (CI installs stubs; the repo ships none).
 - Lessons: durable traps go to docs/lessons/ (one-line INDEX entry, payload
-  in the file) - same compound loop as the Moss repo that birthed this tool.
+  in the file) - the same compound loop as the project that birthed this tool.

@@ -1,13 +1,12 @@
 /**
  * COZY VILLAGE — Moss-backed world, MVP scope.
  *
- * Structural parity per RFC 053 §7.1's floor, not the §7.2 upgrade gate: all
+ * Structural parity at the embed contract's floor, not its upgrade gate: all
  * seven stations present, signs readable, picking works, day/night light
  * DIRECTION correct, no black/missing materials, clean mount/unmount. Flat-
  * shaded and direct-lit — no shadows, GI, bloom, or a textured sky sphere,
- * because the vendored preview build fails those closed (see
- * ../../vendor/moss-web-renderer/VENDOR.md and
- * docs/design/moss-web-embed-requirements.md for the accepted gap list).
+ * because the preview build of the renderer fails those closed (an accepted
+ * MVP gap list).
  *
  * ARCHITECTURE NOTE — why this file imports THREE at all: `../geometry.mjs`
  * builds every non-box shape (roofs, posts, lathe figures, windows, the
@@ -372,7 +371,7 @@ export async function mountMossWorld({ canvas, signal } = {}) {
        lettering never washes out under the tone-mapping curve) is NOT built
        in this preview: "a visible material with toneMapped:false fails frame
        submission with required-feature-missing" per the vendored README.
-       Recorded as an accepted MVP gap (docs/design/moss-web-embed-requirements.md)
+       Recorded as an accepted MVP gap
        rather than worked around — the sign goes through the same
        neutral-stylized tone mapping as everything else. */
     const signMaterial = scene.createMaterial({

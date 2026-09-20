@@ -216,8 +216,8 @@ operator, outside Atelier's authority claims and audit guarantees.
   - `warn` - forbidden-commands banner, injected into dispatch prompts.
   - `dispatchEnv` - non-secret environment variables added to the Claude,
     Codex, and worktree-verify processes. Project values override
-    `defaults.dispatchProfile.dispatchEnv` key by key. For example, Moss can
-    share its build cache with:
+    `defaults.dispatchProfile.dispatchEnv` key by key. For example, a Rust
+    project can share its build cache with:
 
     ```json
     "dispatchEnv": {"CARGO_TARGET_DIR": "/home/<user>/.cache/atelier/cargo/moss"}

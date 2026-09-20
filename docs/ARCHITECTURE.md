@@ -1,8 +1,8 @@
 # Atelier Architecture
 
 One zero-dependency node process serving a loopback web cockpit + a CLI,
-over N registered project repos. Born from the Moss "moss-board" seed after
-a bake-off against Vibe Kanban (verdict: absorb VK's UX traits, keep our
+over N registered project repos. Born from an in-repo agent-board prototype
+after a bake-off against Vibe Kanban (verdict: absorb VK's UX traits, keep our
 structural advantages - single tracker store, per-repo permission posture,
 exact cost, headless parity, no cloud).
 
@@ -416,7 +416,8 @@ schemes:
 | `postMerge.pid`/`postMerge.pidIdentity` | the post-merge verification runner | `merge()` |
 
 The last two are atelier-yqk/atelier-kaz. A verification suite is often the heaviest
-thing on the box (`cargo nextest` on Moss: minutes of CPU and a real GPU lease),
+thing on the machine (a large Rust workspace's test suite: minutes of CPU and an
+exclusive GPU),
 so a crash mid-verification used to orphan it with no boot coverage at all -
 the record healed honestly while the process ran on invisibly. The post-merge
 pair existed but sat *outside* the vocabulary: invisible to `hasFencingPid`, with
